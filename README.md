@@ -584,9 +584,9 @@ Edit `config.sh` in the module directory, or place a persistent override at
 - **`uninstall.sh`**: clean removal without touching AFWall artefacts
 - **`config.sh`**: user-tunable settings that survive module updates
 
-### v1.3 (original upstream)
+### v1.3 — Legacy (original upstream)
 
-Legacy: automatic deletion of `afwallstart` from
+Automatic deletion of `afwallstart` from
 `/data/adb/post-fs-data.d/` and `/data/adb/system.d/`.
 
 ### v1.2 — Legacy
