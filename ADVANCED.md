@@ -233,6 +233,174 @@ iptables -S INPUT   | grep afwall
 
 ---
 
+## Installer Config Selection
+
+The module provides a complete installer-time and post-install configuration
+system.  All module options can be selected during installation using volume
+keys, or changed afterwards without reflashing.
+
+### How it works
+
+The shared logic lives in `bin/installer_config.sh`.  It is sourced by both
+the installation script (`common/install.sh`) and the reconfiguration tool
+(`reconfigure.sh`), so prompt behaviour and defaults are always identical in
+both contexts.
+
+### Fallback priority
+
+When multiple config sources are available, the following priority applies
+(highest first):
+
+1. **Pre-seeded `installer.cfg`** — place a file at
+   `/data/adb/AFWall-Boot-AntiLeak/installer.cfg` before installing; the
+   installer reads it and skips interactive prompts entirely.
+2. **Existing persistent config** (upgrade path) — if a config already exists
+   at `/data/adb/AFWall-Boot-AntiLeak/config.sh`, the installer reads its
+   values and offers to keep or reconfigure them.
+3. **Interactive volume-key selection** — if `getevent` is available and
+   usable, the user is prompted via volume keys.
+4. **Safe defaults** — the `standard` profile is applied; no user input
+   required.
+
+The installer prints which source it is using so the user can verify.
+
+### Interactive selection
+
+Volume key interaction requires `getevent` to be available.  The installer
+probes with a 1-second test run before offering key prompts.  If the probe
+fails, the installer falls back silently to the next priority level.
+
+**Interaction model:**
+- `VOL+` = **select** the currently displayed option
+- `VOL-` = **advance** to the next option (enum) or choose NO (bool)
+- Timeout (10 s) = use the **default** shown in the prompt
+
+**Profile selection** (first prompt, enum cycle):
+
+```
+  [1/4] standard (default)  → VOL+ to select, VOL- for next
+  [2/4] minimal             → VOL+ to select, VOL- for next
+  [3/4] strict              → VOL+ to select, VOL- for next
+  [4/4] custom              → VOL+ to select (then individual prompts follow)
+```
+
+After all options are cycled without a VOL+ press, the default (`standard`) is
+used.
+
+**Boolean prompts** (used in `custom` mode):
+
+```
+  Enable FORWARD chain block? (protects tethering/hotspot clients)
+  VOL+: YES   VOL-: NO   (10s → YES)
+```
+
+### Protection profiles
+
+| Profile | Description |
+|---|---|
+| `standard` | Full protection, all defaults. Recommended for most users. |
+| `minimal` | iptables hard block only; lower-layer suppression disabled (`LOWLEVEL_MODE=off`). Use if you need to avoid interface/service manipulation. |
+| `strict` | Maximum protection: lower-layer in `strict` mode, INPUT block enabled, Bluetooth management enabled. |
+| `custom` | Walk through each option individually; current/existing values used as defaults. |
+
+### Config persistence
+
+All installer-selected values (and all reconfigure changes) are written to:
+```
+/data/adb/AFWall-Boot-AntiLeak/config.sh
+```
+
+This file is in the **module data directory**, which is separate from the
+module installation directory.  It **survives module upgrades** because Magisk
+does not erase the data directory during reinstall.
+
+At boot, `load_config()` in `bin/common.sh` sources the module's built-in
+`config.sh` first (fallback defaults), then sources
+`/data/adb/AFWall-Boot-AntiLeak/config.sh` second (user override wins).
+
+### Upgrade behaviour
+
+When reinstalling or upgrading:
+
+1. The installer detects the existing
+   `/data/adb/AFWall-Boot-AntiLeak/config.sh`.
+2. It loads the existing values into IC_* variables.
+3. If volume keys are available, it asks:
+   `Reconfigure options? (VOL+=YES, VOL-=keep existing, 10s → keep)`
+4. VOL- or timeout → existing config preserved, summary printed, no write.
+5. VOL+ → interactive selection starts fresh from defaults.
+
+If volume keys are unavailable during an upgrade, the existing config is
+silently preserved (no write needed since the file already exists).
+
+### Non-interactive install (pre-seeded `installer.cfg`)
+
+Create the following file **on the device before flashing**:
+```
+/data/adb/AFWall-Boot-AntiLeak/installer.cfg
+```
+
+Supported syntax — use `IC_PROFILE` for a profile preset, plus optional
+individual overrides:
+
+```sh
+# Select the strict profile
+IC_PROFILE=strict
+
+# Override individual options after the profile (optional)
+DEBUG=1
+TIMEOUT_SECS=180
+```
+
+All standard config keys (`INTEGRATION_MODE`, `ENABLE_FORWARD_BLOCK`, etc.)
+are also accepted directly in `installer.cfg`.
+
+> **Note:** `installer.cfg` is consumed without being deleted, so it applies on
+> future reinstalls too.  It is **ignored** by `reconfigure.sh` — the
+> reconfiguration tool always starts from the current persistent config and
+> interactive prompts regardless of `installer.cfg`.  Delete or rename it
+> when you no longer want it applied automatically during installs.
+
+### ZIP-name parsing (not implemented)
+
+ZIP-name-based profile selection is **not implemented** because Magisk app
+installs rename the ZIP to `install.zip`, making basename parsing unreliable.
+Use `installer.cfg` as the non-interactive path for automated installs.
+
+### Post-install reconfiguration
+
+To change options without reflashing, run as root in a terminal:
+
+```sh
+sh /data/adb/modules/AFWall-Boot-AntiLeak/reconfigure.sh
+```
+
+The script reuses the same prompts and defaults as the installer.  It writes
+the updated config to the persistent path and reports the result.  The new
+settings take effect on the next reboot.
+
+### Troubleshooting key selection
+
+**Volume keys are not responding:**
+- `getevent` may not list key events on some devices or emulators.
+- The installer falls back to defaults; this is safe and expected.
+- Use `installer.cfg` for a fully non-interactive install.
+
+**Wrong profile was selected:**
+- Run `sh /data/adb/modules/AFWall-Boot-AntiLeak/reconfigure.sh` to
+  reconfigure without reflashing.
+- Or create/edit `/data/adb/AFWall-Boot-AntiLeak/config.sh` manually
+  (key=value format, one per line).
+
+**Config was not written:**
+- The installer prints `ERROR: Config write failed` if it cannot write to
+  `/data/adb/AFWall-Boot-AntiLeak/config.sh`.
+- Ensure `/data/adb/` is writable (standard Magisk install).
+- If the persistent config does not exist, the module's built-in `config.sh`
+  (with standard defaults) is used instead.
+
+---
+
 ## 4. AFWall+ Configuration Guidance
 
 ### AFWall+ "Fix Startup Data Leak" (fixLeak) option
@@ -994,18 +1162,20 @@ AFWall-Boot-AntiLeak/
 │       └── updater-script     # Required stub: "#MAGISK"
 ├── common/
 │   ├── functions.sh           # MMT-Extended installer helper (extracted to TMPDIR)
-│   └── install.sh             # Module-specific install banner (sourced then deleted)
+│   └── install.sh             # Module-specific installer UI (sourced then deleted)
 ├── bin/
 │   ├── common.sh              # Module runtime library (sourced by all boot scripts)
+│   ├── installer_config.sh    # Shared installer config helpers (profiles, keys, read/write)
 │   └── lowlevel.sh            # Lower-layer suppression subsystem (v2.2.0+)
 ├── tools/
 │   ├── build-release.sh       # Build script: validates, packages ZIP, emits checksum
 │   └── validate-zip.sh        # Validates built ZIP internal structure
 ├── action.sh                  # Magisk action button / manual recovery
-├── config.sh                  # User-tunable runtime settings
+├── config.sh                  # User-tunable runtime settings (built-in defaults)
 ├── customize.sh               # MMT-Extended config + permissions + SKIPUNZIP entry
 ├── module.prop                # Module metadata including updateJson
 ├── post-fs-data.sh            # Early-boot firewall block installer
+├── reconfigure.sh             # Post-install reconfiguration terminal tool
 ├── service.sh                 # Late-start AFWall+ polling + block release
 ├── uninstall.sh               # Custom firewall cleanup (deliberate deviation — see §12)
 ├── update.json                # OTA update metadata (consumed by Magisk app)
@@ -1412,10 +1582,11 @@ unzip -l dist/AFWall-Boot-AntiLeak-v2.2.2.zip
 ```
 
 Expected top-level entries: `META-INF/`, `common/`, `bin/`, `action.sh`,
-`config.sh`, `customize.sh`, `module.prop`, `post-fs-data.sh`, `service.sh`,
-`uninstall.sh`, `update.json`, `README.md`.  The `bin/` directory contains
-`common.sh` (module runtime library) and `lowlevel.sh` (lower-layer subsystem,
-v2.2.0+).
+`config.sh`, `customize.sh`, `module.prop`, `post-fs-data.sh`, `reconfigure.sh`,
+`service.sh`, `uninstall.sh`, `update.json`, `README.md`.  The `bin/` directory
+contains `common.sh` (module runtime library), `lowlevel.sh` (lower-layer
+subsystem, v2.2.0+), and `installer_config.sh` (shared installer config helpers,
+v2.2.3+).
 
 Files should **not** be nested under a parent directory such as
 `AFWall-Boot-AntiLeak/META-INF/...` — that would prevent Magisk from

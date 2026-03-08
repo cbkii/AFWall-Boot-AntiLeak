@@ -38,9 +38,11 @@ jobs:
         run: |
           shellcheck --severity=warning \
             bin/common.sh \
+            bin/installer_config.sh \
             bin/lowlevel.sh \
             action.sh \
             post-fs-data.sh \
+            reconfigure.sh \
             service.sh \
             uninstall.sh \
             tools/build-release.sh \

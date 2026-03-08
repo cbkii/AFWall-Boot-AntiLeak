@@ -38,7 +38,10 @@ Lower-layer service/interface suppression is belt-and-suspenders beneath it.
 1. Install Magisk and AFWall+; open AFWall+ at least once.
 2. In AFWall+: **disable** "Fix Startup Data Leak" (this module replaces it).
 3. Install `AFWall-Boot-AntiLeak-v2.2.2.zip` via Magisk → Modules → Install.
-4. Reboot.
+4. During installation, the module prompts you to select a **protection profile**
+   using the volume keys (VOL+ = select, VOL- = next option).
+   If no key is pressed within 10 s, the **standard** profile is used.
+5. Reboot.
 
 After reboot, verify:
 ```sh
@@ -95,8 +98,23 @@ instructions including per-service and interface recovery.
 
 ## Configuration
 
-Edit `/data/adb/modules/AFWall-Boot-AntiLeak/config.sh` (or place a custom
-override at `/data/adb/AFWall-Boot-AntiLeak/config.sh`).
+Options are selected **during installation** via volume-key prompts, or you
+can change them at any time without reflashing by running the reconfiguration
+tool:
+
+```sh
+# In a root terminal:
+sh /data/adb/modules/AFWall-Boot-AntiLeak/reconfigure.sh
+```
+
+The persistent config is saved to:
+```
+/data/adb/AFWall-Boot-AntiLeak/config.sh
+```
+This file survives module upgrades and takes precedence over the built-in defaults.
+
+See [ADVANCED.md — Installer Config Selection](ADVANCED.md#installer-config-selection)
+for full details on profiles, non-interactive fallback, and upgrade behaviour.
 
 Key options:
 
@@ -131,6 +149,7 @@ Key options:
 
 See **[ADVANCED.md](ADVANCED.md)** for:
 
+- Installer config selection: profiles, volume keys, non-interactive fallback, upgrade behaviour, reconfiguration
 - Layered anti-leak design and boot timeline diagram
 - Full connectivity coverage matrix (Wi-Fi, data, VPN, LAN, tether, Bluetooth PAN, USB tether, IPv4/IPv6)
 - Why airplane mode is not relied upon
