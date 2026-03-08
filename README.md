@@ -1,9 +1,6 @@
-# AFWall Boot AntiLeak — v2.1.0 (MMT-Extended aligned)
+# AFWall Boot AntiLeak — v2.2.0 (MMT-Extended aligned)
 
-A Magisk module that **blocks all internet traffic at the kernel level** from
-the very first moment of each Android boot, before AFWall+ has applied its own
-firewall rules. The block is removed automatically once AFWall's rules are
-confirmed active in iptables.
+A Magisk module that implements **multi-layer early-boot anti-leak protection**: interface-level quiesce, iptables hard block (OUTPUT/FORWARD/INPUT), and service-level suppression (Wi-Fi/data/tether shutdown), all released automatically once AFWall+'s rules are confirmed active. The firewall hard block is always the authoritative protection layer.
 
 ---
 
@@ -23,15 +20,16 @@ connections during this window.
 | Boot stage | What happens |
 |---|---|
 | `post-fs-data` (very early, before Zygote) | Module installs temporary `DROP` chains in three directions: **OUTPUT** (`MOD_PRE_AFW`/`MOD_PRE_AFW_V6`, raw table preferred), **FORWARD** (`MOD_PRE_AFW_FWD`/`MOD_PRE_AFW_FWD_V6`, filter table, covers tethered clients), and optionally **INPUT** (`MOD_PRE_AFW_IN`/`MOD_PRE_AFW_IN_V6`, filter table, disabled by default). Loopback is always exempted. |
-| `service` (late start, runs in background) | Module polls iptables every 2 s for AFWall's `afwall` chain and the `OUTPUT -j afwall` jump. Once confirmed, a configurable settle delay passes (giving AFWall time to apply all FORWARD/INPUT rules too), then all module blocks are removed. A hard timeout (default 120 s) prevents indefinite blocking if AFWall is absent. |
-| `action` (manual) | Emergency button in the Magisk app to force-remove all module blocks. |
-| `uninstall` | Removes all module-owned chains (OUTPUT, FORWARD, INPUT, v4 and v6) and state files. |
+| `service` (late start, background) | **Layer 1**: Interface quiesce — bring non-loopback interfaces DOWN via `ip link`. **Layer 3**: Service shutdown — disable Wi-Fi, mobile data, and optionally Bluetooth/tethering via Android service commands once framework is ready. **Layer 4**: Poll iptables every 2 s for AFWall's `afwall` chain + `OUTPUT -j afwall` jump. On confirmation: settle delay → **(B)** remove iptables blocks → **(C)** restore only module-changed service/interface state → **(D)** log. A hard timeout (default 120 s) prevents indefinite blocking if AFWall is absent. |
+| `action` (manual) | Emergency button in Magisk app: removes all iptables blocks **and** restores any service/interface state changed by this module. |
+| `uninstall` | Removes all module-owned iptables chains, restores module-changed service state, deletes all state files and logs. |
 
 ### What the module does NOT guarantee
 
 - It does **not** guarantee protection against root-level processes that
   manipulate iptables directly.
-- It does **not** protect against leaks via special kernel bypass techniques or root-level iptables manipulation; those are AFWall+'s concern once it is active.
+- It does **not** protect against leaks via root-level iptables manipulation or kernel bypass techniques that skip netfilter entirely; those are AFWall+'s concern once it is active.
+- It does **not** guarantee protection even with lower-layer suppression active: if Android framework services refuse service commands, the iptables hard block remains as the fallback.
 - It does **not** block INPUT (inbound) connections by default; enable `ENABLE_INPUT_BLOCK=1` in `config.sh` if you rely on AFWall INPUT rules during boot.
 - It is **not** a replacement for AFWall+; it is a pre-AFWall safety net.
 
@@ -45,21 +43,65 @@ connections during this window.
 | Inbound blocking | Optional (set ENABLE_INPUT_BLOCK=1) | Yes (INPUT configurable) |
 | Tether/FORWARD blocking | Yes (enabled by default) | Yes (FORWARD configurable) |
 | Per-app granularity | No | Yes |
-| Persistence after boot | Block is removed on release | Rules persist until disabled |
+| Lower-layer interface quiesce | Yes (LOWLEVEL_MODE=safe default) | No |
+| Lower-layer Wi-Fi/data/tether shutdown | Yes (best-effort, service commands) | No |
+| Persistence after boot | Block is removed on release; lower-layer state restored | Rules persist until disabled |
 
-### Connectivity Coverage Matrix (v2.1.0)
+### Connectivity Coverage Matrix (v2.2.0)
 
-| Traffic class | IPv4 | IPv6 | Chain | Notes |
-|---|---|---|---|---|
-| Device-originated (apps, services) | ✓ | ✓ | OUTPUT | Always enabled |
-| Tethered clients (Wi-Fi hotspot) | ✓ | ✓ | FORWARD | Enabled by default (`ENABLE_FORWARD_BLOCK=1`) |
-| USB tether clients | ✓ | ✓ | FORWARD | Same as above |
-| Bluetooth tether / BT PAN | ✓ | ✓ | FORWARD | Same as above |
-| VPN traffic (through device) | ✓ | ✓ | OUTPUT + FORWARD | OUTPUT covers on-device VPN; FORWARD covers forwarded VPN traffic |
-| LAN/Roaming (device-originated) | ✓ | ✓ | OUTPUT | AFWall applies per-network rules after module releases block |
-| Inbound connections | opt-in | opt-in | INPUT | Enable with `ENABLE_INPUT_BLOCK=1`; loopback always exempted |
+| Traffic class | IPv4 | IPv6 | Firewall layer | Lower layer | Notes |
+|---|---|---|---|---|---|
+| Device-originated (apps, services) | ✓ | ✓ | OUTPUT (L2) | Interface quiesce + Wi-Fi/data disable (L1/L3) | Always enabled |
+| Wi-Fi client traffic | ✓ | ✓ | OUTPUT (L2) | Interface quiesce + `cmd wifi` disable (L1/L3) | |
+| Mobile data / roaming | ✓ | ✓ | OUTPUT (L2) | Interface quiesce + `cmd phone data disable` (L1/L3) | |
+| VPN (on-device) | ✓ | ✓ | OUTPUT (L2) | Interface quiesce (L1) | VPN tunnels are also brought down if enumerated |
+| Tethered clients (Wi-Fi hotspot) | ✓ | ✓ | FORWARD (L2) | Interface quiesce + tether stop (L1/L3) | `ENABLE_FORWARD_BLOCK=1` (default) |
+| USB tether clients | ✓ | ✓ | FORWARD (L2) | Interface quiesce (`usb0`, `rndis0`) + tether stop (L1/L3) | |
+| Bluetooth tether / BT PAN | ✓ | ✓ | FORWARD (L2) | Interface quiesce (`bt-pan`) + tether stop (L1/L3) | BT radio disable: opt-in (`LOWLEVEL_USE_BLUETOOTH_MANAGER=1`) |
+| LAN (device-originated) | ✓ | ✓ | OUTPUT (L2) | Interface quiesce (L1) | AFWall LAN rules apply after handoff |
+| Inbound connections | opt-in | opt-in | INPUT (L2, opt-in) | Interface down (L1) | Enable with `ENABLE_INPUT_BLOCK=1` |
 
-**Note**: The module blocks all traffic in each covered direction unconditionally during boot. It is not per-app or per-interface. Per-app and per-interface granularity is AFWall+'s responsibility once its rules are active.
+**L1** = interface quiesce (lowlevel.sh). **L2** = iptables hard block (authoritative). **L3** = service commands (best-effort). The module blocks all traffic in each direction unconditionally during boot. Per-app/per-interface granularity is AFWall+'s responsibility once its rules are active.
+
+### Layered Anti-Leak Model (v2.2.0)
+
+The module implements four defence-in-depth layers. **Layer 2 (iptables) is always the authoritative hard stop.**
+
+```
+BOOT TIMELINE
+─────────────
+post-fs-data  │ Layer 2: iptables hard block installed (OUTPUT/FORWARD/INPUT)
+              │          ← packets cannot flow regardless of interface state
+              │
+service.sh    │ Layer 1: Interface quiesce (ip link set <iface> down)
+(background)  │ Layer 3: Service commands (cmd wifi / cmd phone / cmd connectivity)
+              │          ← belt-and-suspenders beneath L2
+              │
+polling loop  │ Layer 4: AFWall readiness detection
+              │    → confirm afwall chain + OUTPUT jump + settle delay
+              │    → (B) remove_block: our iptables blocks removed
+              │    → (C) restore: interfaces + services restored
+              │    → (D) AFWall is now sole active protection
+```
+
+**Why iptables is the primary hard stop** (not service commands or interface quiesce):
+- iptables rules are installed at `post-fs-data`, before Zygote and the network stack
+- Service commands require the Android framework to be running; there is an inherent delay
+- `ip link` brings interfaces down at the service.sh stage, not post-fs-data
+- Root-level processes or hardware-backed drivers can bypass interface state but not iptables
+- iptables DROP is a kernel-level hard stop; no userspace circumvention is possible
+
+**Why airplane mode is NOT used:**
+- Airplane mode is a framework/policy mechanism, not a kernel-level kill switch
+- Wi-Fi can be re-enabled independently while airplane mode is ON
+- Bluetooth behaviour in airplane mode depends on persisted user preferences
+- iptables DROP is strictly stronger than airplane mode for network traffic
+
+**Why init/rc overlay was NOT implemented:**
+- Network interfaces do not come up until ConnectivityService starts (post-Zygote)
+- iptables blocks are already installed at post-fs-data — the earliest safe point
+- There is nothing to quiesce at init/early-init triggers because interfaces don't exist yet
+- Adding fragile init.rc services increases boot-breakage risk without security benefit
 
 ---
 
@@ -103,10 +145,10 @@ connections during this window.
 ### Install the module
 
 1. Open the Magisk app -> Modules -> Install from storage.
-2. Select `AFWall-Boot-AntiLeak-v2.1.0.zip`.
+2. Select `AFWall-Boot-AntiLeak-v2.2.0.zip`.
 3. The installer prints the installation log. Look for:
    ```
-   AFWall Boot AntiLeak  v2.1.0
+   AFWall Boot AntiLeak  v2.2.0
    ```
 4. **Before rebooting**: if you have other antileak scripts in
    `/data/adb/service.d/`, remove them (see Migration Notes).
@@ -123,7 +165,7 @@ cat /data/adb/AFWall-Boot-AntiLeak/logs/boot.log
 A successful boot looks like:
 
 ```
-[2026-03-08 04:01:00] post-fs-data: start (module=AFWall-Boot-AntiLeak v2.1.0)
+[2026-03-08 04:01:00] post-fs-data: start (module=AFWall-Boot-AntiLeak v2.2.0)
 [2026-03-08 04:01:00] cleanup_legacy: phase=post-fs-data
 [2026-03-08 04:01:00] integration: configured_mode=auto
 [2026-03-08 04:01:00] integration: auto; no AFWall startup chains; module block is sole protection
@@ -135,11 +177,26 @@ A successful boot looks like:
 [2026-03-08 04:01:00] install_block: INPUT block not enabled (set ENABLE_INPUT_BLOCK=1 to enable)
 [2026-03-08 04:01:00] install_block: done (out_v4=1 out_v6=1)
 [2026-03-08 04:01:00] post-fs-data: done
-[2026-03-08 04:01:15] service: start (timeout=120s settle=5s fwd=1 in=0)
+[2026-03-08 04:01:15] service: start (timeout=120s settle=5s fwd=1 in=0 ll_mode=safe)
+[2026-03-08 04:01:15] lowlevel_prepare_environment: start (mode=safe)
+[2026-03-08 04:01:15] lowlevel_quiesce_interfaces: start
+[2026-03-08 04:01:15] lowlevel_quiesce_interfaces: done (2 interfaces quiesced)
+[2026-03-08 04:01:17] lowlevel: Wi-Fi disabled via cmd wifi
+[2026-03-08 04:01:17] lowlevel: mobile data disabled via cmd phone
+[2026-03-08 04:01:17] lowlevel: tethering stopped via cmd connectivity
+[2026-03-08 04:01:17] lowlevel_prepare_environment: done
 [2026-03-08 04:01:15] service: AFWall pkg=dev.ukanth.ufirewall
 [2026-03-08 04:01:30] service: AFWall rules detected; settling 5s
 [2026-03-08 04:01:35] service: AFWall FORWARD hook present (tether rules active)
-[2026-03-08 04:01:35] service: block removed (AFWall rules confirmed after settle)
+[2026-03-08 04:01:35] service: firewall block removed (Stage B complete)
+[2026-03-08 04:01:35] lowlevel_restore_changed_state: start
+[2026-03-08 04:01:35] lowlevel_restore_interfaces: start
+[2026-03-08 04:01:35] lowlevel_restore_interfaces: done (2 interfaces restored)
+[2026-03-08 04:01:35] lowlevel: Wi-Fi re-enabled via cmd wifi
+[2026-03-08 04:01:35] lowlevel: mobile data re-enabled via cmd phone
+[2026-03-08 04:01:35] lowlevel_restore_changed_state: done
+[2026-03-08 04:01:35] service: lower-layer state restored (Stage C complete)
+[2026-03-08 04:01:35] service: handoff complete — AFWall is now sole active protection
 ```
 
 ### Verify the block was installed and released
@@ -281,6 +338,85 @@ The module operates as "strict then failsafe":
 
 ---
 
+## 5a. Lower-Layer Suppression Subsystem (v2.2.0)
+
+The lower-layer subsystem provides additional anti-leak measures beneath the
+iptables hard block.  All operations are **best-effort** and tracked with state
+files so only module-changed state is restored.
+
+### Interface quiesce (Layer 1)
+
+At the start of service.sh, the module enumerates `/sys/class/net` and brings
+eligible interfaces DOWN via `ip link set <iface> down`.
+
+**Exempt interfaces** (never brought down):
+- `lo`, `lo:*` — loopback; always exempt
+- `dummy*` — Linux dummy interfaces
+- `sit*`, `ip6tnl*`, `ip6gre*` — IPv6 transition tunnels
+- `rmnet_ipa*` — Qualcomm IPA hardware accelerator
+- `v4-*` — NAT helper virtual interfaces
+
+After AFWall rules are confirmed (settle delay complete), the module brings all
+module-downed interfaces back UP.  Routes are NOT restored manually; DHCP and
+RA re-acquire them automatically when interfaces come up under AFWall protection.
+
+### Service-level suppression (Layer 3)
+
+After interface quiesce, the module waits for Android framework services to be
+available and then:
+
+| Service | Command used | Fallback |
+|---|---|---|
+| Wi-Fi | `cmd wifi set-wifi-enabled disabled` | `svc wifi disable` |
+| Mobile data | `cmd phone data disable` | `svc data disable` |
+| Bluetooth | `cmd bluetooth_manager disable` | `svc bluetooth disable` |
+| Tethering | `cmd connectivity stop-tethering` | Bring tether ifaces down |
+
+**Pre-boot state tracking**: Before disabling a service, the module checks its
+current state (`settings get global wifi_on / mobile_data / bluetooth_on`).
+Only services that were enabled before boot are recorded and restored.  Services
+the user had disabled before the boot will NOT be re-enabled.
+
+**Tethering note**: Tethering is NOT auto-restarted after AFWall handoff.
+Re-enabling tethering requires explicit user action.  This is intentional.
+
+### State files (lower-layer)
+
+All lower-layer state lives under `/data/adb/AFWall-Boot-AntiLeak/state/ll/`:
+
+| File | Contents |
+|---|---|
+| `mode` | LOWLEVEL_MODE value in effect for this boot |
+| `wifi_was_enabled` | `1` if Wi-Fi was enabled when module disabled it |
+| `data_was_enabled` | `1` if mobile data was enabled when module disabled it |
+| `bt_was_enabled` | `1` if Bluetooth was enabled when module disabled it |
+| `tether_was_active` | `1` if tethering was stopped by the module |
+| `ifaces_down` | Newline-separated list of interfaces brought DOWN |
+
+### Recovery if a service remains disabled after boot
+
+If the module exits uncleanly (crash/forced stop between Stage B and Stage C),
+the Magisk action button or a root shell can recover:
+
+```sh
+# Re-enable Wi-Fi (if module disabled it):
+cmd wifi set-wifi-enabled enabled 2>/dev/null || svc wifi enable
+
+# Re-enable mobile data (if module disabled it):
+cmd phone data enable 2>/dev/null || svc data enable
+
+# Re-enable Bluetooth (if module disabled it and LOWLEVEL_USE_BLUETOOTH_MANAGER=1):
+cmd bluetooth_manager enable 2>/dev/null || svc bluetooth enable
+
+# Check lower-layer state files:
+ls -la /data/adb/AFWall-Boot-AntiLeak/state/ll/
+```
+
+Or use the Magisk action button, which now performs emergency restore of all
+lower-layer state in addition to removing firewall blocks.
+
+---
+
 ## 6. Recovery
 
 ### Networking is still blocked after boot
@@ -344,8 +480,9 @@ Uninstall via Magisk app. `uninstall.sh` runs automatically and:
 2. Runs legacy cleanup (removes module-owned afwallstart scripts if present).
 3. Deletes all state files and logs under `/data/adb/AFWall-Boot-AntiLeak/`.
 
-Note: Uninstall does **not** re-enable Wi-Fi or mobile data. Radio state is
-managed by AFWall+, not by this module.
+Note: Uninstall **does** restore Wi-Fi, mobile data, and Bluetooth if and only
+if the module disabled them during the current boot.  If those services were
+already off before boot, they remain off.  Tethering is NOT auto-restarted.
 
 ### Tether clients can connect during boot (hotspot / USB / Bluetooth)
 
@@ -448,12 +585,21 @@ tail -40 /data/adb/AFWall-Boot-AntiLeak/logs/boot.log
 ### Check state files
 
 ```sh
+# Firewall block state:
 ls -la /data/adb/AFWall-Boot-AntiLeak/state/
 cat /data/adb/AFWall-Boot-AntiLeak/state/ipv4_out_table    # 'raw' or 'filter'
 cat /data/adb/AFWall-Boot-AntiLeak/state/ipv6_out_table    # 'raw' or 'filter'
 cat /data/adb/AFWall-Boot-AntiLeak/state/ipv4_fwd_active   # '1' if FORWARD block installed
 cat /data/adb/AFWall-Boot-AntiLeak/state/ipv4_in_active    # '1' if INPUT block installed
 cat /data/adb/AFWall-Boot-AntiLeak/state/integration_mode
+
+# Lower-layer (lowlevel) state:
+ls -la /data/adb/AFWall-Boot-AntiLeak/state/ll/
+cat /data/adb/AFWall-Boot-AntiLeak/state/ll/mode            # LOWLEVEL_MODE
+cat /data/adb/AFWall-Boot-AntiLeak/state/ll/wifi_was_enabled
+cat /data/adb/AFWall-Boot-AntiLeak/state/ll/data_was_enabled
+cat /data/adb/AFWall-Boot-AntiLeak/state/ll/bt_was_enabled
+cat /data/adb/AFWall-Boot-AntiLeak/state/ll/ifaces_down     # interfaces brought DOWN
 ```
 
 ### Confirm handoff occurred
@@ -468,6 +614,25 @@ grep 'block removed\|timeout\|failsafe' \
 ```sh
 grep -E 'WARN|fallback|unprotected' \
   /data/adb/AFWall-Boot-AntiLeak/logs/boot.log
+```
+
+### Check lower-layer suppression status
+
+```sh
+# What interfaces did the module bring down?
+cat /data/adb/AFWall-Boot-AntiLeak/state/ll/ifaces_down 2>/dev/null || echo "(none)"
+
+# Did the module disable Wi-Fi?
+cat /data/adb/AFWall-Boot-AntiLeak/state/ll/wifi_was_enabled 2>/dev/null || echo "(not tracked)"
+
+# Did the module disable mobile data?
+cat /data/adb/AFWall-Boot-AntiLeak/state/ll/data_was_enabled 2>/dev/null || echo "(not tracked)"
+
+# Check for lower-layer log lines:
+grep 'lowlevel' /data/adb/AFWall-Boot-AntiLeak/logs/boot.log | tail -30
+
+# Confirm staged release completed:
+grep -E 'Stage [BCD]|handoff complete' /data/adb/AFWall-Boot-AntiLeak/logs/boot.log
 ```
 
 ### Enable debug logging
@@ -604,12 +769,24 @@ a special ROM. On Android 16 Pixel devices, enabling it in AFWall does nothing
 harmful but provides no actual startup protection. This module is the correct
 solution for startup leak prevention on modern Pixel devices.
 
-### Radio toggles not primary protection
+### Lower-layer suppression limitations
 
-This module's `disable_radios()` / `restore_radios()` helpers exist for
-belt-and-suspenders use but are NOT called during normal operation. Radio state
-is not tracked by the module; only kernel-level iptables changes are tracked
-and reversed on cleanup.
+- **Interface quiesce**: `ip link set <iface> down` reduces connectivity but some
+  managed interfaces (e.g. wlan0 under wpa_supplicant) may be brought back up by
+  the system before AFWall handoff.  The iptables hard block prevents any traffic
+  regardless.
+- **Service commands require framework**: `cmd wifi` and `cmd phone data disable`
+  require Android framework services to be running.  These commands are attempted
+  after a brief retry; if the framework is not available, they are skipped and the
+  iptables hard block remains the sole protection.
+- **Tethering not auto-restored**: the module stops tethering sessions during boot
+  but does NOT restart them after AFWall handoff.  The user must manually re-enable
+  tethering.  This is by design.
+- **Bluetooth disabled by default**: Bluetooth service suppression
+  (`LOWLEVEL_USE_BLUETOOTH_MANAGER=0`) is disabled by default to avoid disrupting
+  Bluetooth peripherals.  Enable in config.sh if Bluetooth tethering is a concern
+  during boot.
+- **Airplane mode not used**: see Layered Anti-Leak Model section above.
 
 ---
 
@@ -623,6 +800,12 @@ Edit `config.sh` in the module directory, or place a persistent override at
 | `INTEGRATION_MODE` | `auto` | `auto` / `prefer_module` / `prefer_afwall` / `off` |
 | `ENABLE_FORWARD_BLOCK` | `1` | Set to `0` to disable the FORWARD chain block (tether coverage) |
 | `ENABLE_INPUT_BLOCK` | `0` | Set to `1` to enable the optional INPUT chain block (inbound hardening) |
+| `LOWLEVEL_MODE` | `safe` | `off` / `safe` / `strict` — controls lower-layer suppression tier |
+| `LOWLEVEL_INTERFACE_QUIESCE` | `1` | Bring non-loopback interfaces DOWN via `ip link` |
+| `LOWLEVEL_USE_WIFI_SERVICE` | `1` | Disable Wi-Fi via `cmd wifi` / `svc wifi` |
+| `LOWLEVEL_USE_PHONE_DATA_CMD` | `1` | Disable mobile data via `cmd phone` / `svc data` |
+| `LOWLEVEL_USE_BLUETOOTH_MANAGER` | `0` | Disable Bluetooth via `cmd bluetooth_manager` (opt-in) |
+| `LOWLEVEL_USE_TETHER_STOP` | `1` | Stop tethering via `cmd connectivity` + interface shutdown |
 | `TIMEOUT_SECS` | `120` | Seconds before force-unblocking if AFWall never becomes ready |
 | `SETTLE_SECS` | `5` | Seconds to wait after first AFWall rule detection before releasing block |
 | `DEBUG` | `0` | Set to `1` for verbose `[DEBUG]` entries in the boot log |
@@ -645,6 +828,13 @@ Edit `config.sh` in the module directory, or place a persistent override at
     ipv4_in_active       # present ('1') while IPv4 INPUT block is installed (optional)
     ipv6_in_active       # present ('1') while IPv6 INPUT block is installed (optional)
     integration_mode     # integration mode chosen for this boot
+  state/ll/              # lower-layer suppression state (v2.2.0+)
+    mode                 # LOWLEVEL_MODE in effect for this boot
+    wifi_was_enabled     # '1' if Wi-Fi was enabled when module disabled it
+    data_was_enabled     # '1' if mobile data was enabled when module disabled it
+    bt_was_enabled       # '1' if Bluetooth was enabled when module disabled it (opt-in)
+    tether_was_active    # '1' if tethering was stopped by the module
+    ifaces_down          # newline-list of interfaces brought DOWN by module
 ```
 
 ---
@@ -661,6 +851,11 @@ Edit `config.sh` in the module directory, or place a persistent override at
 | `svc` unavailable | Radio toggle helpers silently skip (not primary protection) |
 | State files lost / corrupt | Removal tries both raw and filter tables defensively for all chain names |
 | `iptables -C` returns error | Rule is re-added (idempotent; no duplicate from chain-based check) |
+| `cmd wifi` / `svc wifi` unavailable | Logged as WARN; Wi-Fi not disabled; iptables block still in place |
+| `cmd phone` / `svc data` unavailable | Logged as WARN; mobile data not disabled; iptables block still in place |
+| Framework not ready after 5 attempts | Service suppression skipped; logged; iptables hard block remains |
+| Interface quiesce fails | Individual interface skip logged; others still processed |
+| Lower-layer state lost between Stage B and C | `lowlevel_emergency_restore` via action button re-reads state files |
 
 ---
 
@@ -692,6 +887,18 @@ Edit `config.sh` in the module directory, or place a persistent override at
 ---
 
 ## ChangeLog
+
+### v2.2.0 — Lower-layer anti-leak suppression tier
+
+- **New: `bin/lowlevel.sh`** — a dedicated lower-layer suppression subsystem with full ownership and state-tracking discipline.
+- **Layer 1 (interface quiesce)**: at service.sh start, enumerate `/sys/class/net` and bring non-loopback interfaces DOWN via `ip link set <iface> down`. Exempt: loopback, dummy*, sit*, ip6tnl*, ip6gre*, rmnet_ipa*, v4-*. Restore after handoff.
+- **Layer 3 (service-level suppression)**: wait for framework services, then disable Wi-Fi (`cmd wifi set-wifi-enabled disabled`), mobile data (`cmd phone data disable`), Bluetooth (`cmd bluetooth_manager disable`, opt-in), tethering (`cmd connectivity stop-tethering` + interface shutdown). Pre-boot state checked; only module-changed services are restored.
+- **Staged release**: (A) AFWall rules confirmed + settle delay, (B) `remove_block`, (C) `lowlevel_restore_changed_state`, (D) log "handoff complete".
+- **State tracking**: all lower-layer changes tracked in `state/ll/`. Only module-changed state restored.
+- **Emergency restore**: `action.sh` and `uninstall.sh` now call `lowlevel_emergency_restore` to re-enable services the module disabled.
+- **Config**: `LOWLEVEL_MODE=safe`, `LOWLEVEL_INTERFACE_QUIESCE=1`, `LOWLEVEL_USE_WIFI_SERVICE=1`, `LOWLEVEL_USE_PHONE_DATA_CMD=1`, `LOWLEVEL_USE_BLUETOOTH_MANAGER=0`, `LOWLEVEL_USE_TETHER_STOP=1`.
+- **Not implemented**: init/rc overlay mode. Rationale: iptables blocks are installed at post-fs-data (before interfaces exist); overlay provides no security benefit. Airplane mode not used as primary protection.
+- Bump to v2.2.0 / versionCode=220.
 
 ### v2.1.0 — FORWARD and INPUT chain coverage
 
@@ -769,7 +976,8 @@ AFWall-Boot-AntiLeak/
 │   ├── functions.sh           # MMT-Extended installer helper (extracted to TMPDIR)
 │   └── install.sh             # Module-specific install banner (sourced then deleted)
 ├── bin/
-│   └── common.sh              # Module runtime library (sourced by all boot scripts)
+│   ├── common.sh              # Module runtime library (sourced by all boot scripts)
+│   └── lowlevel.sh            # Lower-layer suppression subsystem (v2.2.0+)
 ├── tools/
 │   ├── build-release.sh       # Build script: validates, packages ZIP, emits checksum
 │   └── validate-zip.sh        # Validates built ZIP internal structure
@@ -803,7 +1011,7 @@ tools/build-release.sh dist/ AFWall-Boot-AntiLeak.zip
 ```
 
 Output:
-- `dist/AFWall-Boot-AntiLeak-v2.1.0.zip` — Magisk-installable module ZIP
+- `dist/AFWall-Boot-AntiLeak-v2.2.0.zip` — Magisk-installable module ZIP
 - `dist/sha256sum.txt` — SHA256 checksum
 - `dist/build-info.txt` — build metadata (version, git ref, date)
 
@@ -817,7 +1025,7 @@ that context).
 
 ```sh
 chmod +x tools/validate-zip.sh
-tools/validate-zip.sh dist/AFWall-Boot-AntiLeak-v2.1.0.zip
+tools/validate-zip.sh dist/AFWall-Boot-AntiLeak-v2.2.0.zip
 ```
 
 This checks that all required installer and runtime files are present inside
@@ -1029,7 +1237,7 @@ installable ZIP.
 ### Release workflow (`.github/workflows/release.yml`)
 
 **Tag-driven release (recommended)**:
-1. Push a version tag (e.g. `v2.1.0`) matching the value in `module.prop`.
+1. Push a version tag (e.g. `v2.2.0`) matching the value in `module.prop`.
 2. The workflow fires automatically.
 3. It validates that the tag matches `module.prop version`.
 4. It builds the ZIP with the stable filename `AFWall-Boot-AntiLeak.zip`.
@@ -1063,7 +1271,7 @@ latest release without changing `update.json` on every release.
 
 1. **Latest release**: [GitHub Releases](https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/latest)
 2. **Direct download**: `https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/latest/download/AFWall-Boot-AntiLeak.zip`
-3. **Specific version**: `https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/download/v2.1.0/AFWall-Boot-AntiLeak.zip`
+3. **Specific version**: `https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/download/v2.2.0/AFWall-Boot-AntiLeak.zip`
 
 ### Verify the checksum
 
@@ -1086,15 +1294,15 @@ In a new branch/PR, update two files:
 
 **`module.prop`**:
 ```
-version=v2.1.0
-versionCode=210
+version=v2.2.0
+versionCode=220
 ```
 
 **`update.json`**:
 ```json
 {
-  "version": "v2.1.0",
-  "versionCode": 210,
+  "version": "v2.2.0",
+  "versionCode": 220,
   "zipUrl": "https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/latest/download/AFWall-Boot-AntiLeak.zip",
   "changelog": "https://raw.githubusercontent.com/cbkii/AFWall-Boot-AntiLeak/master/README.md"
 }
@@ -1127,8 +1335,8 @@ Merge the PR into `master`/`main`.
 ```sh
 git checkout master
 git pull
-git tag v2.1.0
-git push origin v2.1.0
+git tag v2.2.0
+git push origin v2.2.0
 ```
 
 This triggers the release workflow automatically.
@@ -1171,21 +1379,23 @@ tools/build-release.sh dist/
 
 # Validate
 chmod +x tools/validate-zip.sh
-tools/validate-zip.sh dist/AFWall-Boot-AntiLeak-v2.1.0.zip
+tools/validate-zip.sh dist/AFWall-Boot-AntiLeak-v2.2.0.zip
 
 # Inspect ZIP contents
-unzip -l dist/AFWall-Boot-AntiLeak-v2.1.0.zip
+unzip -l dist/AFWall-Boot-AntiLeak-v2.2.0.zip
 ```
 
 ### Inspect the built ZIP structure
 
 ```sh
-unzip -l dist/AFWall-Boot-AntiLeak-v2.1.0.zip
+unzip -l dist/AFWall-Boot-AntiLeak-v2.2.0.zip
 ```
 
 Expected top-level entries: `META-INF/`, `common/`, `bin/`, `action.sh`,
 `config.sh`, `customize.sh`, `module.prop`, `post-fs-data.sh`, `service.sh`,
-`uninstall.sh`, `update.json`, `README.md`.
+`uninstall.sh`, `update.json`, `README.md`.  The `bin/` directory contains
+`common.sh` (module runtime library) and `lowlevel.sh` (lower-layer subsystem,
+v2.2.0+).
 
 Files should **not** be nested under a parent directory such as
 `AFWall-Boot-AntiLeak/META-INF/...` — that would prevent Magisk from
@@ -1196,7 +1406,7 @@ finding the installer files.
 After building, run:
 
 ```sh
-tools/validate-zip.sh dist/AFWall-Boot-AntiLeak-v2.1.0.zip
+tools/validate-zip.sh dist/AFWall-Boot-AntiLeak-v2.2.0.zip
 ```
 
 A `VALIDATION PASSED` result means the ZIP passes structural checks. Actual
