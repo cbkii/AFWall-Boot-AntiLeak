@@ -163,11 +163,12 @@ jobs:
 
           See [README.md](https://github.com/${{ github.repository }}/blob/${RELEASE_TAG}/README.md) for full installation, configuration, and recovery instructions."
 
-          # If the release already exists (re-run), delete it first so we can
-          # recreate with updated assets (idempotent re-release).
+          # If the release already exists (re-run), delete only the release (not
+          # the git tag) so the tag remains canonical and the new release is
+          # re-created at the same commit.
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "Release $RELEASE_TAG already exists; deleting for clean re-release."
-            gh release delete "$RELEASE_TAG" --yes --cleanup-tag 2>/dev/null || true
+            echo "Release $RELEASE_TAG already exists; deleting release (tag preserved) for clean re-release."
+            gh release delete "$RELEASE_TAG" --yes 2>/dev/null || true
             sleep 2
           fi
 

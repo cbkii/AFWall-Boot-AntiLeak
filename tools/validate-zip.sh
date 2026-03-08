@@ -31,8 +31,8 @@ ERRORS=0
 # ── Helper: check that a path exists inside the ZIP ──────────────────────────
 check_file() {
   local path="$1"
-  # Use awk to extract just the filename column and match exactly
-  if unzip -l "$ZIP" 2>/dev/null | awk '{print $NF}' | grep -qxF "$path"; then
+  # `unzip -Z -1` lists only internal paths, one per line — no header/footer noise.
+  if unzip -Z -1 "$ZIP" 2>/dev/null | grep -qxF "$path"; then
     echo "  [OK] $path"
   else
     echo "  [MISSING] $path" >&2
@@ -94,7 +94,7 @@ fi
 
 # ── Check files are at ZIP root (no nesting parent directory) ─────────────────
 echo "Checking ZIP root structure (no parent directory nesting)..."
-if unzip -l "$ZIP" 2>/dev/null | awk '{print $NF}' | grep -qxF "module.prop"; then
+if unzip -Z -1 "$ZIP" 2>/dev/null | grep -qxF "module.prop"; then
   echo "  [OK] module.prop is at ZIP root"
 else
   echo "  [ERROR] module.prop not found at ZIP root - ZIP may be incorrectly nested" >&2
@@ -102,10 +102,13 @@ else
 fi
 
 # ── Check no development artefacts are present ───────────────────────────────
+# Use `unzip -Z -1` which lists only the internal paths (no header/footer lines),
+# avoiding false positives when the ZIP file itself is stored in a matching path.
 echo "Checking for development artefacts..."
 JUNK_FOUND=0
+ZIP_CONTENTS="$(unzip -Z -1 "$ZIP" 2>/dev/null)"
 for junk in ".git/" ".github/" "tools/" "scripts/" "dist/"; do
-  if unzip -l "$ZIP" 2>/dev/null | awk '{print $NF}' | grep -qF "$junk"; then
+  if printf '%s\n' "$ZIP_CONTENTS" | grep -qF "$junk"; then
     echo "  [WARN] ZIP contains development artefact path: $junk"
     JUNK_FOUND=$((JUNK_FOUND + 1))
   fi

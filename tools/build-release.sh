@@ -20,7 +20,18 @@
 set -e
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUTPUT_DIR="${1:-$REPO_ROOT/dist}"
+
+# Resolve OUTPUT_DIR to an absolute path immediately so that `cd` later in the
+# script does not cause paths like $OUTPUT_DIR/sha256sum.txt to resolve under
+# the wrong working directory (dist/dist/... when called with a relative arg).
+_OUTPUT_ARG="${1:-}"
+if [ -n "$_OUTPUT_ARG" ]; then
+  mkdir -p "$_OUTPUT_ARG"
+  OUTPUT_DIR="$(cd "$_OUTPUT_ARG" && pwd)"
+else
+  OUTPUT_DIR="$REPO_ROOT/dist"
+  mkdir -p "$OUTPUT_DIR"
+fi
 ZIP_NAME_OVERRIDE="${2:-}"
 
 # ── Parse version from module.prop ────────────────────────────────────────────
@@ -93,9 +104,7 @@ fi
 
 echo "All required source files present."
 
-# ── Create output directory ───────────────────────────────────────────────────
-mkdir -p "$OUTPUT_DIR"
-
+# ── Create output directory (already exists — created during path resolution) ─
 # Remove any existing output for this ZIP name (idempotent rebuild)
 rm -f "$ZIP_PATH" "$CHECKSUM_PATH" "$BUILD_INFO_PATH"
 
@@ -122,9 +131,11 @@ zip -r9 "$ZIP_PATH" \
 echo "Built: $ZIP_PATH"
 
 # ── Generate checksum ─────────────────────────────────────────────────────────
+# Run sha256sum from OUTPUT_DIR (which is absolute) so the checksum line records
+# just the bare filename — this is what `sha256sum -c` expects on the device.
+# Use a subshell so the `cd` does not affect the rest of the script.
 echo "Generating checksum..."
-cd "$OUTPUT_DIR"
-sha256sum "$ZIP_NAME" > "$CHECKSUM_PATH"
+( cd "$OUTPUT_DIR" && sha256sum "$ZIP_NAME" > sha256sum.txt )
 echo "Checksum:"
 cat "$CHECKSUM_PATH"
 
