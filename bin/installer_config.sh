@@ -16,7 +16,7 @@
 # NON-INTERACTIVE fallback priority (documented here for reference):
 #   1. External installer.cfg at _IC_INSTALLER_CFG, if present
 #   2. Existing persistent config at _IC_PERSISTENT_CFG (upgrade preservation)
-#   3. Interactive volume-key selection, if getevent is usable
+#   3. Interactive volume-key selection (primary: raw getevent; fallback: keycheck)
 #   4. Safe defaults (standard profile)
 
 # ── Module paths ──────────────────────────────────────────────────────────────
@@ -25,7 +25,15 @@ _IC_MODULE_DATA="/data/adb/AFWall-Boot-AntiLeak"
 _IC_PERSISTENT_CFG="${_IC_MODULE_DATA}/config.sh"
 _IC_INSTALLER_CFG="${_IC_MODULE_DATA}/installer.cfg"
 _IC_KEY_TIMEOUT=10
-_IC_KEYS_AVAIL=0
+_IC_KEY_RETRIES=2
+
+# ── Input detection state (set by ic_detect_keys) ─────────────────────────────
+_IC_KEYS_AVAIL=0        # 1 = raw getevent path is usable
+_IC_GETEVENT_PATH=""    # resolved path to getevent binary
+_IC_GETEVENT_PROBE_RC=-1 # exit code from the availability probe
+_IC_EVENT_NODES=0       # 1 = /dev/input/event* nodes are present
+_IC_KEYCHECK_AVAIL=0    # 1 = arch-appropriate keycheck binary found
+_IC_KEYCHECK_PATH=""    # resolved path to keycheck binary
 
 # ── Output abstraction ─────────────────────────────────────────────────────────
 # Routes to ui_print (installer) or echo (runtime) based on IC_CONTEXT.
@@ -160,35 +168,249 @@ ic_parse_external_config() {
     return 0
 }
 
+# ── Input diagnostics renderer ────────────────────────────────────────────────
+# Prints a summary of the input detection state set by ic_detect_keys.
+# Call after ic_detect_keys to show what was found and why.
+
+ic_render_input_diagnostics() {
+    _ic_print "  [getevent] path=${_IC_GETEVENT_PATH:-<not found>}"
+    if [ "${_IC_EVENT_NODES}" = "1" ]; then
+        _ic_print "  [getevent] event nodes present=yes"
+    else
+        _ic_print "  [getevent] event nodes present=no"
+    fi
+    if [ "${_IC_GETEVENT_PROBE_RC}" != "-1" ]; then
+        _ic_print "  [getevent] probe rc=${_IC_GETEVENT_PROBE_RC}"
+    fi
+    if [ "${_IC_KEYS_AVAIL}" = "1" ]; then
+        _ic_print "  [getevent] raw key detection available=yes"
+    else
+        _ic_print "  [getevent] raw key detection available=no"
+    fi
+    if [ "${_IC_KEYCHECK_AVAIL}" = "1" ]; then
+        _ic_print "  [keycheck] path=${_IC_KEYCHECK_PATH}"
+        _ic_print "  [keycheck] available=yes"
+    else
+        _ic_print "  [keycheck] available=no"
+    fi
+}
+
+# ── Keycheck binary path resolver ─────────────────────────────────────────────
+# Resolves the arch-appropriate keycheck binary path.
+# Checks MODPATH (installer), MODDIR (runtime), then the persistent module dir.
+# Prints the path if found and executable, or nothing if not.
+
+_ic_get_keycheck_path() {
+    local _arch _kcdir _kc_bin _dir
+    _arch="$(uname -m 2>/dev/null)"
+
+    for _dir in "${MODPATH:-}" "${MODDIR:-}" "/data/adb/modules/AFWall-Boot-AntiLeak"; do
+        [ -z "$_dir" ] && continue
+        _kcdir="${_dir}/bin/keycheck"
+        [ -d "$_kcdir" ] || continue
+
+        case "$_arch" in
+            aarch64|arm64) _kc_bin="${_kcdir}/keycheck-arm64"  ;;
+            arm*)          _kc_bin="${_kcdir}/keycheck-arm"    ;;
+            x86_64)        _kc_bin="${_kcdir}/keycheck-x86_64" ;;
+            x86|i686)      _kc_bin="${_kcdir}/keycheck-x86"    ;;
+            *)             return 0 ;;
+        esac
+
+        [ -x "$_kc_bin" ] && printf '%s' "$_kc_bin" && return 0
+    done
+}
+
 # ── Volume key detection ───────────────────────────────────────────────────────
-# Sets _IC_KEYS_AVAIL=1 if getevent is present and usable, 0 otherwise.
-# A 1-second probe is used to verify the tool actually starts without error.
+# Probes for usable input methods and sets detection state variables:
+#   _IC_KEYS_AVAIL     — 1 if raw getevent path is usable
+#   _IC_GETEVENT_PATH  — resolved getevent binary
+#   _IC_GETEVENT_PROBE_RC — exit code from 1-second probe
+#   _IC_EVENT_NODES    — 1 if /dev/input/event* nodes exist
+#   _IC_KEYCHECK_AVAIL — 1 if arch-appropriate keycheck binary found
+#   _IC_KEYCHECK_PATH  — resolved keycheck binary
+#
+# Fix: timeout exit code 124 (timed out) indicates getevent launched successfully
+# and streamed events — that is the EXPECTED outcome for a streaming command.
+# Only a non-zero non-124 exit code (e.g. permission denied, binary error)
+# should be treated as "getevent unavailable".
 
 ic_detect_keys() {
     _IC_KEYS_AVAIL=0
-    command -v getevent >/dev/null 2>&1 || return 0
-    timeout 1 getevent -l >/dev/null 2>&1 && _IC_KEYS_AVAIL=1 || true
+    _IC_GETEVENT_PATH=""
+    _IC_GETEVENT_PROBE_RC=-1
+    _IC_EVENT_NODES=0
+    _IC_KEYCHECK_AVAIL=0
+    _IC_KEYCHECK_PATH=""
+
+    # 1. Resolve getevent binary: prefer explicit /system/bin path for reliability
+    if [ -x /system/bin/getevent ]; then
+        _IC_GETEVENT_PATH="/system/bin/getevent"
+    elif command -v getevent >/dev/null 2>&1; then
+        _IC_GETEVENT_PATH="$(command -v getevent)"
+    else
+        # No getevent binary found; check keycheck only
+        local _kc
+        _kc="$(_ic_get_keycheck_path)"
+        if [ -n "$_kc" ]; then
+            _IC_KEYCHECK_AVAIL=1
+            _IC_KEYCHECK_PATH="$_kc"
+        fi
+        return 0
+    fi
+
+    # 2. Confirm /dev/input/event* nodes exist
+    local _f
+    for _f in /dev/input/event*; do
+        [ -e "$_f" ] && { _IC_EVENT_NODES=1; break; }
+    done
+
+    if [ "${_IC_EVENT_NODES}" != "1" ]; then
+        # Check keycheck fallback even without event nodes
+        local _kc
+        _kc="$(_ic_get_keycheck_path)"
+        if [ -n "$_kc" ]; then
+            _IC_KEYCHECK_AVAIL=1
+            _IC_KEYCHECK_PATH="$_kc"
+        fi
+        return 0
+    fi
+
+    # 3. Short probe to verify getevent launches without error.
+    #    Exit 0: getevent exited cleanly (unlikely for a streaming command).
+    #    Exit 124: timeout killed getevent — this means it launched successfully
+    #              and was producing output. Both are acceptable.
+    #    Any other non-zero exit: binary error, permission denied, or missing dep.
+    timeout 1 "$_IC_GETEVENT_PATH" -l >/dev/null 2>&1
+    _IC_GETEVENT_PROBE_RC=$?
+
+    case "${_IC_GETEVENT_PROBE_RC}" in
+        0|124) _IC_KEYS_AVAIL=1 ;;
+    esac
+
+    # 4. Resolve keycheck fallback regardless of getevent result
+    local _kc
+    _kc="$(_ic_get_keycheck_path)"
+    if [ -n "$_kc" ]; then
+        _IC_KEYCHECK_AVAIL=1
+        _IC_KEYCHECK_PATH="$_kc"
+    fi
 }
 
-# ── Volume key reader ─────────────────────────────────────────────────────────
-# Wait for one volume key press with a configurable timeout.
-# Returns: 0=VOL+ (yes/select), 1=VOL- (no/next), 2=timeout or unavailable.
-#
-# Uses `getevent -lq` which streams raw key events; `grep -m1` stops after the
-# first KEY_VOLUME line. `timeout` kills getevent when the deadline is reached.
+# ── Input method availability check ──────────────────────────────────────────
+# Returns 0 (true) if any interactive input method is available.
 
-ic_volkey() {
+_ic_any_input_avail() {
+    [ "${_IC_KEYS_AVAIL}" = "1" ] || [ "${_IC_KEYCHECK_AVAIL}" = "1" ]
+}
+
+# ── Stale event flusher ───────────────────────────────────────────────────────
+# Discards any key events buffered before the interactive prompt.
+# A 1-second read window is used; its exit code is ignored.
+
+_ic_flush_events() {
+    [ "${_IC_KEYS_AVAIL}" = "1" ] || return 0
+    timeout 1 "$_IC_GETEVENT_PATH" -lq >/dev/null 2>&1 || true
+}
+
+# ── Raw getevent key reader ───────────────────────────────────────────────────
+# Single-attempt raw getevent read matching KEY_VOLUME DOWN events.
+# Returns: 0=VOL+, 1=VOL-, 2=timeout/no-match.
+#
+# Matches only DOWN events (not UP) to avoid double-firing.
+# getevent -lq output format: "[ts] /dev/input/eventN: EV_KEY KEY_VOLUMEDOWN DOWN"
+
+ic_volkey_raw() {
     local secs="${1:-${_IC_KEY_TIMEOUT}}"
     [ "${_IC_KEYS_AVAIL}" = "1" ] || return 2
 
     local _kraw
-    _kraw=$(timeout "$secs" getevent -lq 2>/dev/null | grep -m1 'KEY_VOLUME') || true
+    _kraw=$(timeout "$secs" "$_IC_GETEVENT_PATH" -lq 2>/dev/null \
+        | grep -m1 'KEY_VOLUME.*DOWN') || true
 
     case "${_kraw}" in
         *KEY_VOLUMEUP*)   return 0 ;;
         *KEY_VOLUMEDOWN*) return 1 ;;
         *)                return 2 ;;
     esac
+}
+
+# ── Keycheck binary key reader ────────────────────────────────────────────────
+# Single-attempt read using the arch-appropriate keycheck binary.
+# Returns: 0=VOL+, 1=VOL-, 2=unavailable/timeout.
+# keycheck exit codes: 41=VOL+, 42=VOL-.
+
+ic_volkey_keycheck() {
+    local secs="${1:-${_IC_KEY_TIMEOUT}}"
+    [ "${_IC_KEYCHECK_AVAIL}" = "1" ] || return 2
+
+    local _kc_rc
+    timeout "$secs" "$_IC_KEYCHECK_PATH" >/dev/null 2>&1
+    _kc_rc=$?
+
+    case "${_kc_rc}" in
+        41) return 0 ;;
+        42) return 1 ;;
+        *)  return 2 ;;
+    esac
+}
+
+# ── Retry loop: raw getevent → keycheck → give up ────────────────────────────
+# Implements the battle-tested chooseport-style retry pattern.
+# Tries raw getevent first; on timeout, falls back to keycheck; retries up to
+# max_tries rounds before declaring no input.
+# Returns: 0=VOL+, 1=VOL-, 2=no input after all retries.
+
+ic_chooseport() {
+    local secs="${1:-${_IC_KEY_TIMEOUT}}"
+    local max_tries="${2:-${_IC_KEY_RETRIES}}"
+    local i=0 rc
+
+    # Quick bail: no methods available
+    _ic_any_input_avail || return 2
+
+    while [ "$i" -lt "$max_tries" ]; do
+        i=$((i + 1))
+
+        # Primary: raw getevent
+        if [ "${_IC_KEYS_AVAIL}" = "1" ]; then
+            ic_volkey_raw "$secs"
+            rc=$?
+            if [ "$rc" != "2" ]; then
+                [ "$rc" = "0" ] && _ic_print "  [getevent] detected VOL+"
+                [ "$rc" = "1" ] && _ic_print "  [getevent] detected VOL-"
+                return "$rc"
+            fi
+            _ic_print "  [getevent] no key press in window $i/$max_tries"
+        fi
+
+        # Fallback: keycheck binary
+        if [ "${_IC_KEYCHECK_AVAIL}" = "1" ]; then
+            ic_volkey_keycheck "$secs"
+            rc=$?
+            if [ "$rc" != "2" ]; then
+                [ "$rc" = "0" ] && _ic_print "  [keycheck] detected VOL+"
+                [ "$rc" = "1" ] && _ic_print "  [keycheck] detected VOL-"
+                return "$rc"
+            fi
+        fi
+
+        [ "$i" -lt "$max_tries" ] && _ic_print "  Waiting for key press again..."
+    done
+
+    _ic_print "  [input] no key detected after $max_tries attempt(s) — using default"
+    return 2
+}
+
+# ── Volume key reader (public API) ────────────────────────────────────────────
+# Wait for one volume key press with a configurable timeout.
+# Returns: 0=VOL+ (yes/select), 1=VOL- (no/next), 2=timeout or unavailable.
+# Internally uses ic_chooseport for raw → keycheck retry logic.
+
+ic_volkey() {
+    local secs="${1:-${_IC_KEY_TIMEOUT}}"
+    _ic_any_input_avail || return 2
+    ic_chooseport "$secs" "${_IC_KEY_RETRIES}"
 }
 
 # ── Boolean question ───────────────────────────────────────────────────────────
@@ -204,12 +426,13 @@ ic_select_bool() {
 
     [ "$default" = "1" ] && def_label="YES" || def_label="NO"
 
-    if [ "${_IC_KEYS_AVAIL}" != "1" ]; then
+    if ! _ic_any_input_avail; then
         return 0
     fi
 
     _ic_print "  $question"
     _ic_print "  VOL+: YES   VOL-: NO   (${_IC_KEY_TIMEOUT}s → ${def_label})"
+    _ic_flush_events
 
     ic_volkey "${_IC_KEY_TIMEOUT}"
     case $? in
@@ -231,12 +454,13 @@ ic_select_enum() {
     local default="$3"
     IC_ENUM_RESULT="$default"
 
-    if [ "${_IC_KEYS_AVAIL}" != "1" ]; then
+    if ! _ic_any_input_avail; then
         return 0
     fi
 
     _ic_print "  $question"
     _ic_print "  VOL+: SELECT   VOL-: next   (${_IC_KEY_TIMEOUT}s timeout → $default)"
+    _ic_flush_events
 
     local opt count total
     count=0
@@ -500,8 +724,9 @@ ic_run_config_selection() {
 
     if [ "$source" = "defaults" ] || [ "$source" = "existing" ]; then
         ic_detect_keys
+        ic_render_input_diagnostics
 
-        if [ "${_IC_KEYS_AVAIL}" = "1" ]; then
+        if _ic_any_input_avail; then
             _ic_print ""
             _ic_print "  Volume key input available."
             _ic_print "  Use VOL+ to select, VOL- to advance to next option."
@@ -510,6 +735,7 @@ ic_run_config_selection() {
             if [ "$is_upgrade" = "1" ]; then
                 _ic_print ""
                 _ic_print "  Reconfigure options? (VOL+=YES, VOL-=keep existing, ${_IC_KEY_TIMEOUT}s → keep)"
+                _ic_flush_events
                 ic_volkey "${_IC_KEY_TIMEOUT}"
                 case $? in
                     0)

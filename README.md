@@ -40,7 +40,10 @@ Lower-layer service/interface suppression is belt-and-suspenders beneath it.
 3. Install `AFWall-Boot-AntiLeak-v2.2.2.zip` via Magisk → Modules → Install.
 4. During installation, the module prompts you to select a **protection profile**
    using the volume keys (VOL+ = select, VOL- = next option).
-   If no key is pressed within 10 s, the **standard** profile is used.
+   Key detection uses native `getevent` (primary) with a `keycheck` binary
+   fallback for reliability across devices.
+   If no key is pressed within 10 s per prompt (up to 2 attempts), the
+   **standard** profile is used automatically.
 5. Reboot.
 
 After reboot, verify:

@@ -257,23 +257,67 @@ When multiple config sources are available, the following priority applies
 2. **Existing persistent config** (upgrade path) — if a config already exists
    at `/data/adb/AFWall-Boot-AntiLeak/config.sh`, the installer reads its
    values and offers to keep or reconfigure them.
-3. **Interactive volume-key selection** — if `getevent` is available and
-   usable, the user is prompted via volume keys.
+3. **Interactive volume-key selection** — if any input method is available
+   (raw getevent or keycheck), the user is prompted via volume keys.
 4. **Safe defaults** — the `standard` profile is applied; no user input
    required.
 
-The installer prints which source it is using so the user can verify.
+The installer prints which source it is using and why, so the user can verify
+what happened.
 
-### Interactive selection
+### Interactive selection — input methods
 
-Volume key interaction requires `getevent` to be available.  The installer
-probes with a 1-second test run before offering key prompts.  If the probe
-fails, the installer falls back silently to the next priority level.
+The installer uses a layered input detection stack:
+
+**Primary: raw `getevent`**
+
+`/system/bin/getevent` is used to read native Android input events.  The
+availability probe accepts both exit code `0` (clean exit) **and** `124`
+(timeout — getevent launched correctly and was streaming events, as expected
+for a streaming command).  Only a non-zero non-124 exit code (binary error,
+permission denied) is treated as getevent being unavailable.
+
+Event matching targets real `DOWN` events only:
+
+```
+[ts] /dev/input/eventN: EV_KEY  KEY_VOLUMEDOWN  DOWN
+```
+
+This avoids false detection from key-UP events.
+
+**Fallback: `keycheck` binary**
+
+If raw getevent detection fails or is unreliable (some recovery environments,
+unusual kernel configurations), the installer tries an arch-appropriate
+pre-compiled `keycheck` binary from `bin/keycheck/`.  Keycheck exit codes:
+`41` = VOL+, `42` = VOL-.
+
+Binaries must be placed in `bin/keycheck/` with the correct filename for each
+architecture; see `bin/keycheck/README.md`.  If no binary is present, this
+fallback is silently skipped.
+
+**Retry logic**
+
+Each prompt allows up to 2 attempts (configurable via `_IC_KEY_RETRIES`).
+Both raw getevent and keycheck are tried within each attempt before retrying.
+After all attempts, the default for that prompt is used.
+
+**Diagnostics**
+
+Before interactive prompts, the installer logs what it found:
+
+```
+[getevent] path=/system/bin/getevent
+[getevent] event nodes present=yes
+[getevent] probe rc=124
+[getevent] raw key detection available=yes
+[keycheck] available=no
+```
 
 **Interaction model:**
 - `VOL+` = **select** the currently displayed option
 - `VOL-` = **advance** to the next option (enum) or choose NO (bool)
-- Timeout (10 s) = use the **default** shown in the prompt
+- Timeout (10 s per attempt, up to 2 attempts) = use the **default** shown
 
 **Profile selection** (first prompt, enum cycle):
 
@@ -325,12 +369,12 @@ When reinstalling or upgrading:
 1. The installer detects the existing
    `/data/adb/AFWall-Boot-AntiLeak/config.sh`.
 2. It loads the existing values into IC_* variables.
-3. If volume keys are available, it asks:
+3. If any input method is available, it asks:
    `Reconfigure options? (VOL+=YES, VOL-=keep existing, 10s → keep)`
 4. VOL- or timeout → existing config preserved, summary printed, no write.
 5. VOL+ → interactive selection starts fresh from defaults.
 
-If volume keys are unavailable during an upgrade, the existing config is
+If no input method is available during an upgrade, the existing config is
 silently preserved (no write needed since the file already exists).
 
 ### Non-interactive install (pre-seeded `installer.cfg`)
@@ -382,9 +426,17 @@ settings take effect on the next reboot.
 ### Troubleshooting key selection
 
 **Volume keys are not responding:**
-- `getevent` may not list key events on some devices or emulators.
-- The installer falls back to defaults; this is safe and expected.
+- The installer prints full diagnostics: getevent path, event node status,
+  probe exit code, and which methods were attempted.
+- If raw getevent is unavailable and no keycheck binary matches your
+  architecture, the installer falls back to defaults; this is safe and expected.
 - Use `installer.cfg` for a fully non-interactive install.
+
+**Volume keys not detected even though diagnostics show getevent available:**
+- This can happen on some devices or install timings where events are delayed.
+- The installer retries up to 2 times before using the default.
+- Add a `keycheck` binary for your architecture to `bin/keycheck/` to improve
+  reliability; see `bin/keycheck/README.md`.
 
 **Wrong profile was selected:**
 - Run `sh /data/adb/modules/AFWall-Boot-AntiLeak/reconfigure.sh` to
