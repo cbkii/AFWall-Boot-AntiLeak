@@ -200,6 +200,9 @@ lowlevel_disable_wifi() {
   [ "${LOWLEVEL_USE_WIFI_SERVICE:-1}" = "1" ] || return 0
 
   if ! _ll_wifi_is_enabled; then
+    # Service already off; clear any stale marker so we don't restore what we
+    # never changed.
+    _ll_state_rm "wifi_was_enabled"
     debug_log "lowlevel_disable_wifi: Wi-Fi already disabled; skipping"
     return 0
   fi
@@ -230,13 +233,19 @@ lowlevel_disable_wifi() {
 lowlevel_restore_wifi() {
   _ll_state_exists "wifi_was_enabled" || return 0
 
+  local restored=0
   if has_cmd cmd && cmd wifi set-wifi-enabled enabled >/dev/null 2>&1; then
+    restored=1
     log "lowlevel: Wi-Fi re-enabled via cmd wifi"
-  elif has_cmd svc; then
-    svc wifi enable 2>/dev/null || true
-    log "lowlevel: Wi-Fi re-enabled via svc wifi (fallback)"
-  else
-    log "lowlevel: WARN: could not re-enable Wi-Fi"
+  fi
+  if [ "$restored" = "0" ] && has_cmd svc; then
+    if svc wifi enable 2>/dev/null; then
+      restored=1
+      log "lowlevel: Wi-Fi re-enabled via svc wifi (fallback)"
+    fi
+  fi
+  if [ "$restored" = "0" ]; then
+    log "lowlevel: WARN: could not re-enable Wi-Fi; manual recovery may be needed"
   fi
   _ll_state_rm "wifi_was_enabled"
 }
@@ -259,6 +268,9 @@ lowlevel_disable_mobile_data() {
   [ "${LOWLEVEL_USE_PHONE_DATA_CMD:-1}" = "1" ] || return 0
 
   if ! _ll_data_is_enabled; then
+    # Service already off; clear any stale marker so we don't restore what we
+    # never changed.
+    _ll_state_rm "data_was_enabled"
     debug_log "lowlevel_disable_mobile_data: mobile data already disabled; skipping"
     return 0
   fi
@@ -288,13 +300,19 @@ lowlevel_disable_mobile_data() {
 lowlevel_restore_mobile_data() {
   _ll_state_exists "data_was_enabled" || return 0
 
+  local restored=0
   if has_cmd cmd && cmd phone data enable >/dev/null 2>&1; then
+    restored=1
     log "lowlevel: mobile data re-enabled via cmd phone"
-  elif has_cmd svc; then
-    svc data enable 2>/dev/null || true
-    log "lowlevel: mobile data re-enabled via svc data (fallback)"
-  else
-    log "lowlevel: WARN: could not re-enable mobile data"
+  fi
+  if [ "$restored" = "0" ] && has_cmd svc; then
+    if svc data enable 2>/dev/null; then
+      restored=1
+      log "lowlevel: mobile data re-enabled via svc data (fallback)"
+    fi
+  fi
+  if [ "$restored" = "0" ]; then
+    log "lowlevel: WARN: could not re-enable mobile data; manual recovery may be needed"
   fi
   _ll_state_rm "data_was_enabled"
 }
@@ -317,6 +335,9 @@ lowlevel_disable_bluetooth() {
   [ "${LOWLEVEL_USE_BLUETOOTH_MANAGER:-0}" = "1" ] || return 0
 
   if ! _ll_bt_is_enabled; then
+    # Service already off; clear any stale marker so we don't restore what we
+    # never changed.
+    _ll_state_rm "bt_was_enabled"
     debug_log "lowlevel_disable_bluetooth: Bluetooth already disabled; skipping"
     return 0
   fi
@@ -347,13 +368,19 @@ lowlevel_disable_bluetooth() {
 lowlevel_restore_bluetooth() {
   _ll_state_exists "bt_was_enabled" || return 0
 
+  local restored=0
   if has_cmd cmd && cmd bluetooth_manager enable >/dev/null 2>&1; then
+    restored=1
     log "lowlevel: Bluetooth re-enabled via cmd bluetooth_manager"
-  elif has_cmd svc; then
-    svc bluetooth enable 2>/dev/null || true
-    log "lowlevel: Bluetooth re-enabled via svc bluetooth (fallback)"
-  else
-    log "lowlevel: WARN: could not re-enable Bluetooth"
+  fi
+  if [ "$restored" = "0" ] && has_cmd svc; then
+    if svc bluetooth enable 2>/dev/null; then
+      restored=1
+      log "lowlevel: Bluetooth re-enabled via svc bluetooth (fallback)"
+    fi
+  fi
+  if [ "$restored" = "0" ]; then
+    log "lowlevel: WARN: could not re-enable Bluetooth; manual recovery may be needed"
   fi
   _ll_state_rm "bt_was_enabled"
 }
@@ -428,6 +455,18 @@ lowlevel_prepare_environment() {
   esac
 
   _ll_init_dirs
+
+  # Clear any stale ll state from a previous unclean boot.
+  # If the device crashed or rebooted before Stage C restored services, marker
+  # files from the prior boot would persist and cause spurious restores on the
+  # next boot.  Clearing them here ensures this boot starts with a clean slate.
+  _ll_state_rm "wifi_was_enabled"
+  _ll_state_rm "data_was_enabled"
+  _ll_state_rm "bt_was_enabled"
+  _ll_state_rm "tether_was_active"
+  _ll_state_rm "tether_ifaces_down"
+  _ll_state_rm "ifaces_down"
+
   _ll_state_set "mode" "$mode"
   log "lowlevel_prepare_environment: start (mode=$mode)"
 
@@ -490,61 +529,96 @@ lowlevel_restore_changed_state() {
 # Emergency / manual recovery (action.sh and uninstall.sh).
 # More aggressive: restores state regardless of whether lowlevel was cleanly
 # started, because the user is explicitly requesting recovery.
+#
+# For each service, both `cmd` and `svc` fallbacks are tried in order; the
+# marker is only removed on success.  If all fallbacks fail the marker is
+# intentionally kept so a subsequent action-button press can retry.
 lowlevel_emergency_restore() {
   log "lowlevel_emergency_restore: start"
 
-  # Restore interfaces the module brought down.
+  # ── Restore interfaces the module brought down ──────────────────────────────
   if _ll_state_exists "ifaces_down"; then
     local ip_cmd
     ip_cmd="$(_find_cmd ip 2>/dev/null)" || ip_cmd=""
     if [ -n "$ip_cmd" ]; then
-      local iface
+      local iface iface_ok=0
       while IFS= read -r iface; do
         [ -n "$iface" ] || continue
-        "$ip_cmd" link set "$iface" up 2>/dev/null || true
-        log "lowlevel: emergency: interface $iface brought UP"
+        if "$ip_cmd" link set "$iface" up 2>/dev/null; then
+          log "lowlevel: emergency: interface $iface brought UP"
+          iface_ok=$((iface_ok + 1))
+        else
+          log "lowlevel: emergency: WARN: could not restore interface $iface"
+        fi
       done < "${LL_STATE_DIR}/ifaces_down"
+    else
+      log "lowlevel: emergency: WARN: ip command not found; cannot restore interfaces"
     fi
     _ll_state_rm "ifaces_down"
   fi
 
-  # Re-enable Wi-Fi if the module disabled it.
+  # ── Re-enable Wi-Fi ─────────────────────────────────────────────────────────
   if _ll_state_exists "wifi_was_enabled"; then
-    if has_cmd cmd; then
-      cmd wifi set-wifi-enabled enabled >/dev/null 2>&1 || true
-      log "lowlevel: emergency: Wi-Fi re-enabled"
-    elif has_cmd svc; then
-      svc wifi enable 2>/dev/null || true
-      log "lowlevel: emergency: Wi-Fi re-enabled via svc"
+    local restored=0
+    if has_cmd cmd && cmd wifi set-wifi-enabled enabled >/dev/null 2>&1; then
+      restored=1
+      log "lowlevel: emergency: Wi-Fi re-enabled via cmd wifi"
     fi
-    _ll_state_rm "wifi_was_enabled"
+    if [ "$restored" = "0" ] && has_cmd svc; then
+      if svc wifi enable 2>/dev/null; then
+        restored=1
+        log "lowlevel: emergency: Wi-Fi re-enabled via svc wifi (fallback)"
+      fi
+    fi
+    if [ "$restored" = "1" ]; then
+      _ll_state_rm "wifi_was_enabled"
+    else
+      log "lowlevel: emergency: WARN: could not re-enable Wi-Fi; marker kept for retry"
+    fi
   fi
 
-  # Re-enable mobile data if the module disabled it.
+  # ── Re-enable mobile data ───────────────────────────────────────────────────
   if _ll_state_exists "data_was_enabled"; then
-    if has_cmd cmd; then
-      cmd phone data enable >/dev/null 2>&1 || true
-      log "lowlevel: emergency: mobile data re-enabled"
-    elif has_cmd svc; then
-      svc data enable 2>/dev/null || true
-      log "lowlevel: emergency: mobile data re-enabled via svc"
+    local restored=0
+    if has_cmd cmd && cmd phone data enable >/dev/null 2>&1; then
+      restored=1
+      log "lowlevel: emergency: mobile data re-enabled via cmd phone"
     fi
-    _ll_state_rm "data_was_enabled"
+    if [ "$restored" = "0" ] && has_cmd svc; then
+      if svc data enable 2>/dev/null; then
+        restored=1
+        log "lowlevel: emergency: mobile data re-enabled via svc data (fallback)"
+      fi
+    fi
+    if [ "$restored" = "1" ]; then
+      _ll_state_rm "data_was_enabled"
+    else
+      log "lowlevel: emergency: WARN: could not re-enable mobile data; marker kept for retry"
+    fi
   fi
 
-  # Re-enable Bluetooth if the module disabled it.
+  # ── Re-enable Bluetooth ─────────────────────────────────────────────────────
   if _ll_state_exists "bt_was_enabled"; then
-    if has_cmd cmd; then
-      cmd bluetooth_manager enable >/dev/null 2>&1 || true
-      log "lowlevel: emergency: Bluetooth re-enabled"
-    elif has_cmd svc; then
-      svc bluetooth enable 2>/dev/null || true
-      log "lowlevel: emergency: Bluetooth re-enabled via svc"
+    local restored=0
+    if has_cmd cmd && cmd bluetooth_manager enable >/dev/null 2>&1; then
+      restored=1
+      log "lowlevel: emergency: Bluetooth re-enabled via cmd bluetooth_manager"
     fi
-    _ll_state_rm "bt_was_enabled"
+    if [ "$restored" = "0" ] && has_cmd svc; then
+      if svc bluetooth enable 2>/dev/null; then
+        restored=1
+        log "lowlevel: emergency: Bluetooth re-enabled via svc bluetooth (fallback)"
+      fi
+    fi
+    if [ "$restored" = "1" ]; then
+      _ll_state_rm "bt_was_enabled"
+    else
+      log "lowlevel: emergency: WARN: could not re-enable Bluetooth; marker kept for retry"
+    fi
   fi
 
-  # Note tethering status (we do not auto-restart tethering).
+  # ── Note tethering status ───────────────────────────────────────────────────
+  # Tethering is never auto-restarted; just note and clean up.
   if _ll_state_exists "tether_was_active"; then
     log "lowlevel: emergency: NOTE: tethering was stopped; user must re-enable manually"
     _ll_state_rm "tether_was_active"
