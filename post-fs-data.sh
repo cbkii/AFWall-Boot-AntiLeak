@@ -5,7 +5,7 @@
 MODDIR="${0%/*}"
 . "$MODDIR/bin/common.sh"
 
-log "post-fs-data: start (module=$MODULE_ID v2.2.0)"
+log "post-fs-data: start (module=$MODULE_ID v2.2.2)"
 
 # Remove legacy artifacts from older module versions (v1.x).
 cleanup_legacy "post-fs-data"
