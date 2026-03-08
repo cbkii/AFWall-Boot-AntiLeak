@@ -11,7 +11,9 @@
   TIMEOUT_SECS="${TIMEOUT_SECS:-120}"
   SETTLE_SECS="${SETTLE_SECS:-5}"
 
-  log "service: start (timeout=${TIMEOUT_SECS}s settle=${SETTLE_SECS}s fwd=${ENABLE_FORWARD_BLOCK:-1} in=${ENABLE_INPUT_BLOCK:-0} ll_mode=${LOWLEVEL_MODE:-safe})"
+  log "service: start"
+  log "service: config: timeout=${TIMEOUT_SECS}s settle=${SETTLE_SECS}s"
+  log "service: config: fwd=${ENABLE_FORWARD_BLOCK:-1} in=${ENABLE_INPUT_BLOCK:-0} ll_mode=${LOWLEVEL_MODE:-safe}"
 
   # Resolve AFWall package for diagnostic logging only.
   AFW_PKG="$(resolve_afwall_pkg 2>/dev/null)" || AFW_PKG=""

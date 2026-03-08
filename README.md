@@ -20,7 +20,7 @@ connections during this window.
 | Boot stage | What happens |
 |---|---|
 | `post-fs-data` (very early, before Zygote) | Module installs temporary `DROP` chains in three directions: **OUTPUT** (`MOD_PRE_AFW`/`MOD_PRE_AFW_V6`, raw table preferred), **FORWARD** (`MOD_PRE_AFW_FWD`/`MOD_PRE_AFW_FWD_V6`, filter table, covers tethered clients), and optionally **INPUT** (`MOD_PRE_AFW_IN`/`MOD_PRE_AFW_IN_V6`, filter table, disabled by default). Loopback is always exempted. |
-| `service` (late start, background) | **Layer 1**: Interface quiesce — bring non-loopback interfaces DOWN via `ip link`. **Layer 3**: Service shutdown — disable Wi-Fi, mobile data, and optionally Bluetooth/tethering via Android service commands once framework is ready. **Layer 4**: Poll iptables every 2 s for AFWall's `afwall` chain + `OUTPUT -j afwall` jump. On confirmation: settle delay → **(B)** remove iptables blocks → **(C)** restore only module-changed service/interface state → **(D)** log. A hard timeout (default 120 s) prevents indefinite blocking if AFWall is absent. |
+| `service` (late start, background) | **Layer 1 (interface quiesce)**: bring non-loopback interfaces DOWN via `ip link`. **Layer 3 (service shutdown)**: disable Wi-Fi, mobile data, and optionally Bluetooth/tethering via Android service commands once framework is ready. **Layer 4 (AFWall readiness)**: poll iptables every 2 s for AFWall's `afwall` chain + `OUTPUT -j afwall` jump. On confirmation: settle delay → **(B)** remove iptables blocks → **(C)** restore only module-changed service/interface state → **(D)** log. A hard timeout (default 120 s) prevents indefinite blocking if AFWall is absent. |
 | `action` (manual) | Emergency button in Magisk app: removes all iptables blocks **and** restores any service/interface state changed by this module. |
 | `uninstall` | Removes all module-owned iptables chains, restores module-changed service state, deletes all state files and logs. |
 
@@ -70,15 +70,15 @@ The module implements four defence-in-depth layers. **Layer 2 (iptables) is alwa
 ```
 BOOT TIMELINE
 ─────────────
-post-fs-data  │ Layer 2: iptables hard block installed (OUTPUT/FORWARD/INPUT)
-              │          ← packets cannot flow regardless of interface state
+post-fs-data  │ Layer 2 (firewall): iptables hard block installed (OUTPUT/FORWARD/INPUT)
+              │                     ← packets cannot flow regardless of interface state
               │
-service.sh    │ Layer 1: Interface quiesce (ip link set <iface> down)
-(background)  │ Layer 3: Service commands (cmd wifi / cmd phone / cmd connectivity)
-              │          ← belt-and-suspenders beneath L2
+service.sh    │ Layer 1 (quiesce):  Interface quiesce (ip link set <iface> down)
+(background)  │ Layer 3 (services): Service commands (cmd wifi / cmd phone / cmd connectivity)
+              │                     ← belt-and-suspenders beneath L2
               │
-polling loop  │ Layer 4: AFWall readiness detection
-              │    → confirm afwall chain + OUTPUT jump + settle delay
+service.sh    │ Layer 4 (handoff):  AFWall readiness detection (polling)
+(poll loop)   │    → confirm afwall chain + OUTPUT jump + settle delay
               │    → (B) remove_block: our iptables blocks removed
               │    → (C) restore: interfaces + services restored
               │    → (D) AFWall is now sole active protection
@@ -177,7 +177,9 @@ A successful boot looks like:
 [2026-03-08 04:01:00] install_block: INPUT block not enabled (set ENABLE_INPUT_BLOCK=1 to enable)
 [2026-03-08 04:01:00] install_block: done (out_v4=1 out_v6=1)
 [2026-03-08 04:01:00] post-fs-data: done
-[2026-03-08 04:01:15] service: start (timeout=120s settle=5s fwd=1 in=0 ll_mode=safe)
+[2026-03-08 04:01:15] service: start
+[2026-03-08 04:01:15] service: config: timeout=120s settle=5s
+[2026-03-08 04:01:15] service: config: fwd=1 in=0 ll_mode=safe
 [2026-03-08 04:01:15] lowlevel_prepare_environment: start (mode=safe)
 [2026-03-08 04:01:15] lowlevel_quiesce_interfaces: start
 [2026-03-08 04:01:15] lowlevel_quiesce_interfaces: done (2 interfaces quiesced)
