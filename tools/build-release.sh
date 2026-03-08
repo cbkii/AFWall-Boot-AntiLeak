@@ -76,9 +76,11 @@ META-INF/com/google/android/updater-script
 common/functions.sh
 common/install.sh
 bin/common.sh
+bin/installer_config.sh
 action.sh
 config.sh
 post-fs-data.sh
+reconfigure.sh
 service.sh
 uninstall.sh
 update.json
@@ -122,6 +124,7 @@ zip -r9 "$ZIP_PATH" \
   customize.sh \
   module.prop \
   post-fs-data.sh \
+  reconfigure.sh \
   service.sh \
   uninstall.sh \
   update.json \

@@ -39,6 +39,13 @@ set_permissions() {
   set_perm "$MODPATH/uninstall.sh"    root root 0755
   set_perm "$MODPATH/config.sh"       root root 0644
   set_perm_recursive "$MODPATH/bin"   root root 0755 0755
+  # reconfigure.sh is a user-facing terminal tool.
+  # MMT-Extended strips its shebang (# lines) during install; restore it here.
+  # set_permissions runs after the comment-stripping loop, so this is safe.
+  if [ -f "$MODPATH/reconfigure.sh" ]; then
+    sed -i '1i #!/system/bin/sh' "$MODPATH/reconfigure.sh"
+    set_perm "$MODPATH/reconfigure.sh" root root 0755
+  fi
 }
 
 ##########################################################################################
