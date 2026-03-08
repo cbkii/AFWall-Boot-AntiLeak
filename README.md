@@ -1,4 +1,4 @@
-# AFWall Boot AntiLeak — v2.0.0
+# AFWall Boot AntiLeak — v2.0.0 (MMT-Extended aligned)
 
 A Magisk module that **blocks all internet traffic at the kernel level** from
 the very first moment of each Android boot, before AFWall+ has applied its own
@@ -54,9 +54,9 @@ connections during this window.
 
 | Requirement | Details |
 |---|---|
-| **Android version** | Primary target: Android 16. Works on Android 8+. |
+| **Android version** | Primary target: Android 16. Works on Android 8+ (API 26+). |
 | **Device** | Tested on Google Pixel (tegu / Pixel 9a). Other Pixel devices supported. |
-| **Root** | Magisk >= 30.6 required. KernelSU is untested. |
+| **Root** | Magisk >= 20.4 required at install time (enforced by `update-binary`). Magisk >= 30.6 recommended for Android 16 runtime compatibility. KernelSU v0.6.6+ and APatch (KSU fork) are supported by the installer framework but **untested** with this module's iptables logic. |
 | **Firewall app** | AFWall+ (`dev.ukanth.ufirewall` or donate variant). Without it the timeout failsafe unblocks after `TIMEOUT_SECS`. |
 | **IPv4** | Required. Module will log a critical warning if IPv4 block cannot be installed. |
 | **IPv6** | Attempted. If `ip6tables` is absent or raw/filter table fails, IPv6 is unprotected (logged as warning). |
@@ -600,3 +600,474 @@ Enforced WiFi and Mobile Data block via `svc`.
 ### v1.0 — Legacy
 
 First release.
+
+---
+
+## 11. Module Framework and Packaging (MMT-Extended)
+
+### Framework baseline
+
+This module's installer framework is aligned with
+[MMT-Extended v3.7](https://github.com/Zackptg5/MMT-Extended) by Zackptg5.
+MMT-Extended is a widely-used Magisk module template that provides a
+standardised install/uninstall flow, KernelSU/APatch compatibility shims,
+DYNLIB support, addon infrastructure, and consistent file layout.
+
+### Repository / zip layout
+
+```
+AFWall-Boot-AntiLeak/
+├── .github/
+│   └── workflows/
+│       ├── ci.yml             # CI: shellcheck + build + validate on PRs and pushes
+│       └── release.yml        # Release: tag-driven or manual dispatch release
+├── META-INF/
+│   └── com/google/android/
+│       ├── update-binary      # MMT-Extended entry point (calls Magisk install_module)
+│       └── updater-script     # Required stub: "#MAGISK"
+├── common/
+│   ├── functions.sh           # MMT-Extended installer helper (extracted to TMPDIR)
+│   └── install.sh             # Module-specific install banner (sourced then deleted)
+├── bin/
+│   └── common.sh              # Module runtime library (sourced by all boot scripts)
+├── tools/
+│   ├── build-release.sh       # Build script: validates, packages ZIP, emits checksum
+│   └── validate-zip.sh        # Validates built ZIP internal structure
+├── action.sh                  # Magisk action button / manual recovery
+├── config.sh                  # User-tunable runtime settings
+├── customize.sh               # MMT-Extended config + permissions + SKIPUNZIP entry
+├── module.prop                # Module metadata including updateJson
+├── post-fs-data.sh            # Early-boot firewall block installer
+├── service.sh                 # Late-start AFWall+ polling + block release
+├── uninstall.sh               # Custom firewall cleanup (deliberate deviation — see §12)
+├── update.json                # OTA update metadata (consumed by Magisk app)
+├── README.md                  # This file
+├── .shellcheckrc              # Shellcheck configuration for Android/ash scripts
+├── .gitattributes             # LF line-ending rules
+└── .gitignore                 # Standard ignores (excludes dist/)
+```
+
+### How to build / package the module zip (local)
+
+The repository includes a build script that validates required files, packages
+the correct file set, and emits a checksum. This is the canonical way to build
+locally or in CI.
+
+```sh
+# From the repository root:
+chmod +x tools/build-release.sh
+tools/build-release.sh            # outputs to dist/ by default
+
+# Optionally specify output directory and zip name:
+tools/build-release.sh dist/ AFWall-Boot-AntiLeak.zip
+```
+
+Output:
+- `dist/AFWall-Boot-AntiLeak-v2.0.0.zip` — Magisk-installable module ZIP
+- `dist/sha256sum.txt` — SHA256 checksum
+- `dist/build-info.txt` — build metadata (version, git ref, date)
+
+Install the produced zip via **Magisk app → Modules → Install from storage**.
+
+Do **not** install in recovery; this module requires boot-mode install (the
+installer framework rejects recovery installs and only performs uninstall in
+that context).
+
+### Validate a built ZIP
+
+```sh
+chmod +x tools/validate-zip.sh
+tools/validate-zip.sh dist/AFWall-Boot-AntiLeak-v2.0.0.zip
+```
+
+This checks that all required installer and runtime files are present inside
+the ZIP, that `module.prop` is parseable, and that files are at the ZIP root
+(no nesting parent directory).
+
+### Install flow (what the installer does)
+
+1. `update-binary` loads Magisk's `util_functions.sh` and calls `install_module`.
+2. Magisk sources `customize.sh`, which sets config flags and defines
+   `set_permissions()`.
+3. `SKIPUNZIP=1` prevents Magisk from auto-extracting the zip.
+4. `customize.sh` manually extracts `common/functions.sh` to `$TMPDIR` and
+   sources it — this runs the MMT-Extended install engine.
+5. The install engine:
+   - Prints the MMT-Extended credit banner.
+   - Checks MINAPI (26) / MAXAPI constraints.
+   - Detects KSU/APatch and sets up variables.
+   - Extracts all zip files (except `META-INF/` and `common/functions.sh`) to
+     `$MODPATH`.
+   - Sources `common/install.sh` (prints the module banner), then deletes
+     `common/` from `$MODPATH`.
+   - Strips comments and blank lines from all `.sh`, `.prop`, and `.rule` files
+     in `$MODPATH` (MMT-Extended default behaviour).
+   - Processes `service.sh`, `post-fs-data.sh`, and `uninstall.sh` via
+     `install_script` (adds shebang and variable injections).
+   - Runs `set_perm_recursive $MODPATH 0 0 0755 0644` then calls
+     `set_permissions()` from `customize.sh` for per-file overrides.
+   - Calls `cleanup` (removes `common/` and `install.zip` if present).
+
+### Uninstall flow
+
+Uninstall is triggered by Magisk when the module is removed via the app.
+`uninstall.sh` runs from `$MODPATH` and:
+
+1. Removes module-owned firewall chains (`MOD_PRE_AFW`, `MOD_PRE_AFW_V6`)
+   from raw and filter tables.
+2. Removes legacy module-owned afwallstart scripts (if markers match).
+3. Deletes state files and logs under `/data/adb/AFWall-Boot-AntiLeak/`.
+
+Additionally, because this module has a custom `uninstall.sh` (not the default
+MMT-Extended template), the installer installs a fallback copy in
+`/data/adb/service.d/AFWall-Boot-AntiLeak-uninstall.sh`. This fallback runs
+on the next boot only if the module directory has already been deleted (e.g.
+manual deletion without going through Magisk). The fallback exits immediately
+if the module directory still exists.
+
+### update.json and OTA updates
+
+`module.prop` contains:
+
+```
+updateJson=https://raw.githubusercontent.com/cbkii/AFWall-Boot-AntiLeak/master/update.json
+```
+
+The Magisk app reads `update.json` from this URL to check for new versions and
+offer in-app updates. The `zipUrl` in `update.json` uses the GitHub Releases
+stable asset path:
+
+```json
+"zipUrl": "https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/latest/download/AFWall-Boot-AntiLeak.zip"
+```
+
+This works because the release workflow always uploads the ZIP with the stable
+name `AFWall-Boot-AntiLeak.zip`. When releasing a new version, `update.json`'s
+`version` and `versionCode` fields must be updated to match `module.prop`
+(see §13 Maintainer Release Process for the full checklist).
+
+---
+
+## 12. MMT-Extended Alignment Notes
+
+### What was aligned with MMT-Extended
+
+| Item | Change made |
+|---|---|
+| `META-INF/com/google/android/update-binary` | Replaced stub (that exited with error) with the real MMT-Extended entry point that calls `install_module` from Magisk's `util_functions.sh` |
+| `customize.sh` | Restructured to MMT-Extended convention: config flags section, REPLACE list, `set_permissions()` function, `SKIPUNZIP=1` + `common/functions.sh` source pattern |
+| `common/functions.sh` | Added — exact copy of MMT-Extended v3.7 installer helper. Required by `customize.sh`. Deleted from MODPATH after install. |
+| `common/install.sh` | Added — module-specific install banner. Sourced during install then deleted. |
+| `update.json` | Added — OTA update metadata consumed by Magisk app. |
+| `module.prop` | Added `updateJson` field; corrected version prefix to `v2.0.0`. |
+| `.gitattributes` | Updated to MMT-Extended's explicit LF line-ending rules (covers `.sh`, `.prop`, `.md`, `.json`, `META-INF/**`). |
+| `.gitignore` | Added — MMT-Extended convention (ignores `__MACOSX`, `.DS_Store`). |
+
+### Deliberate deviations from MMT-Extended
+
+#### 1. `uninstall.sh` — custom firewall cleanup
+
+**MMT-Extended default**: `uninstall.sh` reads a tracked-files list (`$INFO`)
+and restores backups or removes files installed outside the module directory.
+
+**This module**: `uninstall.sh` sources `bin/common.sh` and calls
+`remove_block()` to remove iptables chains, plus `cleanup_legacy()` and
+directory removal. It does not use the `$INFO` file because this module does
+not install files outside `$MODPATH`.
+
+**Why kept**: The module-owned iptables chains (`MOD_PRE_AFW`,
+`MOD_PRE_AFW_V6`) live in kernel space, not on the filesystem. The MMT-Extended
+INFO-file mechanism cannot track or remove them. The custom `uninstall.sh` is
+the only correct way to perform clean kernel-level teardown.
+
+**Side effect**: Because the first line of `uninstall.sh` is not
+`# Don't modify anything after this` (the MMT-Extended signal for a no-op
+uninstall), the installer also creates a fallback copy in
+`/data/adb/service.d/`. This is intentional: the fallback provides a
+last-resort cleanup path if the module directory is manually deleted without
+going through Magisk. Note that the fallback cannot source `bin/common.sh`
+if the module directory is already gone, so it will fail silently in that
+edge case.
+
+#### 2. `bin/common.sh` — module runtime library
+
+**MMT-Extended default**: No `bin/` directory. Helper logic is in
+`common/functions.sh` (installer-only, deleted after install).
+
+**This module**: `bin/common.sh` is a runtime library sourced by all boot
+scripts (`post-fs-data.sh`, `service.sh`, `action.sh`, `uninstall.sh`). It
+contains firewall management, AFWall+ detection, logging, and config loading
+logic.
+
+**Why kept**: This module has significant runtime logic that must persist on
+device. The MMT-Extended `common/functions.sh` is an installer-only artifact;
+a separate on-device library is the correct approach for this use case.
+
+#### 3. `config.sh` — user-visible configuration
+
+**MMT-Extended default**: No user-visible config file. All module configuration
+is done at install time.
+
+**This module**: `config.sh` provides runtime-tunable settings
+(`INTEGRATION_MODE`, `TIMEOUT_SECS`, `SETTLE_SECS`, `DEBUG`). Users can place
+a persistent override at `/data/adb/AFWall-Boot-AntiLeak/config.sh` which
+survives module updates.
+
+**Why kept**: The module's behaviour during boot is meaningfully configurable
+and the settings are user-facing. A persistent override path is essential for
+a security module to avoid unintended behaviour changes on update.
+
+**Note on comment stripping**: MMT-Extended's installer strips all comment
+lines from `.sh` files during installation. This removes the inline documentation
+from `config.sh`. Users should consult this README or the in-module `config.sh`
+in the source repository for documentation. The runtime behaviour is unaffected.
+
+#### 4. MINAPI=26 (not commented out)
+
+**MMT-Extended default**: MINAPI and MAXAPI are commented out (no restriction).
+
+**This module**: `MINAPI=26` is set (Android 8.0+). This prevents installation
+on Android versions that lack reliable iptables raw-table support. The primary
+target is Android 16; earlier Android versions work but may have different
+iptables behaviour.
+
+#### 5. KernelSU / APatch not tested
+
+**MMT-Extended**: Supports KSU v0.6.6+ and APatch (treated as KSU). The
+installer framework handles KSU/APatch correctly.
+
+**This module**: The installer framework supports KSU/APatch, but the module's
+runtime logic (iptables operations, `post-fs-data.sh` execution) has **not
+been tested** on KSU or APatch. The `post-fs-data.sh` hook in particular may
+behave differently under KSU. Use on KSU/APatch at your own risk.
+
+#### 6. No `system/` or `zygisk/` directories
+
+**MMT-Extended**: Includes empty `system/` and `zygisk/` placeholder
+directories.
+
+**This module**: These directories are not present because the module does not
+modify system files and does not use Zygisk. Their absence does not affect
+functionality; the installer handles their non-existence gracefully.
+
+---
+
+## 13. CI / Release Automation
+
+### Overview
+
+| Trigger | Workflow | What happens |
+|---|---|---|
+| PR or push to `master`/`main` | `ci.yml` | Shellcheck lint, build ZIP, validate structure, upload artifacts |
+| Push tag `v*.*.*` | `release.yml` | Build ZIP, validate, create GitHub Release, attach assets |
+| `workflow_dispatch` on `release.yml` | `release.yml` | Same as tag push; creates tag if absent |
+
+### CI workflow (`.github/workflows/ci.yml`)
+
+Triggered on every pull request and on direct pushes to `master`/`main`
+(documentation-only changes are skipped).
+
+Steps:
+1. **Shellcheck**: lints `bin/common.sh`, `action.sh`, `post-fs-data.sh`,
+   `service.sh`, `uninstall.sh`, `tools/build-release.sh`, and
+   `tools/validate-zip.sh`. Uses `.shellcheckrc` (shell=ash, disables Android
+   false-positives SC1090/SC1091/SC2034). Fails on any `warning` or above.
+2. **Build**: runs `tools/build-release.sh` to produce the module ZIP.
+3. **Validate**: runs `tools/validate-zip.sh` to verify the ZIP structure.
+4. **Upload artifacts**: attaches the ZIP, checksum, and build-info as workflow
+   artifacts (retained 14 days). Reviewers can download and test from the PR.
+
+PR checks give maintainers confidence that merging will produce a valid,
+installable ZIP.
+
+> **Note for first-time setup**: GitHub requires a maintainer to approve the
+> first run of a new CI workflow on a PR before it executes. This is a
+> one-time security gate. After the workflow runs once from the default branch
+> (`main`/`master`), all subsequent PR runs will proceed automatically without
+> approval.
+
+### Release workflow (`.github/workflows/release.yml`)
+
+**Tag-driven release (recommended)**:
+1. Push a version tag (e.g. `v2.0.0`) matching the value in `module.prop`.
+2. The workflow fires automatically.
+3. It validates that the tag matches `module.prop version`.
+4. It builds the ZIP with the stable filename `AFWall-Boot-AntiLeak.zip`.
+5. It creates a GitHub Release at that tag with release notes.
+6. It attaches `AFWall-Boot-AntiLeak.zip`, `sha256sum.txt`, and `build-info.txt`
+   as release assets.
+
+**Manual release (workflow_dispatch)**:
+1. Go to **Actions → Release → Run workflow** in the GitHub UI.
+2. Optionally specify a `ref` (branch/commit) and `tag` (defaults to
+   `module.prop` version). Check **draft** to review before publishing.
+3. The workflow creates the tag if it does not exist, then builds and publishes.
+4. Useful for re-publishing a release or building from a specific commit.
+
+**Release re-run**: If a release for that tag already exists, the workflow
+deletes it first (clean re-release). This handles CI re-runs safely.
+
+### Release asset naming
+
+| Asset | Description |
+|---|---|
+| `AFWall-Boot-AntiLeak.zip` | Magisk module ZIP (stable name for OTA `zipUrl`) |
+| `sha256sum.txt` | SHA256 checksum of the ZIP |
+| `build-info.txt` | Build metadata (version, git ref, date) |
+
+The stable name `AFWall-Boot-AntiLeak.zip` ensures the `update.json` `zipUrl`
+(`…/releases/latest/download/AFWall-Boot-AntiLeak.zip`) always resolves to the
+latest release without changing `update.json` on every release.
+
+### Where to download
+
+1. **Latest release**: [GitHub Releases](https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/latest)
+2. **Direct download**: `https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/latest/download/AFWall-Boot-AntiLeak.zip`
+3. **Specific version**: `https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/download/v2.0.0/AFWall-Boot-AntiLeak.zip`
+
+### Verify the checksum
+
+```sh
+# Download checksum file
+curl -L https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/latest/download/sha256sum.txt -o sha256sum.txt
+# Verify
+sha256sum -c sha256sum.txt
+```
+
+---
+
+## 14. Maintainer Release Process
+
+When you are ready to cut a new release:
+
+### Step 1: Update version files
+
+In a new branch/PR, update two files:
+
+**`module.prop`**:
+```
+version=v2.1.0
+versionCode=210
+```
+
+**`update.json`**:
+```json
+{
+  "version": "v2.1.0",
+  "versionCode": 210,
+  "zipUrl": "https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/latest/download/AFWall-Boot-AntiLeak.zip",
+  "changelog": "https://raw.githubusercontent.com/cbkii/AFWall-Boot-AntiLeak/master/README.md"
+}
+```
+
+`version` and `versionCode` must match between both files.
+
+### Step 2: Update the README ChangeLog
+
+Add an entry to the `## ChangeLog` section describing the changes in the new
+version.
+
+### Step 3: Open a PR and wait for CI
+
+The CI workflow will:
+- Lint all shell scripts
+- Build the module ZIP
+- Validate the ZIP structure
+- Upload the ZIP as an artifact (downloadable for manual testing)
+
+Review the CI artifacts. Download the ZIP and test-install it on a device if
+possible before merging.
+
+### Step 4: Merge the PR
+
+Merge the PR into `master`/`main`.
+
+### Step 5: Create a version tag
+
+```sh
+git checkout master
+git pull
+git tag v2.1.0
+git push origin v2.1.0
+```
+
+This triggers the release workflow automatically.
+
+### Step 6: Verify the release
+
+1. Go to [GitHub Releases](https://github.com/cbkii/AFWall-Boot-AntiLeak/releases).
+2. Confirm the new release is present with the correct tag.
+3. Confirm `AFWall-Boot-AntiLeak.zip`, `sha256sum.txt`, and `build-info.txt` are
+   attached.
+4. Download and verify the checksum.
+5. Test-install on a device if possible.
+
+### Alternative: manual dispatch
+
+If you prefer not to create the tag manually, or need to rebuild an existing
+release:
+
+1. Go to **Actions → Release → Run workflow**.
+2. Fill in the `ref` (leave blank for HEAD) and `tag` (leave blank to use
+   `module.prop` version).
+3. Check **draft** if you want to review before publishing.
+4. Click **Run workflow**.
+
+---
+
+## 15. Developer Quick Reference
+
+### Run the full local pipeline
+
+```sh
+# Lint
+shellcheck --severity=warning \
+  bin/common.sh action.sh post-fs-data.sh service.sh uninstall.sh \
+  tools/build-release.sh tools/validate-zip.sh
+
+# Build
+chmod +x tools/build-release.sh
+tools/build-release.sh dist/
+
+# Validate
+chmod +x tools/validate-zip.sh
+tools/validate-zip.sh dist/AFWall-Boot-AntiLeak-v2.0.0.zip
+
+# Inspect ZIP contents
+unzip -l dist/AFWall-Boot-AntiLeak-v2.0.0.zip
+```
+
+### Inspect the built ZIP structure
+
+```sh
+unzip -l dist/AFWall-Boot-AntiLeak-v2.0.0.zip
+```
+
+Expected top-level entries: `META-INF/`, `common/`, `bin/`, `action.sh`,
+`config.sh`, `customize.sh`, `module.prop`, `post-fs-data.sh`, `service.sh`,
+`uninstall.sh`, `update.json`, `README.md`.
+
+Files should **not** be nested under a parent directory such as
+`AFWall-Boot-AntiLeak/META-INF/...` — that would prevent Magisk from
+finding the installer files.
+
+### Test installability indicator
+
+After building, run:
+
+```sh
+tools/validate-zip.sh dist/AFWall-Boot-AntiLeak-v2.0.0.zip
+```
+
+A `VALIDATION PASSED` result means the ZIP passes structural checks. Actual
+on-device install testing remains the definitive test.
+
+### Bump version for a new release
+
+```sh
+# 1. Edit module.prop (version= and versionCode=)
+# 2. Edit update.json  (version and versionCode)
+# 3. Update README.md ChangeLog
+# 4. Commit, PR, merge
+# 5. git tag vX.Y.Z && git push origin vX.Y.Z
+```

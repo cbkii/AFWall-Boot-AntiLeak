@@ -1,31 +1,50 @@
-ui_print ""
-ui_print "================================================"
-ui_print "       AFWall Boot AntiLeak  v2.0.0"
-ui_print "================================================"
-ui_print "  Blocks ALL traffic at kernel level during"
-ui_print "  early boot via iptables raw/filter table."
-ui_print "  Block released ONLY after AFWall+ rules"
-ui_print "  are confirmed active in iptables."
-ui_print "================================================"
-ui_print ""
-ui_print "  Supports: Android 16 / Magisk >= 30.6"
-ui_print "  Target:   Google Pixel (Android 16)"
-ui_print ""
-ui_print "================================================"
-ui_print "  IMPORTANT: Remove any other antileak scripts"
-ui_print "  from /data/adb/service.d/ before rebooting."
-ui_print "  Legacy scripts are detected and removed"
-ui_print "  automatically on first boot."
-ui_print "================================================"
-ui_print ""
-ui_print "  Config: \$MODPATH/config.sh"
-ui_print "  Logs:   /data/adb/AFWall-Boot-AntiLeak/logs/boot.log"
-ui_print ""
+##########################################################################################
+#
+# MMT Extended Config Script
+#
+##########################################################################################
 
-# Set execute permissions on all module shell scripts.
-set_perm "$MODPATH/post-fs-data.sh" root root 0755
-set_perm "$MODPATH/service.sh"      root root 0755
-set_perm "$MODPATH/action.sh"       root root 0755
-set_perm "$MODPATH/uninstall.sh"    root root 0755
-set_perm "$MODPATH/config.sh"       root root 0644
-set_perm_recursive "$MODPATH/bin"   root root 0755 0755
+##########################################################################################
+# Config Flags
+##########################################################################################
+
+# This module targets Android 8+ (API 26+). Android 16 is the primary test target.
+MINAPI=26
+# Uncomment MAXAPI to restrict the upper bound if required.
+#MAXAPI=
+# This module does not install system libraries; DYNLIB is not applicable.
+#DYNLIB=true
+# This module does not install to extra partitions.
+#PARTOVER=true
+#PARTITIONS=""
+
+##########################################################################################
+# Replace list
+##########################################################################################
+
+# This module does not replace any system directories.
+REPLACE="
+"
+
+##########################################################################################
+# Permissions
+##########################################################################################
+
+set_permissions() {
+  # All module shell scripts must be executable.
+  # config.sh is intentionally read-only (0644) so accidental writes are obvious.
+  set_perm "$MODPATH/post-fs-data.sh" root root 0755
+  set_perm "$MODPATH/service.sh"      root root 0755
+  set_perm "$MODPATH/action.sh"       root root 0755
+  set_perm "$MODPATH/uninstall.sh"    root root 0755
+  set_perm "$MODPATH/config.sh"       root root 0644
+  set_perm_recursive "$MODPATH/bin"   root root 0755 0755
+}
+
+##########################################################################################
+# MMT Extended Logic - Don't modify anything after this
+##########################################################################################
+
+SKIPUNZIP=1
+unzip -qjo "$ZIPFILE" 'common/functions.sh' -d $TMPDIR >&2
+. $TMPDIR/functions.sh
