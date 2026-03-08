@@ -1,12 +1,20 @@
 #!/system/bin/sh
-# Do NOT assume where your module will be located.
-# ALWAYS use $MODDIR if you need to know where this script
-# and module is placed.
-# This will make sure your module will still work
-# if Magisk change its mount point in the future
-MODDIR=${0%/*}
+# post-fs-data stage: install kernel-level traffic block before any network
+# interface becomes active. Framework services (svc, am, etc.) are NOT
+# available here; only kernel-space operations are performed.
+MODDIR="${0%/*}"
+. "$MODDIR/bin/common.sh"
 
-# This script will be executed in post-fs-data mode
-rm -f /data/adb/system.d/afwallstart
-rm -f /data/adb/post-fs-data.d/afwallstart
-svc wifi disable && svc data disable
+log "post-fs-data: start (module=$MODULE_ID v2.0.0)"
+
+# Remove legacy artifacts from older module versions (v1.x).
+cleanup_legacy "post-fs-data"
+
+# Evaluate integration mode and install the kernel-level block if appropriate.
+if should_install_block; then
+  install_block
+else
+  log "post-fs-data: block skipped per integration mode"
+fi
+
+log "post-fs-data: done"
