@@ -880,6 +880,12 @@ Steps:
 PR checks give maintainers confidence that merging will produce a valid,
 installable ZIP.
 
+> **Note for first-time setup**: GitHub requires a maintainer to approve the
+> first run of a new CI workflow on a PR before it executes. This is a
+> one-time security gate. After the workflow runs once from the default branch
+> (`main`/`master`), all subsequent PR runs will proceed automatically without
+> approval.
+
 ### Release workflow (`.github/workflows/release.yml`)
 
 **Tag-driven release (recommended)**:
