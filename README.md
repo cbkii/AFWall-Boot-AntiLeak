@@ -1,4 +1,4 @@
-# AFWall Boot AntiLeak — v2.0.0
+# AFWall Boot AntiLeak — v2.0.0 (MMT-Extended aligned)
 
 A Magisk module that **blocks all internet traffic at the kernel level** from
 the very first moment of each Android boot, before AFWall+ has applied its own
@@ -54,9 +54,9 @@ connections during this window.
 
 | Requirement | Details |
 |---|---|
-| **Android version** | Primary target: Android 16. Works on Android 8+. |
+| **Android version** | Primary target: Android 16. Works on Android 8+ (API 26+). |
 | **Device** | Tested on Google Pixel (tegu / Pixel 9a). Other Pixel devices supported. |
-| **Root** | Magisk >= 30.6 required. KernelSU is untested. |
+| **Root** | Magisk >= 20.4 required at install time (enforced by `update-binary`). Magisk >= 30.6 recommended for Android 16 runtime compatibility. KernelSU v0.6.6+ and APatch (KSU fork) are supported by the installer framework but **untested** with this module's iptables logic. |
 | **Firewall app** | AFWall+ (`dev.ukanth.ufirewall` or donate variant). Without it the timeout failsafe unblocks after `TIMEOUT_SECS`. |
 | **IPv4** | Required. Module will log a critical warning if IPv4 block cannot be installed. |
 | **IPv6** | Attempted. If `ip6tables` is absent or raw/filter table fails, IPv6 is unprotected (logged as warning). |
@@ -600,3 +600,221 @@ Enforced WiFi and Mobile Data block via `svc`.
 ### v1.0 — Legacy
 
 First release.
+
+---
+
+## 11. Module Framework and Packaging (MMT-Extended)
+
+### Framework baseline
+
+This module's installer framework is aligned with
+[MMT-Extended v3.7](https://github.com/Zackptg5/MMT-Extended) by Zackptg5.
+MMT-Extended is a widely-used Magisk module template that provides a
+standardised install/uninstall flow, KernelSU/APatch compatibility shims,
+DYNLIB support, addon infrastructure, and consistent file layout.
+
+### Repository / zip layout
+
+```
+AFWall-Boot-AntiLeak/
+├── META-INF/
+│   └── com/google/android/
+│       ├── update-binary      # MMT-Extended entry point (calls Magisk install_module)
+│       └── updater-script     # Required stub: "#MAGISK"
+├── common/
+│   ├── functions.sh           # MMT-Extended installer helper (extracted to TMPDIR)
+│   └── install.sh             # Module-specific install banner (sourced then deleted)
+├── bin/
+│   └── common.sh              # Module runtime library (sourced by all boot scripts)
+├── action.sh                  # Magisk action button / manual recovery
+├── config.sh                  # User-tunable runtime settings
+├── customize.sh               # MMT-Extended config + permissions + SKIPUNZIP entry
+├── module.prop                # Module metadata including updateJson
+├── post-fs-data.sh            # Early-boot firewall block installer
+├── service.sh                 # Late-start AFWall+ polling + block release
+├── uninstall.sh               # Custom firewall cleanup (deliberate deviation — see below)
+├── update.json                # OTA update metadata (consumed by Magisk app)
+├── README.md                  # This file
+├── .gitattributes             # LF line-ending rules (MMT-Extended convention)
+└── .gitignore                 # Standard ignores (MMT-Extended convention)
+```
+
+### How to build / package the module zip
+
+```sh
+cd AFWall-Boot-AntiLeak/
+zip -r9 AFWall-Boot-AntiLeak-v2.0.0.zip \
+  META-INF/ common/ bin/ \
+  action.sh config.sh customize.sh module.prop \
+  post-fs-data.sh service.sh uninstall.sh \
+  update.json README.md \
+  -x "*.git*" -x "__MACOSX" -x ".DS_Store"
+```
+
+Install the produced zip via **Magisk app → Modules → Install from storage**.
+
+Do **not** install in recovery; this module requires boot-mode install (the
+installer framework rejects recovery installs and only performs uninstall in
+that context).
+
+### Install flow (what the installer does)
+
+1. `update-binary` loads Magisk's `util_functions.sh` and calls `install_module`.
+2. Magisk sources `customize.sh`, which sets config flags and defines
+   `set_permissions()`.
+3. `SKIPUNZIP=1` prevents Magisk from auto-extracting the zip.
+4. `customize.sh` manually extracts `common/functions.sh` to `$TMPDIR` and
+   sources it — this runs the MMT-Extended install engine.
+5. The install engine:
+   - Prints the MMT-Extended credit banner.
+   - Checks MINAPI (26) / MAXAPI constraints.
+   - Detects KSU/APatch and sets up variables.
+   - Extracts all zip files (except `META-INF/` and `common/functions.sh`) to
+     `$MODPATH`.
+   - Sources `common/install.sh` (prints the module banner), then deletes
+     `common/` from `$MODPATH`.
+   - Strips comments and blank lines from all `.sh`, `.prop`, and `.rule` files
+     in `$MODPATH` (MMT-Extended default behaviour).
+   - Processes `service.sh`, `post-fs-data.sh`, and `uninstall.sh` via
+     `install_script` (adds shebang and variable injections).
+   - Runs `set_perm_recursive $MODPATH 0 0 0755 0644` then calls
+     `set_permissions()` from `customize.sh` for per-file overrides.
+   - Calls `cleanup` (removes `common/` and `install.zip` if present).
+
+### Uninstall flow
+
+Uninstall is triggered by Magisk when the module is removed via the app.
+`uninstall.sh` runs from `$MODPATH` and:
+
+1. Removes module-owned firewall chains (`MOD_PRE_AFW`, `MOD_PRE_AFW_V6`)
+   from raw and filter tables.
+2. Removes legacy module-owned afwallstart scripts (if markers match).
+3. Deletes state files and logs under `/data/adb/AFWall-Boot-AntiLeak/`.
+
+Additionally, because this module has a custom `uninstall.sh` (not the default
+MMT-Extended template), the installer installs a fallback copy in
+`/data/adb/service.d/AFWall-Boot-AntiLeak-uninstall.sh`. This fallback runs
+on the next boot only if the module directory has already been deleted (e.g.
+manual deletion without going through Magisk). The fallback exits immediately
+if the module directory still exists.
+
+### update.json and OTA updates
+
+`module.prop` contains:
+
+```
+updateJson=https://raw.githubusercontent.com/cbkii/AFWall-Boot-AntiLeak/master/update.json
+```
+
+The Magisk app reads `update.json` from this URL to check for new versions and
+offer in-app updates. When a new release is published:
+
+1. Update `update.json` with the new `version`, `versionCode`, and `zipUrl`.
+2. Update `module.prop` with the matching `version` and `versionCode` (both
+   files must be kept in sync manually — there is no build-time automation).
+3. Upload the new zip to GitHub Releases as `AFWall-Boot-AntiLeak.zip`.
+4. Tag the release (e.g. `v2.1.0`).
+
+---
+
+## 12. MMT-Extended Alignment Notes
+
+### What was aligned with MMT-Extended
+
+| Item | Change made |
+|---|---|
+| `META-INF/com/google/android/update-binary` | Replaced stub (that exited with error) with the real MMT-Extended entry point that calls `install_module` from Magisk's `util_functions.sh` |
+| `customize.sh` | Restructured to MMT-Extended convention: config flags section, REPLACE list, `set_permissions()` function, `SKIPUNZIP=1` + `common/functions.sh` source pattern |
+| `common/functions.sh` | Added — exact copy of MMT-Extended v3.7 installer helper. Required by `customize.sh`. Deleted from MODPATH after install. |
+| `common/install.sh` | Added — module-specific install banner. Sourced during install then deleted. |
+| `update.json` | Added — OTA update metadata consumed by Magisk app. |
+| `module.prop` | Added `updateJson` field; corrected version prefix to `v2.0.0`. |
+| `.gitattributes` | Updated to MMT-Extended's explicit LF line-ending rules (covers `.sh`, `.prop`, `.md`, `.json`, `META-INF/**`). |
+| `.gitignore` | Added — MMT-Extended convention (ignores `__MACOSX`, `.DS_Store`). |
+
+### Deliberate deviations from MMT-Extended
+
+#### 1. `uninstall.sh` — custom firewall cleanup
+
+**MMT-Extended default**: `uninstall.sh` reads a tracked-files list (`$INFO`)
+and restores backups or removes files installed outside the module directory.
+
+**This module**: `uninstall.sh` sources `bin/common.sh` and calls
+`remove_block()` to remove iptables chains, plus `cleanup_legacy()` and
+directory removal. It does not use the `$INFO` file because this module does
+not install files outside `$MODPATH`.
+
+**Why kept**: The module-owned iptables chains (`MOD_PRE_AFW`,
+`MOD_PRE_AFW_V6`) live in kernel space, not on the filesystem. The MMT-Extended
+INFO-file mechanism cannot track or remove them. The custom `uninstall.sh` is
+the only correct way to perform clean kernel-level teardown.
+
+**Side effect**: Because the first line of `uninstall.sh` is not
+`# Don't modify anything after this` (the MMT-Extended signal for a no-op
+uninstall), the installer also creates a fallback copy in
+`/data/adb/service.d/`. This is intentional: the fallback provides a
+last-resort cleanup path if the module directory is manually deleted without
+going through Magisk. Note that the fallback cannot source `bin/common.sh`
+if the module directory is already gone, so it will fail silently in that
+edge case.
+
+#### 2. `bin/common.sh` — module runtime library
+
+**MMT-Extended default**: No `bin/` directory. Helper logic is in
+`common/functions.sh` (installer-only, deleted after install).
+
+**This module**: `bin/common.sh` is a runtime library sourced by all boot
+scripts (`post-fs-data.sh`, `service.sh`, `action.sh`, `uninstall.sh`). It
+contains firewall management, AFWall+ detection, logging, and config loading
+logic.
+
+**Why kept**: This module has significant runtime logic that must persist on
+device. The MMT-Extended `common/functions.sh` is an installer-only artifact;
+a separate on-device library is the correct approach for this use case.
+
+#### 3. `config.sh` — user-visible configuration
+
+**MMT-Extended default**: No user-visible config file. All module configuration
+is done at install time.
+
+**This module**: `config.sh` provides runtime-tunable settings
+(`INTEGRATION_MODE`, `TIMEOUT_SECS`, `SETTLE_SECS`, `DEBUG`). Users can place
+a persistent override at `/data/adb/AFWall-Boot-AntiLeak/config.sh` which
+survives module updates.
+
+**Why kept**: The module's behaviour during boot is meaningfully configurable
+and the settings are user-facing. A persistent override path is essential for
+a security module to avoid unintended behaviour changes on update.
+
+**Note on comment stripping**: MMT-Extended's installer strips all comment
+lines from `.sh` files during installation. This removes the inline documentation
+from `config.sh`. Users should consult this README or the in-module `config.sh`
+in the source repository for documentation. The runtime behaviour is unaffected.
+
+#### 4. MINAPI=26 (not commented out)
+
+**MMT-Extended default**: MINAPI and MAXAPI are commented out (no restriction).
+
+**This module**: `MINAPI=26` is set (Android 8.0+). This prevents installation
+on Android versions that lack reliable iptables raw-table support. The primary
+target is Android 16; earlier Android versions work but may have different
+iptables behaviour.
+
+#### 5. KernelSU / APatch not tested
+
+**MMT-Extended**: Supports KSU v0.6.6+ and APatch (treated as KSU). The
+installer framework handles KSU/APatch correctly.
+
+**This module**: The installer framework supports KSU/APatch, but the module's
+runtime logic (iptables operations, `post-fs-data.sh` execution) has **not
+been tested** on KSU or APatch. The `post-fs-data.sh` hook in particular may
+behave differently under KSU. Use on KSU/APatch at your own risk.
+
+#### 6. No `system/` or `zygisk/` directories
+
+**MMT-Extended**: Includes empty `system/` and `zygisk/` placeholder
+directories.
+
+**This module**: These directories are not present because the module does not
+modify system files and does not use Zygisk. Their absence does not affect
+functionality; the installer handles their non-existence gracefully.
