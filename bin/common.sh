@@ -59,17 +59,27 @@ _find_cmd() {
 has_cmd() { _find_cmd "$1" >/dev/null 2>&1; }
 
 # ── Config loading ─────────────────────────────────────────────────────────────
-# Sources the first config.sh found: module directory, then persistent data dir.
+# Sources config.sh from the module directory (built-in defaults), then from the
+# persistent data directory (user override). Both files are loaded so the
+# persistent override at MODULE_DATA/config.sh takes precedence over defaults
+# and survives module updates.
 load_config() {
-  local cfg
-  for cfg in \
-    "${MODDIR:-}/config.sh" \
-    "${MODULE_DATA}/config.sh"; do
-    [ -f "$cfg" ] || continue
+  local cfg loaded=0
+  # Load built-in defaults from the module directory first.
+  cfg="${MODDIR:-}/config.sh"
+  if [ -f "$cfg" ]; then
     . "$cfg" 2>/dev/null || true
-    debug_log "config: loaded $cfg"
-    return 0
-  done
+    debug_log "config: loaded defaults from $cfg"
+    loaded=1
+  fi
+  # Load persistent user override second; its values win over the defaults above.
+  cfg="${MODULE_DATA}/config.sh"
+  if [ -f "$cfg" ]; then
+    . "$cfg" 2>/dev/null || true
+    debug_log "config: loaded user override from $cfg"
+    loaded=1
+  fi
+  [ "$loaded" = "0" ] && debug_log "config: no config files found; using built-in defaults"
   return 0
 }
 
@@ -306,14 +316,14 @@ afwall_rules_present_v4() {
   local ipt
   ipt="$(_find_cmd iptables)" || return 1
   "$ipt" -S 2>/dev/null | grep -qE '^-N afwall($| )' || return 1
-  "$ipt" -S OUTPUT 2>/dev/null | grep -qE '^-A OUTPUT .* -j afwall($| )'
+  "$ipt" -S OUTPUT 2>/dev/null | grep -qE '^-A OUTPUT .*-j afwall($| )'
 }
 
 afwall_rules_present_v6() {
   local ip6t
   ip6t="$(_find_cmd ip6tables)" || return 1
   "$ip6t" -S 2>/dev/null | grep -qE '^-N afwall($| )' || return 1
-  "$ip6t" -S OUTPUT 2>/dev/null | grep -qE '^-A OUTPUT .* -j afwall($| )'
+  "$ip6t" -S OUTPUT 2>/dev/null | grep -qE '^-A OUTPUT .*-j afwall($| )'
 }
 
 afwall_rules_present() {
