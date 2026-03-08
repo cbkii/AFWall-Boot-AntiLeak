@@ -11,20 +11,29 @@ echo "║   AFWall Boot AntiLeak - Manual Recovery  ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 
-echo "[1/3] Removing kernel-level traffic block..."
+echo "[1/4] Removing kernel-level firewall block..."
 remove_block
 echo "      Done."
 echo ""
 
-echo "[2/3] Cleaning up legacy artifacts..."
+echo "[2/4] Restoring lower-layer service/interface state..."
+lowlevel_emergency_restore
+echo "      Done."
+echo ""
+
+echo "[3/4] Cleaning up legacy artifacts..."
 cleanup_legacy "action"
 echo "      Done."
 echo ""
 
-echo "[3/3] Diagnostics"
+echo "[4/4] Diagnostics"
 echo "      State directory: $STATE_DIR"
 if [ -d "$STATE_DIR" ]; then
   ls -la "$STATE_DIR" 2>/dev/null || echo "      (empty or unreadable)"
+  if [ -d "${STATE_DIR}/ll" ]; then
+    echo "      Lower-layer state (ll/):"
+    ls -la "${STATE_DIR}/ll/" 2>/dev/null || echo "      (empty)"
+  fi
 else
   echo "      (state directory not found - no block was active)"
 fi

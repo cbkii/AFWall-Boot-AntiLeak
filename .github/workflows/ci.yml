@@ -9,6 +9,7 @@ on:
     branches: [master, main]
     paths-ignore:
       - "README.md"
+      - "ADVANCED.md"
       - ".gitignore"
       - ".gitattributes"
       - ".shellcheckrc"
@@ -37,6 +38,7 @@ jobs:
         run: |
           shellcheck --severity=warning \
             bin/common.sh \
+            bin/lowlevel.sh \
             action.sh \
             post-fs-data.sh \
             service.sh \

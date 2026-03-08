@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v2.0.0 - Common library
+# AFWall Boot AntiLeak v2.2.2 - Common library
 # POSIX/ash compatible. No bashisms. Sourced by all module scripts; do not
 # execute directly.
 
@@ -10,7 +10,21 @@ LOG_DIR="${MODULE_DATA}/logs"
 LOG_FILE="${LOG_DIR}/boot.log"
 STATE_DIR="${MODULE_DATA}/state"
 
-# Module-owned temporary chain names (never touch chains not in this list)
+# ── Module-owned chain names ───────────────────────────────────────────────────
+# Each traffic direction gets its own named chain so ownership is unambiguous.
+# Never touch iptables chains not in this list.
+#
+# OUTPUT chains (device-originated traffic) — raw preferred, filter fallback
+CHAIN_OUT_V4="MOD_PRE_AFW"
+CHAIN_OUT_V6="MOD_PRE_AFW_V6"
+# FORWARD chains (tethered-client / hotspot / USB / BT tether) — filter table
+CHAIN_FWD_V4="MOD_PRE_AFW_FWD"
+CHAIN_FWD_V6="MOD_PRE_AFW_FWD_V6"
+# INPUT chains (optional: inbound traffic hardening) — filter table
+CHAIN_IN_V4="MOD_PRE_AFW_IN"
+CHAIN_IN_V6="MOD_PRE_AFW_IN_V6"
+
+# Backward-compatibility aliases used by legacy cleanup paths
 CHAIN_V4="MOD_PRE_AFW"
 CHAIN_V6="MOD_PRE_AFW_V6"
 
@@ -104,35 +118,55 @@ _jump_exists() {
 }
 
 # ── Block installation ─────────────────────────────────────────────────────────
-# Install a DROP chain in the given table and jump to it from OUTPUT.
-# Exempts loopback. Idempotent.
-_install_block_table() {
-  local cmd="$1" table="$2" chain="$3"
-  debug_log "install_block_table: cmd=$cmd table=$table chain=$chain"
+# Generic helper: create a DROP chain and jump to it from parent_chain.
+# Handles loopback exemption per traffic direction.
+# Idempotent: safe to call multiple times.
+_install_chain_block_table() {
+  local cmd="$1" table="$2" chain="$3" parent_chain="$4"
+  debug_log "_install_chain_block_table: cmd=$(basename "$cmd") table=$table chain=$chain parent=$parent_chain"
 
   if ! _table_available "$cmd" "$table"; then
-    debug_log "install_block_table: $table unavailable for $(basename "$cmd")"
+    debug_log "_install_chain_block_table: $table unavailable for $(basename "$cmd")"
+    return 1
+  fi
+
+  # Verify the parent built-in chain exists in this table (guard against
+  # calling e.g. FORWARD in the raw table which only has PREROUTING/OUTPUT).
+  if ! "$cmd" -t "$table" -S "$parent_chain" >/dev/null 2>&1; then
+    debug_log "_install_chain_block_table: $parent_chain not in $table ($(basename "$cmd"))"
     return 1
   fi
 
   # Create chain if it does not yet exist.
   if ! _chain_exists "$cmd" "$table" "$chain"; then
     if ! "$cmd" -t "$table" -N "$chain" 2>/dev/null; then
-      log "install_block: failed to create chain $chain in $table"
+      log "_install_chain_block_table: failed to create $chain in $table"
       return 1
     fi
-    debug_log "install_block_table: created chain $chain in $table"
+    debug_log "_install_chain_block_table: created $chain in $table"
   fi
 
-  # Exempt loopback traffic so local IPC is not disrupted.
-  if ! "$cmd" -t "$table" -C "$chain" -o lo -j RETURN 2>/dev/null; then
-    "$cmd" -t "$table" -A "$chain" -o lo -j RETURN 2>/dev/null || true
-  fi
+  # Loopback exemption — direction depends on parent chain.
+  # OUTPUT: exempt packets leaving on loopback (-o lo).
+  # INPUT/FORWARD: exempt packets arriving on loopback (-i lo) to avoid
+  # breaking local IPC and preventing kernel health traffic from being dropped.
+  case "$parent_chain" in
+    OUTPUT)
+      if ! "$cmd" -t "$table" -C "$chain" -o lo -j RETURN 2>/dev/null; then
+        "$cmd" -t "$table" -A "$chain" -o lo -j RETURN 2>/dev/null || true
+      fi
+      ;;
+    INPUT|FORWARD)
+      if ! "$cmd" -t "$table" -C "$chain" -i lo -j RETURN 2>/dev/null; then
+        "$cmd" -t "$table" -A "$chain" -i lo -j RETURN 2>/dev/null || true
+      fi
+      ;;
+  esac
 
   # Add DROP rule to the chain (idempotent check).
   if ! "$cmd" -t "$table" -C "$chain" -j DROP 2>/dev/null; then
     if ! "$cmd" -t "$table" -A "$chain" -j DROP 2>/dev/null; then
-      log "install_block: failed to add DROP to $chain in $table"
+      log "_install_chain_block_table: failed to add DROP to $chain in $table"
       # Roll back the chain so it is not left half-configured.
       "$cmd" -t "$table" -F "$chain" 2>/dev/null || true
       "$cmd" -t "$table" -X "$chain" 2>/dev/null || true
@@ -140,10 +174,10 @@ _install_block_table() {
     fi
   fi
 
-  # Insert jump at position 1 in OUTPUT (idempotent).
-  if ! _jump_exists "$cmd" "$table" OUTPUT "$chain"; then
-    if ! "$cmd" -t "$table" -I OUTPUT 1 -j "$chain" 2>/dev/null; then
-      log "install_block: failed to insert OUTPUT jump to $chain in $table"
+  # Insert jump at position 1 in parent_chain (idempotent).
+  if ! _jump_exists "$cmd" "$table" "$parent_chain" "$chain"; then
+    if ! "$cmd" -t "$table" -I "$parent_chain" 1 -j "$chain" 2>/dev/null; then
+      log "_install_chain_block_table: failed to insert $parent_chain jump to $chain in $table"
       # Do not abort; chain + DROP are still in place and will block if a
       # jump already exists from a previous invocation.
     fi
@@ -152,89 +186,192 @@ _install_block_table() {
   return 0
 }
 
-install_block_v4() {
+# Backward-compatible alias used internally (OUTPUT direction, any table).
+_install_block_table() { _install_chain_block_table "$1" "$2" "$3" OUTPUT; }
+
+# ── OUTPUT block (device-originated traffic) ───────────────────────────────────
+# Prefers raw table (pre-conntrack); falls back to filter table.
+install_output_block_v4() {
   local ipt
   ipt="$(_find_cmd iptables)" || {
-    log "install_block_v4: iptables not found"
+    log "install_output_block_v4: iptables not found"
     return 1
   }
   _init_dirs
 
-  # Prefer raw table: captures packets before conntrack, hardest to bypass.
-  if _install_block_table "$ipt" raw "$CHAIN_V4"; then
-    printf 'raw' > "${STATE_DIR}/ipv4_table" 2>/dev/null || true
-    log "install_block_v4: installed in raw table"
+  if _install_chain_block_table "$ipt" raw "$CHAIN_OUT_V4" OUTPUT; then
+    printf 'raw' > "${STATE_DIR}/ipv4_out_table" 2>/dev/null || true
+    rm -f "${STATE_DIR}/ipv4_table" 2>/dev/null || true
+    log "install_output_block_v4: installed in raw table"
     return 0
   fi
 
-  log "install_block_v4: raw table failed; falling back to filter table"
-  if _install_block_table "$ipt" filter "$CHAIN_V4"; then
-    printf 'filter' > "${STATE_DIR}/ipv4_table" 2>/dev/null || true
-    log "install_block_v4: installed in filter table (fallback)"
+  log "install_output_block_v4: raw table failed; falling back to filter table"
+  if _install_chain_block_table "$ipt" filter "$CHAIN_OUT_V4" OUTPUT; then
+    printf 'filter' > "${STATE_DIR}/ipv4_out_table" 2>/dev/null || true
+    rm -f "${STATE_DIR}/ipv4_table" 2>/dev/null || true
+    log "install_output_block_v4: installed in filter table (fallback)"
     return 0
   fi
 
-  log "install_block_v4: WARN: could not install IPv4 block"
+  log "install_output_block_v4: WARN: could not install IPv4 OUTPUT block"
   return 1
 }
 
-install_block_v6() {
+install_output_block_v6() {
   local ip6t
   ip6t="$(_find_cmd ip6tables)" || {
-    log "install_block_v6: ip6tables not found; IPv6 traffic unprotected"
+    log "install_output_block_v6: ip6tables not found; IPv6 OUTPUT unprotected"
     return 1
   }
   _init_dirs
 
-  if _install_block_table "$ip6t" raw "$CHAIN_V6"; then
-    printf 'raw' > "${STATE_DIR}/ipv6_table" 2>/dev/null || true
-    log "install_block_v6: installed in raw table"
+  if _install_chain_block_table "$ip6t" raw "$CHAIN_OUT_V6" OUTPUT; then
+    printf 'raw' > "${STATE_DIR}/ipv6_out_table" 2>/dev/null || true
+    rm -f "${STATE_DIR}/ipv6_table" 2>/dev/null || true
+    log "install_output_block_v6: installed in raw table"
     return 0
   fi
 
-  log "install_block_v6: raw table failed; falling back to filter table"
-  if _install_block_table "$ip6t" filter "$CHAIN_V6"; then
-    printf 'filter' > "${STATE_DIR}/ipv6_table" 2>/dev/null || true
-    log "install_block_v6: installed in filter table (fallback)"
+  log "install_output_block_v6: raw table failed; falling back to filter table"
+  if _install_chain_block_table "$ip6t" filter "$CHAIN_OUT_V6" OUTPUT; then
+    printf 'filter' > "${STATE_DIR}/ipv6_out_table" 2>/dev/null || true
+    rm -f "${STATE_DIR}/ipv6_table" 2>/dev/null || true
+    log "install_output_block_v6: installed in filter table (fallback)"
     return 0
   fi
 
-  log "install_block_v6: WARN: could not install IPv6 block"
+  log "install_output_block_v6: WARN: could not install IPv6 OUTPUT block"
+  return 1
+}
+
+# ── FORWARD block (tethered-client / hotspot / USB-tether / BT-tether) ─────────
+# FORWARD chain exists only in the filter table (not raw); no table fallback.
+install_forward_block_v4() {
+  local ipt
+  ipt="$(_find_cmd iptables)" || {
+    log "install_forward_block_v4: iptables not found"
+    return 1
+  }
+  _init_dirs
+
+  if _install_chain_block_table "$ipt" filter "$CHAIN_FWD_V4" FORWARD; then
+    printf '1' > "${STATE_DIR}/ipv4_fwd_active" 2>/dev/null || true
+    log "install_forward_block_v4: installed in filter table"
+    return 0
+  fi
+
+  log "install_forward_block_v4: WARN: could not install IPv4 FORWARD block; tethered-client traffic unprotected"
+  return 1
+}
+
+install_forward_block_v6() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables)" || {
+    log "install_forward_block_v6: ip6tables not found; IPv6 FORWARD unprotected (reduced tether coverage)"
+    return 1
+  }
+  _init_dirs
+
+  if _install_chain_block_table "$ip6t" filter "$CHAIN_FWD_V6" FORWARD; then
+    printf '1' > "${STATE_DIR}/ipv6_fwd_active" 2>/dev/null || true
+    log "install_forward_block_v6: installed in filter table"
+    return 0
+  fi
+
+  log "install_forward_block_v6: WARN: could not install IPv6 FORWARD block; reduced tether coverage"
+  return 1
+}
+
+# ── INPUT block (optional: inbound traffic hardening) ─────────────────────────
+# INPUT chain exists only in the filter table; loopback is always exempted.
+install_input_block_v4() {
+  local ipt
+  ipt="$(_find_cmd iptables)" || {
+    log "install_input_block_v4: iptables not found"
+    return 1
+  }
+  _init_dirs
+
+  if _install_chain_block_table "$ipt" filter "$CHAIN_IN_V4" INPUT; then
+    printf '1' > "${STATE_DIR}/ipv4_in_active" 2>/dev/null || true
+    log "install_input_block_v4: installed in filter table"
+    return 0
+  fi
+
+  log "install_input_block_v4: WARN: could not install IPv4 INPUT block"
+  return 1
+}
+
+install_input_block_v6() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables)" || {
+    log "install_input_block_v6: ip6tables not found; IPv6 INPUT unprotected"
+    return 1
+  }
+  _init_dirs
+
+  if _install_chain_block_table "$ip6t" filter "$CHAIN_IN_V6" INPUT; then
+    printf '1' > "${STATE_DIR}/ipv6_in_active" 2>/dev/null || true
+    log "install_input_block_v6: installed in filter table"
+    return 0
+  fi
+
+  log "install_input_block_v6: WARN: could not install IPv6 INPUT block"
   return 1
 }
 
 install_block() {
   _init_dirs
-  local v4=1 v6=1
-  log "install_block: start"
+  load_config
+  local out_v4=0 out_v6=0
+  log "install_block: start (fwd=${ENABLE_FORWARD_BLOCK:-1} in=${ENABLE_INPUT_BLOCK:-0})"
 
-  install_block_v4 && v4=0
-  install_block_v6 && v6=0
+  # OUTPUT block: always installed (device-originated traffic).
+  install_output_block_v4 && out_v4=1
+  install_output_block_v6 && out_v6=1
 
-  local v4_ok=$((1 - v4)) v6_ok=$((1 - v6))
-  if [ "$v4_ok" = "1" ] || [ "$v6_ok" = "1" ]; then
+  # FORWARD block: enabled by default; covers tethered-client / hotspot /
+  # USB-tether / Bluetooth-tether forwarded traffic.
+  if [ "${ENABLE_FORWARD_BLOCK:-1}" != "0" ]; then
+    install_forward_block_v4 || true
+    install_forward_block_v6 || true
+  else
+    log "install_block: FORWARD block disabled by ENABLE_FORWARD_BLOCK=0"
+  fi
+
+  # INPUT block: disabled by default; opt-in for inbound traffic hardening.
+  if [ "${ENABLE_INPUT_BLOCK:-0}" = "1" ]; then
+    install_input_block_v4 || true
+    install_input_block_v6 || true
+  else
+    log "install_block: INPUT block not enabled (set ENABLE_INPUT_BLOCK=1 to enable)"
+  fi
+
+  if [ "$out_v4" = "1" ] || [ "$out_v6" = "1" ]; then
     printf '1' > "${STATE_DIR}/block_installed" 2>/dev/null || true
-    log "install_block: done (v4_ok=$v4_ok v6_ok=$v6_ok)"
+    log "install_block: done (out_v4=$out_v4 out_v6=$out_v6)"
     return 0
   fi
 
-  log "install_block: WARN: no block layers were installed"
+  log "install_block: WARN: no OUTPUT block layers were installed"
   return 1
 }
 
 # ── Block removal ──────────────────────────────────────────────────────────────
-# Remove OUTPUT jump, flush, and delete the named chain. Idempotent.
-_remove_block_table() {
-  local cmd="$1" table="$2" chain="$3" n=0
+# Generic helper: remove all jumps from parent_chain to chain, then flush and
+# delete chain. Idempotent.
+_remove_chain_block_table() {
+  local cmd="$1" table="$2" chain="$3" parent_chain="$4" n=0
   [ -x "$cmd" ] || return 0
   _table_available "$cmd" "$table" || return 0
 
-  # Remove all OUTPUT jump rules pointing at our chain.
-  while _jump_exists "$cmd" "$table" OUTPUT "$chain"; do
-    "$cmd" -t "$table" -D OUTPUT -j "$chain" 2>/dev/null || break
+  # Remove all jump rules from parent_chain pointing at our chain.
+  while _jump_exists "$cmd" "$table" "$parent_chain" "$chain"; do
+    "$cmd" -t "$table" -D "$parent_chain" -j "$chain" 2>/dev/null || break
     n=$((n + 1))
     if [ "$n" -gt 10 ]; then
-      log "remove_block: loop-guard hit removing OUTPUT jump ($chain $table)"
+      log "_remove_chain_block_table: loop-guard hit removing $parent_chain jump ($chain $table)"
       break
     fi
   done
@@ -243,46 +380,90 @@ _remove_block_table() {
   if _chain_exists "$cmd" "$table" "$chain"; then
     "$cmd" -t "$table" -F "$chain" 2>/dev/null || true
     "$cmd" -t "$table" -X "$chain" 2>/dev/null || true
-    debug_log "remove_block_table: removed $chain from $table"
+    debug_log "_remove_chain_block_table: removed $chain from $table ($parent_chain)"
   fi
   return 0
 }
 
-remove_block_v4() {
+# Backward-compatible alias for OUTPUT direction (any table).
+_remove_block_table() { _remove_chain_block_table "$1" "$2" "$3" OUTPUT; }
+
+# ── Per-direction remove functions ─────────────────────────────────────────────
+
+remove_output_block_v4() {
   local ipt table
   ipt="$(_find_cmd iptables)" || return 0
-  table="$(cat "${STATE_DIR}/ipv4_table" 2>/dev/null)" || table=""
+  # Support both new state file name and legacy name from v2.0.0.
+  table="$(cat "${STATE_DIR}/ipv4_out_table" 2>/dev/null)" || table=""
+  [ -z "$table" ] && table="$(cat "${STATE_DIR}/ipv4_table" 2>/dev/null)" || true
 
   if [ -n "$table" ]; then
-    _remove_block_table "$ipt" "$table" "$CHAIN_V4"
-    rm -f "${STATE_DIR}/ipv4_table" 2>/dev/null || true
+    _remove_chain_block_table "$ipt" "$table" "$CHAIN_OUT_V4" OUTPUT
+    rm -f "${STATE_DIR}/ipv4_out_table" "${STATE_DIR}/ipv4_table" 2>/dev/null || true
   else
     # State lost; try both tables defensively.
-    _remove_block_table "$ipt" raw    "$CHAIN_V4"
-    _remove_block_table "$ipt" filter "$CHAIN_V4"
+    _remove_chain_block_table "$ipt" raw    "$CHAIN_OUT_V4" OUTPUT
+    _remove_chain_block_table "$ipt" filter "$CHAIN_OUT_V4" OUTPUT
   fi
-  log "remove_block_v4: done"
+  log "remove_output_block_v4: done"
 }
 
-remove_block_v6() {
+remove_output_block_v6() {
   local ip6t table
   ip6t="$(_find_cmd ip6tables)" || return 0
-  table="$(cat "${STATE_DIR}/ipv6_table" 2>/dev/null)" || table=""
+  table="$(cat "${STATE_DIR}/ipv6_out_table" 2>/dev/null)" || table=""
+  [ -z "$table" ] && table="$(cat "${STATE_DIR}/ipv6_table" 2>/dev/null)" || true
 
   if [ -n "$table" ]; then
-    _remove_block_table "$ip6t" "$table" "$CHAIN_V6"
-    rm -f "${STATE_DIR}/ipv6_table" 2>/dev/null || true
+    _remove_chain_block_table "$ip6t" "$table" "$CHAIN_OUT_V6" OUTPUT
+    rm -f "${STATE_DIR}/ipv6_out_table" "${STATE_DIR}/ipv6_table" 2>/dev/null || true
   else
-    _remove_block_table "$ip6t" raw    "$CHAIN_V6"
-    _remove_block_table "$ip6t" filter "$CHAIN_V6"
+    _remove_chain_block_table "$ip6t" raw    "$CHAIN_OUT_V6" OUTPUT
+    _remove_chain_block_table "$ip6t" filter "$CHAIN_OUT_V6" OUTPUT
   fi
-  log "remove_block_v6: done"
+  log "remove_output_block_v6: done"
+}
+
+remove_forward_block_v4() {
+  local ipt
+  ipt="$(_find_cmd iptables)" || return 0
+  _remove_chain_block_table "$ipt" filter "$CHAIN_FWD_V4" FORWARD
+  rm -f "${STATE_DIR}/ipv4_fwd_active" 2>/dev/null || true
+  log "remove_forward_block_v4: done"
+}
+
+remove_forward_block_v6() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables)" || return 0
+  _remove_chain_block_table "$ip6t" filter "$CHAIN_FWD_V6" FORWARD
+  rm -f "${STATE_DIR}/ipv6_fwd_active" 2>/dev/null || true
+  log "remove_forward_block_v6: done"
+}
+
+remove_input_block_v4() {
+  local ipt
+  ipt="$(_find_cmd iptables)" || return 0
+  _remove_chain_block_table "$ipt" filter "$CHAIN_IN_V4" INPUT
+  rm -f "${STATE_DIR}/ipv4_in_active" 2>/dev/null || true
+  log "remove_input_block_v4: done"
+}
+
+remove_input_block_v6() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables)" || return 0
+  _remove_chain_block_table "$ip6t" filter "$CHAIN_IN_V6" INPUT
+  rm -f "${STATE_DIR}/ipv6_in_active" 2>/dev/null || true
+  log "remove_input_block_v6: done"
 }
 
 remove_block() {
   log "remove_block: start"
-  remove_block_v4
-  remove_block_v6
+  remove_output_block_v4
+  remove_output_block_v6
+  remove_forward_block_v4
+  remove_forward_block_v6
+  remove_input_block_v4
+  remove_input_block_v6
   rm -f "${STATE_DIR}/block_installed" 2>/dev/null || true
   log "remove_block: done"
 }
@@ -312,6 +493,9 @@ resolve_afwall_pkg() {
 
 # Check that AFWall's main 'afwall' chain exists AND is jumped to from OUTPUT.
 # This is the documented signal that AFWall has fully applied its rules.
+# Once OUTPUT is confirmed, AFWall has also installed any FORWARD/INPUT rules
+# it needs based on user configuration (tether, LAN, VPN, roaming controls).
+# The settle delay in service.sh gives additional time for all per-app rules.
 afwall_rules_present_v4() {
   local ipt
   ipt="$(_find_cmd iptables)" || return 1
@@ -332,6 +516,24 @@ afwall_rules_present() {
   return 1
 }
 
+# Supplementary diagnostic: check whether AFWall has set up its FORWARD hook.
+# Returns 0 if AFWall's FORWARD -j afwall jump exists (tether control active).
+# Not used as a release gate; informational only.
+afwall_forward_hook_present() {
+  local ipt
+  ipt="$(_find_cmd iptables)" || return 1
+  "$ipt" -t filter -S FORWARD 2>/dev/null | grep -qE '^-A FORWARD .*-j afwall($| )'
+}
+
+# Supplementary diagnostic: check whether AFWall has set up its INPUT hook.
+# Returns 0 if AFWall's INPUT -j afwall jump exists (INPUT chain control active).
+# Not used as a release gate; informational only.
+afwall_input_hook_present() {
+  local ipt
+  ipt="$(_find_cmd iptables)" || return 1
+  "$ipt" -t filter -S INPUT 2>/dev/null | grep -qE '^-A INPUT .*-j afwall($| )'
+}
+
 # Detect AFWall's built-in startup leak protection (the "Fix Startup Data Leak"
 # preference, stored as fixLeak=true in AFWall prefs).
 #
@@ -340,6 +542,8 @@ afwall_rules_present() {
 #     such as /etc/init.d/, /su/su.d/, /system/su.d/
 #   - On modern Android (8+) this is rarely effective because init.d/su.d is
 #     not supported without a special kernel or SuperSU
+#   - AFWall also supports Magisk paths: /data/adb/post-fs-data.d/ and
+#     /data/adb/service.d/ (checked here and in the UI's startup-script selector)
 #   - AFWall does NOT install iptables chains in the raw table as startup
 #     protection; all its chains live in the filter table and are installed
 #     only when FirewallService applies rules (after Zygote and framework start)
@@ -469,21 +673,26 @@ should_install_block() {
 # ── Legacy cleanup ─────────────────────────────────────────────────────────────
 # Remove legacy hard-drop raw-table chain left by older module variants.
 remove_legacy_raw_drop() {
-  local b c n
+  local b c n chain
   for b in iptables ip6tables; do
     c="$(_find_cmd "$b" 2>/dev/null)" || continue
-    n=0
-    while "$c" -t raw -C OUTPUT -j MOD_PRE_AFW 2>/dev/null; do
-      "$c" -t raw -D OUTPUT -j MOD_PRE_AFW 2>/dev/null || break
-      n=$((n + 1)); [ "$n" -gt 10 ] && break
+    # Clean up all known module-owned chain names from raw table (legacy + current).
+    for chain in MOD_PRE_AFW MOD_PRE_AFW_V6 \
+                 MOD_PRE_AFW_FWD MOD_PRE_AFW_FWD_V6 \
+                 MOD_PRE_AFW_IN MOD_PRE_AFW_IN_V6; do
+      n=0
+      while "$c" -t raw -C OUTPUT -j "$chain" 2>/dev/null; do
+        "$c" -t raw -D OUTPUT -j "$chain" 2>/dev/null || break
+        n=$((n + 1)); [ "$n" -gt 10 ] && break
+      done
+      n=0
+      while "$c" -t raw -C PREROUTING -j "$chain" 2>/dev/null; do
+        "$c" -t raw -D PREROUTING -j "$chain" 2>/dev/null || break
+        n=$((n + 1)); [ "$n" -gt 10 ] && break
+      done
+      "$c" -t raw -F "$chain" 2>/dev/null || true
+      "$c" -t raw -X "$chain" 2>/dev/null || true
     done
-    n=0
-    while "$c" -t raw -C PREROUTING -j MOD_PRE_AFW 2>/dev/null; do
-      "$c" -t raw -D PREROUTING -j MOD_PRE_AFW 2>/dev/null || break
-      n=$((n + 1)); [ "$n" -gt 10 ] && break
-    done
-    "$c" -t raw -F MOD_PRE_AFW 2>/dev/null || true
-    "$c" -t raw -X MOD_PRE_AFW 2>/dev/null || true
   done
 }
 
@@ -513,19 +722,11 @@ cleanup_legacy() {
   return 0
 }
 
-# ── Radio helpers (secondary / best-effort) ────────────────────────────────────
-# Radio toggles are NOT the primary protection mechanism; they are provided
-# only as a belt-and-suspenders option and may be unavailable in early boot.
-restore_radios() {
-  has_cmd svc || { debug_log "restore_radios: svc not found"; return 0; }
-  svc wifi enable 2>/dev/null || true
-  svc data enable 2>/dev/null || true
-  log "radios: restore issued (best-effort)"
-}
-
-disable_radios() {
-  has_cmd svc || { debug_log "disable_radios: svc not found"; return 0; }
-  svc wifi disable 2>/dev/null || true
-  svc data disable 2>/dev/null || true
-  log "radios: disable issued (best-effort)"
-}
+# ── Lower-layer suppression subsystem ─────────────────────────────────────────
+# Source the lower-layer suppression library if present.
+# This provides: lowlevel_prepare_environment, lowlevel_restore_changed_state,
+# lowlevel_emergency_restore, and supporting helpers.
+# MODDIR is set by the calling script before sourcing common.sh.
+if [ -f "${MODDIR:-}/bin/lowlevel.sh" ]; then
+  . "${MODDIR}/bin/lowlevel.sh"
+fi

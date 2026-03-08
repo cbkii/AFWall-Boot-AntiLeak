@@ -126,6 +126,7 @@ zip -r9 "$ZIP_PATH" \
   uninstall.sh \
   update.json \
   README.md \
+  ADVANCED.md \
   2>&1
 
 echo "Built: $ZIP_PATH"

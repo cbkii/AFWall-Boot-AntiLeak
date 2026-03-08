@@ -1,6 +1,6 @@
 {
-  "version": "v2.0.0",
-  "versionCode": 200,
+  "version": "v2.2.2",
+  "versionCode": 222,
   "zipUrl": "https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/latest/download/AFWall-Boot-AntiLeak.zip",
-  "changelog": "https://raw.githubusercontent.com/cbkii/AFWall-Boot-AntiLeak/master/README.md"
+  "changelog": "https://raw.githubusercontent.com/cbkii/AFWall-Boot-AntiLeak/master/ADVANCED.md"
 }

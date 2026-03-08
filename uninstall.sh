@@ -10,6 +10,10 @@ log "uninstall: start"
 # Remove module-owned firewall chains from all tables.
 remove_block
 
+# Restore any lower-layer service/interface state changed by this module.
+# Only restores Wi-Fi / mobile data / Bluetooth if the module disabled them.
+lowlevel_emergency_restore
+
 # Remove legacy artifacts from previous module versions.
 cleanup_legacy "uninstall"
 
