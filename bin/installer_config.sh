@@ -80,6 +80,17 @@ ic_apply_profile() {
     esac
 }
 
+# ── Config key reader ─────────────────────────────────────────────────────────
+# Read a single KEY=value entry from a config file.
+# Strips inline # comments (e.g. "180 # note" → "180"), then quotes/whitespace.
+# Returns empty string if the key is absent.
+
+_ic_read_key() {
+    local key="$1" file="$2"
+    grep "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2 \
+        | sed 's/[[:space:]]*#.*//' | tr -d '"'"'"'[:space:]'
+}
+
 # ── Load existing config ───────────────────────────────────────────────────────
 # Read recognized config keys from a config.sh file into IC_* variables.
 # Only overwrites an IC_* variable if the key is present in the file.
@@ -90,40 +101,40 @@ ic_load_existing_config() {
     [ -f "$cfg_file" ] || return 1
 
     local val
-    val=$(grep '^INTEGRATION_MODE=' "$cfg_file" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"'"'"'[:space:]')
+    val=$(_ic_read_key INTEGRATION_MODE "$cfg_file")
     [ -n "$val" ] && IC_INTEGRATION_MODE="$val"
 
-    val=$(grep '^ENABLE_FORWARD_BLOCK=' "$cfg_file" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"'"'"'[:space:]')
+    val=$(_ic_read_key ENABLE_FORWARD_BLOCK "$cfg_file")
     [ -n "$val" ] && IC_ENABLE_FORWARD_BLOCK="$val"
 
-    val=$(grep '^ENABLE_INPUT_BLOCK=' "$cfg_file" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"'"'"'[:space:]')
+    val=$(_ic_read_key ENABLE_INPUT_BLOCK "$cfg_file")
     [ -n "$val" ] && IC_ENABLE_INPUT_BLOCK="$val"
 
-    val=$(grep '^LOWLEVEL_MODE=' "$cfg_file" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"'"'"'[:space:]')
+    val=$(_ic_read_key LOWLEVEL_MODE "$cfg_file")
     [ -n "$val" ] && IC_LOWLEVEL_MODE="$val"
 
-    val=$(grep '^LOWLEVEL_INTERFACE_QUIESCE=' "$cfg_file" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"'"'"'[:space:]')
+    val=$(_ic_read_key LOWLEVEL_INTERFACE_QUIESCE "$cfg_file")
     [ -n "$val" ] && IC_LOWLEVEL_INTERFACE_QUIESCE="$val"
 
-    val=$(grep '^LOWLEVEL_USE_WIFI_SERVICE=' "$cfg_file" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"'"'"'[:space:]')
+    val=$(_ic_read_key LOWLEVEL_USE_WIFI_SERVICE "$cfg_file")
     [ -n "$val" ] && IC_LOWLEVEL_USE_WIFI_SERVICE="$val"
 
-    val=$(grep '^LOWLEVEL_USE_PHONE_DATA_CMD=' "$cfg_file" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"'"'"'[:space:]')
+    val=$(_ic_read_key LOWLEVEL_USE_PHONE_DATA_CMD "$cfg_file")
     [ -n "$val" ] && IC_LOWLEVEL_USE_PHONE_DATA_CMD="$val"
 
-    val=$(grep '^LOWLEVEL_USE_BLUETOOTH_MANAGER=' "$cfg_file" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"'"'"'[:space:]')
+    val=$(_ic_read_key LOWLEVEL_USE_BLUETOOTH_MANAGER "$cfg_file")
     [ -n "$val" ] && IC_LOWLEVEL_USE_BLUETOOTH_MANAGER="$val"
 
-    val=$(grep '^LOWLEVEL_USE_TETHER_STOP=' "$cfg_file" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"'"'"'[:space:]')
+    val=$(_ic_read_key LOWLEVEL_USE_TETHER_STOP "$cfg_file")
     [ -n "$val" ] && IC_LOWLEVEL_USE_TETHER_STOP="$val"
 
-    val=$(grep '^TIMEOUT_SECS=' "$cfg_file" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"'"'"'[:space:]')
+    val=$(_ic_read_key TIMEOUT_SECS "$cfg_file")
     [ -n "$val" ] && IC_TIMEOUT_SECS="$val"
 
-    val=$(grep '^SETTLE_SECS=' "$cfg_file" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"'"'"'[:space:]')
+    val=$(_ic_read_key SETTLE_SECS "$cfg_file")
     [ -n "$val" ] && IC_SETTLE_SECS="$val"
 
-    val=$(grep '^DEBUG=' "$cfg_file" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"'"'"'[:space:]')
+    val=$(_ic_read_key DEBUG "$cfg_file")
     [ -n "$val" ] && IC_DEBUG="$val"
 
     return 0
@@ -132,6 +143,7 @@ ic_load_existing_config() {
 # ── External installer.cfg parser ─────────────────────────────────────────────
 # Loads a pre-seeded installer config from the device.
 # Supports IC_PROFILE=<name> for profile selection plus individual key overrides.
+# Only honoured during install (mode=install), not reconfigure.
 # Returns 0 if file was found and read, 1 otherwise.
 
 ic_parse_external_config() {
@@ -139,7 +151,7 @@ ic_parse_external_config() {
     [ -f "$cfg_file" ] || return 1
 
     local profile
-    profile=$(grep '^IC_PROFILE=' "$cfg_file" 2>/dev/null | tail -1 | cut -d= -f2 | tr -d '"'"'"'[:space:]')
+    profile=$(_ic_read_key IC_PROFILE "$cfg_file")
     if [ -n "$profile" ]; then
         ic_apply_profile "$profile"
     fi
@@ -452,14 +464,22 @@ ic_run_config_selection() {
 
     _ic_print ""
     _ic_print "  ── Config Selection ────────────────────────────────"
-    _ic_print "  Fallback priority:"
-    _ic_print "    1. installer.cfg (${_IC_INSTALLER_CFG})"
-    _ic_print "    2. existing config (upgrade preserve)"
-    _ic_print "    3. interactive volume-key selection"
-    _ic_print "    4. standard defaults"
+    if [ "$mode" = "install" ]; then
+        _ic_print "  Fallback priority:"
+        _ic_print "    1. installer.cfg (${_IC_INSTALLER_CFG})"
+        _ic_print "    2. existing config (upgrade preserve)"
+        _ic_print "    3. interactive volume-key selection"
+        _ic_print "    4. standard defaults"
+    else
+        _ic_print "  Fallback priority (reconfigure mode):"
+        _ic_print "    1. existing config (shown as defaults)"
+        _ic_print "    2. interactive volume-key selection"
+        _ic_print "    3. standard defaults"
+        _ic_print "  Note: installer.cfg is ignored during reconfigure."
+    fi
     _ic_print "  ───────────────────────────────────────────────────"
 
-    if ic_parse_external_config "${_IC_INSTALLER_CFG}"; then
+    if [ "$mode" = "install" ] && ic_parse_external_config "${_IC_INSTALLER_CFG}"; then
         _ic_print ""
         _ic_print "  [config] Pre-seeded installer.cfg found — using it."
         source="installer_cfg"

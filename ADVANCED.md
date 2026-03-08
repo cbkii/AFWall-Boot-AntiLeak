@@ -355,8 +355,11 @@ TIMEOUT_SECS=180
 All standard config keys (`INTEGRATION_MODE`, `ENABLE_FORWARD_BLOCK`, etc.)
 are also accepted directly in `installer.cfg`.
 
-> **Note:** `installer.cfg` is consumed without being deleted, so it also
-> applies on future reinstalls.  Delete or rename it when done.
+> **Note:** `installer.cfg` is consumed without being deleted, so it applies on
+> future reinstalls too.  It is **ignored** by `reconfigure.sh` — the
+> reconfiguration tool always starts from the current persistent config and
+> interactive prompts regardless of `installer.cfg`.  Delete or rename it
+> when you no longer want it applied automatically during installs.
 
 ### ZIP-name parsing (not implemented)
 
