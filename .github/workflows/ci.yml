@@ -1,0 +1,82 @@
+name: CI
+
+# Run on every pull request and on pushes to the main branch.
+# Skips documentation-only changes that cannot affect installability.
+on:
+  pull_request:
+    branches: [master, main]
+  push:
+    branches: [master, main]
+    paths-ignore:
+      - "README.md"
+      - ".gitignore"
+      - ".gitattributes"
+      - ".shellcheckrc"
+
+# Minimal permissions: read-only checkout is sufficient for CI.
+permissions:
+  contents: read
+
+jobs:
+  build-and-validate:
+    name: Build and Validate Module ZIP
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: sudo apt-get install -y --no-install-recommends shellcheck zip
+
+      # ── Lint: module runtime scripts ────────────────────────────────────────
+      # Checks the module's own shell scripts (not third-party MMT-Extended
+      # files or sourced-only config/install stubs).
+      # .shellcheckrc sets shell=ash and disables ash/Android false positives.
+      - name: Lint module shell scripts (shellcheck)
+        run: |
+          shellcheck --severity=warning \
+            bin/common.sh \
+            action.sh \
+            post-fs-data.sh \
+            service.sh \
+            uninstall.sh \
+            tools/build-release.sh \
+            tools/validate-zip.sh
+
+      # ── Build: produce the installable ZIP ──────────────────────────────────
+      - name: Build module ZIP
+        run: |
+          chmod +x tools/build-release.sh
+          tools/build-release.sh dist/
+
+      # ── Validate: check ZIP internal structure ───────────────────────────────
+      - name: Validate ZIP structure
+        run: |
+          chmod +x tools/validate-zip.sh
+          ZIP="$(ls dist/*.zip | head -1)"
+          echo "Validating: $ZIP"
+          tools/validate-zip.sh "$ZIP"
+
+      # ── Upload: make artifacts available for PR review ───────────────────────
+      - name: Upload module ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: module-zip
+          path: dist/*.zip
+          # Keep for 14 days so reviewers can download and test
+          retention-days: 14
+
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha256sum
+          path: dist/sha256sum.txt
+          retention-days: 14
+
+      - name: Upload build info artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-info
+          path: dist/build-info.txt
+          retention-days: 14

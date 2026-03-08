@@ -617,6 +617,10 @@ DYNLIB support, addon infrastructure, and consistent file layout.
 
 ```
 AFWall-Boot-AntiLeak/
+├── .github/
+│   └── workflows/
+│       ├── ci.yml             # CI: shellcheck + build + validate on PRs and pushes
+│       └── release.yml        # Release: tag-driven or manual dispatch release
 ├── META-INF/
 │   └── com/google/android/
 │       ├── update-binary      # MMT-Extended entry point (calls Magisk install_module)
@@ -626,36 +630,59 @@ AFWall-Boot-AntiLeak/
 │   └── install.sh             # Module-specific install banner (sourced then deleted)
 ├── bin/
 │   └── common.sh              # Module runtime library (sourced by all boot scripts)
+├── tools/
+│   ├── build-release.sh       # Build script: validates, packages ZIP, emits checksum
+│   └── validate-zip.sh        # Validates built ZIP internal structure
 ├── action.sh                  # Magisk action button / manual recovery
 ├── config.sh                  # User-tunable runtime settings
 ├── customize.sh               # MMT-Extended config + permissions + SKIPUNZIP entry
 ├── module.prop                # Module metadata including updateJson
 ├── post-fs-data.sh            # Early-boot firewall block installer
 ├── service.sh                 # Late-start AFWall+ polling + block release
-├── uninstall.sh               # Custom firewall cleanup (deliberate deviation — see below)
+├── uninstall.sh               # Custom firewall cleanup (deliberate deviation — see §12)
 ├── update.json                # OTA update metadata (consumed by Magisk app)
 ├── README.md                  # This file
-├── .gitattributes             # LF line-ending rules (MMT-Extended convention)
-└── .gitignore                 # Standard ignores (MMT-Extended convention)
+├── .shellcheckrc              # Shellcheck configuration for Android/ash scripts
+├── .gitattributes             # LF line-ending rules
+└── .gitignore                 # Standard ignores (excludes dist/)
 ```
 
-### How to build / package the module zip
+### How to build / package the module zip (local)
+
+The repository includes a build script that validates required files, packages
+the correct file set, and emits a checksum. This is the canonical way to build
+locally or in CI.
 
 ```sh
-cd AFWall-Boot-AntiLeak/
-zip -r9 AFWall-Boot-AntiLeak-v2.0.0.zip \
-  META-INF/ common/ bin/ \
-  action.sh config.sh customize.sh module.prop \
-  post-fs-data.sh service.sh uninstall.sh \
-  update.json README.md \
-  -x "*.git*" -x "__MACOSX" -x ".DS_Store"
+# From the repository root:
+chmod +x tools/build-release.sh
+tools/build-release.sh            # outputs to dist/ by default
+
+# Optionally specify output directory and zip name:
+tools/build-release.sh dist/ AFWall-Boot-AntiLeak.zip
 ```
+
+Output:
+- `dist/AFWall-Boot-AntiLeak-v2.0.0.zip` — Magisk-installable module ZIP
+- `dist/sha256sum.txt` — SHA256 checksum
+- `dist/build-info.txt` — build metadata (version, git ref, date)
 
 Install the produced zip via **Magisk app → Modules → Install from storage**.
 
 Do **not** install in recovery; this module requires boot-mode install (the
 installer framework rejects recovery installs and only performs uninstall in
 that context).
+
+### Validate a built ZIP
+
+```sh
+chmod +x tools/validate-zip.sh
+tools/validate-zip.sh dist/AFWall-Boot-AntiLeak-v2.0.0.zip
+```
+
+This checks that all required installer and runtime files are present inside
+the ZIP, that `module.prop` is parseable, and that files are at the ZIP root
+(no nesting parent directory).
 
 ### Install flow (what the installer does)
 
@@ -707,13 +734,17 @@ updateJson=https://raw.githubusercontent.com/cbkii/AFWall-Boot-AntiLeak/master/u
 ```
 
 The Magisk app reads `update.json` from this URL to check for new versions and
-offer in-app updates. When a new release is published:
+offer in-app updates. The `zipUrl` in `update.json` uses the GitHub Releases
+stable asset path:
 
-1. Update `update.json` with the new `version`, `versionCode`, and `zipUrl`.
-2. Update `module.prop` with the matching `version` and `versionCode` (both
-   files must be kept in sync manually — there is no build-time automation).
-3. Upload the new zip to GitHub Releases as `AFWall-Boot-AntiLeak.zip`.
-4. Tag the release (e.g. `v2.1.0`).
+```json
+"zipUrl": "https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/latest/download/AFWall-Boot-AntiLeak.zip"
+```
+
+This works because the release workflow always uploads the ZIP with the stable
+name `AFWall-Boot-AntiLeak.zip`. When releasing a new version, `update.json`'s
+`version` and `versionCode` fields must be updated to match `module.prop`
+(see §13 Maintainer Release Process for the full checklist).
 
 ---
 
@@ -818,3 +849,219 @@ directories.
 **This module**: These directories are not present because the module does not
 modify system files and does not use Zygisk. Their absence does not affect
 functionality; the installer handles their non-existence gracefully.
+
+---
+
+## 13. CI / Release Automation
+
+### Overview
+
+| Trigger | Workflow | What happens |
+|---|---|---|
+| PR or push to `master`/`main` | `ci.yml` | Shellcheck lint, build ZIP, validate structure, upload artifacts |
+| Push tag `v*.*.*` | `release.yml` | Build ZIP, validate, create GitHub Release, attach assets |
+| `workflow_dispatch` on `release.yml` | `release.yml` | Same as tag push; creates tag if absent |
+
+### CI workflow (`.github/workflows/ci.yml`)
+
+Triggered on every pull request and on direct pushes to `master`/`main`
+(documentation-only changes are skipped).
+
+Steps:
+1. **Shellcheck**: lints `bin/common.sh`, `action.sh`, `post-fs-data.sh`,
+   `service.sh`, `uninstall.sh`, `tools/build-release.sh`, and
+   `tools/validate-zip.sh`. Uses `.shellcheckrc` (shell=ash, disables Android
+   false-positives SC1090/SC1091/SC2034). Fails on any `warning` or above.
+2. **Build**: runs `tools/build-release.sh` to produce the module ZIP.
+3. **Validate**: runs `tools/validate-zip.sh` to verify the ZIP structure.
+4. **Upload artifacts**: attaches the ZIP, checksum, and build-info as workflow
+   artifacts (retained 14 days). Reviewers can download and test from the PR.
+
+PR checks give maintainers confidence that merging will produce a valid,
+installable ZIP.
+
+### Release workflow (`.github/workflows/release.yml`)
+
+**Tag-driven release (recommended)**:
+1. Push a version tag (e.g. `v2.0.0`) matching the value in `module.prop`.
+2. The workflow fires automatically.
+3. It validates that the tag matches `module.prop version`.
+4. It builds the ZIP with the stable filename `AFWall-Boot-AntiLeak.zip`.
+5. It creates a GitHub Release at that tag with release notes.
+6. It attaches `AFWall-Boot-AntiLeak.zip`, `sha256sum.txt`, and `build-info.txt`
+   as release assets.
+
+**Manual release (workflow_dispatch)**:
+1. Go to **Actions → Release → Run workflow** in the GitHub UI.
+2. Optionally specify a `ref` (branch/commit) and `tag` (defaults to
+   `module.prop` version). Check **draft** to review before publishing.
+3. The workflow creates the tag if it does not exist, then builds and publishes.
+4. Useful for re-publishing a release or building from a specific commit.
+
+**Release re-run**: If a release for that tag already exists, the workflow
+deletes it first (clean re-release). This handles CI re-runs safely.
+
+### Release asset naming
+
+| Asset | Description |
+|---|---|
+| `AFWall-Boot-AntiLeak.zip` | Magisk module ZIP (stable name for OTA `zipUrl`) |
+| `sha256sum.txt` | SHA256 checksum of the ZIP |
+| `build-info.txt` | Build metadata (version, git ref, date) |
+
+The stable name `AFWall-Boot-AntiLeak.zip` ensures the `update.json` `zipUrl`
+(`…/releases/latest/download/AFWall-Boot-AntiLeak.zip`) always resolves to the
+latest release without changing `update.json` on every release.
+
+### Where to download
+
+1. **Latest release**: [GitHub Releases](https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/latest)
+2. **Direct download**: `https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/latest/download/AFWall-Boot-AntiLeak.zip`
+3. **Specific version**: `https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/download/v2.0.0/AFWall-Boot-AntiLeak.zip`
+
+### Verify the checksum
+
+```sh
+# Download checksum file
+curl -L https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/latest/download/sha256sum.txt -o sha256sum.txt
+# Verify
+sha256sum -c sha256sum.txt
+```
+
+---
+
+## 14. Maintainer Release Process
+
+When you are ready to cut a new release:
+
+### Step 1: Update version files
+
+In a new branch/PR, update two files:
+
+**`module.prop`**:
+```
+version=v2.1.0
+versionCode=210
+```
+
+**`update.json`**:
+```json
+{
+  "version": "v2.1.0",
+  "versionCode": 210,
+  "zipUrl": "https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/latest/download/AFWall-Boot-AntiLeak.zip",
+  "changelog": "https://raw.githubusercontent.com/cbkii/AFWall-Boot-AntiLeak/master/README.md"
+}
+```
+
+`version` and `versionCode` must match between both files.
+
+### Step 2: Update the README ChangeLog
+
+Add an entry to the `## ChangeLog` section describing the changes in the new
+version.
+
+### Step 3: Open a PR and wait for CI
+
+The CI workflow will:
+- Lint all shell scripts
+- Build the module ZIP
+- Validate the ZIP structure
+- Upload the ZIP as an artifact (downloadable for manual testing)
+
+Review the CI artifacts. Download the ZIP and test-install it on a device if
+possible before merging.
+
+### Step 4: Merge the PR
+
+Merge the PR into `master`/`main`.
+
+### Step 5: Create a version tag
+
+```sh
+git checkout master
+git pull
+git tag v2.1.0
+git push origin v2.1.0
+```
+
+This triggers the release workflow automatically.
+
+### Step 6: Verify the release
+
+1. Go to [GitHub Releases](https://github.com/cbkii/AFWall-Boot-AntiLeak/releases).
+2. Confirm the new release is present with the correct tag.
+3. Confirm `AFWall-Boot-AntiLeak.zip`, `sha256sum.txt`, and `build-info.txt` are
+   attached.
+4. Download and verify the checksum.
+5. Test-install on a device if possible.
+
+### Alternative: manual dispatch
+
+If you prefer not to create the tag manually, or need to rebuild an existing
+release:
+
+1. Go to **Actions → Release → Run workflow**.
+2. Fill in the `ref` (leave blank for HEAD) and `tag` (leave blank to use
+   `module.prop` version).
+3. Check **draft** if you want to review before publishing.
+4. Click **Run workflow**.
+
+---
+
+## 15. Developer Quick Reference
+
+### Run the full local pipeline
+
+```sh
+# Lint
+shellcheck --severity=warning \
+  bin/common.sh action.sh post-fs-data.sh service.sh uninstall.sh \
+  tools/build-release.sh tools/validate-zip.sh
+
+# Build
+chmod +x tools/build-release.sh
+tools/build-release.sh dist/
+
+# Validate
+chmod +x tools/validate-zip.sh
+tools/validate-zip.sh dist/AFWall-Boot-AntiLeak-v2.0.0.zip
+
+# Inspect ZIP contents
+unzip -l dist/AFWall-Boot-AntiLeak-v2.0.0.zip
+```
+
+### Inspect the built ZIP structure
+
+```sh
+unzip -l dist/AFWall-Boot-AntiLeak-v2.0.0.zip
+```
+
+Expected top-level entries: `META-INF/`, `common/`, `bin/`, `action.sh`,
+`config.sh`, `customize.sh`, `module.prop`, `post-fs-data.sh`, `service.sh`,
+`uninstall.sh`, `update.json`, `README.md`.
+
+Files should **not** be nested under a parent directory such as
+`AFWall-Boot-AntiLeak/META-INF/...` — that would prevent Magisk from
+finding the installer files.
+
+### Test installability indicator
+
+After building, run:
+
+```sh
+tools/validate-zip.sh dist/AFWall-Boot-AntiLeak-v2.0.0.zip
+```
+
+A `VALIDATION PASSED` result means the ZIP passes structural checks. Actual
+on-device install testing remains the definitive test.
+
+### Bump version for a new release
+
+```sh
+# 1. Edit module.prop (version= and versionCode=)
+# 2. Edit update.json  (version and versionCode)
+# 3. Update README.md ChangeLog
+# 4. Commit, PR, merge
+# 5. git tag vX.Y.Z && git push origin vX.Y.Z
+```

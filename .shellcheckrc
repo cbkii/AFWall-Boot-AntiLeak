@@ -1,0 +1,17 @@
+# shellcheck configuration for AFWall Boot AntiLeak module scripts.
+# These scripts target Android's BusyBox ash (#!/system/bin/sh).
+# Ash supports 'local' (unlike strict POSIX sh), so SC3043 is not applicable.
+
+# Treat scripts as ash by default so 'local' is accepted without warning.
+shell=ash
+
+# SC1090 / SC1091: Can't follow non-constant source / not following source.
+# Module scripts source bin/common.sh and config.sh at runtime on-device.
+# These paths are not available in CI; suppress the follow-source warnings.
+disable=SC1090,SC1091
+
+# SC2034: Variable appears unused.
+# config.sh variables (INTEGRATION_MODE, TIMEOUT_SECS, etc.) and customize.sh
+# variables (MINAPI, REPLACE, SKIPUNZIP) are intentionally set for external
+# consumers (Magisk installer or sourced config). Suppress false positives.
+disable=SC2034
