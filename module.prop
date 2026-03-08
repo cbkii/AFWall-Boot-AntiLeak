@@ -1,7 +1,7 @@
 id=AFWall-Boot-AntiLeak
 name=AFWall Boot AntiLeak Fork
-version=v2.0.0
-versionCode=200
+version=v2.1.0
+versionCode=210
 author=GrayJackFixxxer, forked by cbkii
-description=Blocks traffic at kernel level during early boot until AFWall+ rules are active. Supports Android 16 / Magisk 30.6+. Cleans legacy artifacts.
+description=Blocks OUTPUT/FORWARD/INPUT traffic at kernel level during early boot until AFWall+ rules are active. Covers tethered clients, hotspot, USB/BT tether. Android 16 / Magisk 30.6+.
 updateJson=https://raw.githubusercontent.com/cbkii/AFWall-Boot-AntiLeak/master/update.json

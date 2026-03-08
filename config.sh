@@ -9,9 +9,10 @@
 # Data Leak" (fixLeak) feature.
 #
 # Background: AFWall+'s fixLeak feature installs a startup script called
-# 'afwallstart' into init.d or su.d paths (/etc/init.d/, /su/su.d/, etc.).
-# On modern Android (8+) this mechanism is rarely effective because init.d/su.d
-# is not supported without a special kernel or SuperSU. On Android 16 Pixel
+# 'afwallstart' into init.d or su.d paths (/etc/init.d/, /su/su.d/, etc.) and
+# optionally into Magisk paths (/data/adb/post-fs-data.d/,
+# /data/adb/service.d/). On modern Android (8+) the init.d/su.d mechanism is
+# rarely effective without a special kernel or SuperSU. On Android 16 Pixel
 # devices it is effectively non-functional. The module checks for the presence
 # of that script to determine whether to defer.
 #
@@ -21,12 +22,47 @@
 #   prefer_module - Always install the module block, regardless of any detected
 #                   AFWall startup-script. Belt-and-suspenders maximum safety.
 #   prefer_afwall - Skip the module block only when an AFWall-owned afwallstart
-#                   script is detected in init.d/su.d paths. On modern Android
-#                   this is effectively the same as auto because init.d/su.d is
-#                   unsupported. Use only if you have confirmed init.d support.
+#                   script is detected in init.d/su.d/Magisk paths. On modern
+#                   Android this is effectively the same as auto unless you have
+#                   confirmed init.d support or AFWall Magisk-path fixLeak.
 #   off           - Disable module blocking entirely. Use only in emergencies.
 #
+# Recommended AFWall+ settings when using this module:
+#   - Fix Startup Data Leak: DISABLED (this module is the leak protection)
+#   - Startup Delay: 0 (no extra delay needed; module covers the window)
+#   - Active Rules: ENABLED (required for module to detect AFWall readiness)
+#   - Tether/LAN/VPN/Roaming controls: enable as needed; module covers boot gap
+#
 INTEGRATION_MODE=auto
+
+# ── FORWARD chain block (tethered-client / hotspot / USB / BT tether) ────────
+# When enabled (default), the module installs a temporary DROP block on the
+# iptables FORWARD chain (filter table) during early boot.
+# This prevents tethered clients (Wi-Fi hotspot, USB tether, Bluetooth PAN)
+# from leaking traffic through the phone before AFWall is ready.
+#
+# Set to 0 only if you do not use tethering AND you need to avoid touching
+# the filter FORWARD chain for compatibility reasons.
+#
+ENABLE_FORWARD_BLOCK=1
+
+# ── INPUT chain block (optional inbound traffic hardening) ────────────────────
+# When enabled, the module installs a temporary DROP block on the iptables
+# INPUT chain (filter table) during early boot.
+# This prevents inbound connections from reaching the device before AFWall has
+# applied its INPUT rules.
+#
+# IMPORTANT: Loopback (lo) is always exempted to avoid breaking local IPC.
+#
+# Disabled by default because:
+#   - Most users do not rely on AFWall INPUT rules during boot
+#   - Blocking INPUT during boot can delay ADB, Wi-Fi management frames, and
+#     DHCP responses (though all are typically after network interfaces are up)
+#   - AFWall's INPUT rule support depends on the user's AFWall configuration
+#
+# Enable if you have AFWall INPUT rules configured and want boot-time coverage.
+#
+ENABLE_INPUT_BLOCK=0
 
 # ── Timeout ───────────────────────────────────────────────────────────────────
 # Maximum seconds to wait for AFWall rules before force-unblocking.
@@ -35,7 +71,8 @@ TIMEOUT_SECS=120
 
 # ── Settle delay ──────────────────────────────────────────────────────────────
 # Seconds to pause after AFWall rules are first detected before removing the
-# module block. Gives AFWall time to finish adding per-app rules.
+# module block. Gives AFWall time to finish adding per-app rules and any
+# FORWARD/INPUT chain rules it manages (tether, LAN, VPN, roaming controls).
 SETTLE_SECS=5
 
 # ── Debug logging ─────────────────────────────────────────────────────────────

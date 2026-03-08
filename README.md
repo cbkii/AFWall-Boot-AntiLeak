@@ -1,4 +1,4 @@
-# AFWall Boot AntiLeak — v2.0.0 (MMT-Extended aligned)
+# AFWall Boot AntiLeak — v2.1.0 (MMT-Extended aligned)
 
 A Magisk module that **blocks all internet traffic at the kernel level** from
 the very first moment of each Android boot, before AFWall+ has applied its own
@@ -22,19 +22,17 @@ connections during this window.
 
 | Boot stage | What happens |
 |---|---|
-| `post-fs-data` (very early, before Zygote) | Module installs a temporary `DROP` chain (`MOD_PRE_AFW` / `MOD_PRE_AFW_V6`) in the iptables **raw table** (fallback: filter table). Loopback is exempted. All outbound IPv4 and IPv6 traffic is blocked. |
-| `service` (late start, runs in background) | Module polls iptables every 2 s for AFWall's `afwall` chain and the `OUTPUT -j afwall` jump. Once confirmed, a configurable settle delay passes, then the module block is removed. A hard timeout (default 120 s) prevents indefinite blocking if AFWall is absent. |
-| `action` (manual) | Emergency button in the Magisk app to force-remove the block. |
-| `uninstall` | Removes only module-owned chains and state files. |
+| `post-fs-data` (very early, before Zygote) | Module installs temporary `DROP` chains in three directions: **OUTPUT** (`MOD_PRE_AFW`/`MOD_PRE_AFW_V6`, raw table preferred), **FORWARD** (`MOD_PRE_AFW_FWD`/`MOD_PRE_AFW_FWD_V6`, filter table, covers tethered clients), and optionally **INPUT** (`MOD_PRE_AFW_IN`/`MOD_PRE_AFW_IN_V6`, filter table, disabled by default). Loopback is always exempted. |
+| `service` (late start, runs in background) | Module polls iptables every 2 s for AFWall's `afwall` chain and the `OUTPUT -j afwall` jump. Once confirmed, a configurable settle delay passes (giving AFWall time to apply all FORWARD/INPUT rules too), then all module blocks are removed. A hard timeout (default 120 s) prevents indefinite blocking if AFWall is absent. |
+| `action` (manual) | Emergency button in the Magisk app to force-remove all module blocks. |
+| `uninstall` | Removes all module-owned chains (OUTPUT, FORWARD, INPUT, v4 and v6) and state files. |
 
 ### What the module does NOT guarantee
 
 - It does **not** guarantee protection against root-level processes that
   manipulate iptables directly.
-- It does **not** protect against leaks via VPNs, tethered interfaces, or
-  special kernel bypass techniques; those are AFWall+'s concern once it is
-  active.
-- It does **not** block inbound connections; only outbound (OUTPUT chain).
+- It does **not** protect against leaks via special kernel bypass techniques or root-level iptables manipulation; those are AFWall+'s concern once it is active.
+- It does **not** block INPUT (inbound) connections by default; enable `ENABLE_INPUT_BLOCK=1` in `config.sh` if you rely on AFWall INPUT rules during boot.
 - It is **not** a replacement for AFWall+; it is a pre-AFWall safety net.
 
 ### Module protection vs AFWall+ protection
@@ -44,9 +42,24 @@ connections during this window.
 | When active | From post-fs-data until AFWall is ready | After FirewallService starts |
 | Blocking mechanism | Temporary iptables DROP chain | Full per-app iptables ruleset |
 | IPv6 | Yes (if ip6tables available) | Configurable |
-| Inbound blocking | No (OUTPUT only) | Yes (INPUT configurable) |
+| Inbound blocking | Optional (set ENABLE_INPUT_BLOCK=1) | Yes (INPUT configurable) |
+| Tether/FORWARD blocking | Yes (enabled by default) | Yes (FORWARD configurable) |
 | Per-app granularity | No | Yes |
 | Persistence after boot | Block is removed on release | Rules persist until disabled |
+
+### Connectivity Coverage Matrix (v2.1.0)
+
+| Traffic class | IPv4 | IPv6 | Chain | Notes |
+|---|---|---|---|---|
+| Device-originated (apps, services) | ✓ | ✓ | OUTPUT | Always enabled |
+| Tethered clients (Wi-Fi hotspot) | ✓ | ✓ | FORWARD | Enabled by default (`ENABLE_FORWARD_BLOCK=1`) |
+| USB tether clients | ✓ | ✓ | FORWARD | Same as above |
+| Bluetooth tether / BT PAN | ✓ | ✓ | FORWARD | Same as above |
+| VPN traffic (through device) | ✓ | ✓ | OUTPUT + FORWARD | OUTPUT covers on-device VPN; FORWARD covers forwarded VPN traffic |
+| LAN/Roaming (device-originated) | ✓ | ✓ | OUTPUT | AFWall applies per-network rules after module releases block |
+| Inbound connections | opt-in | opt-in | INPUT | Enable with `ENABLE_INPUT_BLOCK=1`; loopback always exempted |
+
+**Note**: The module blocks all traffic in each covered direction unconditionally during boot. It is not per-app or per-interface. Per-app and per-interface granularity is AFWall+'s responsibility once its rules are active.
 
 ---
 
@@ -90,10 +103,10 @@ connections during this window.
 ### Install the module
 
 1. Open the Magisk app -> Modules -> Install from storage.
-2. Select `AFWall-Boot-AntiLeak-v2.0.0.zip`.
+2. Select `AFWall-Boot-AntiLeak-v2.1.0.zip`.
 3. The installer prints the installation log. Look for:
    ```
-   AFWall Boot AntiLeak  v2.0.0
+   AFWall Boot AntiLeak  v2.1.0
    ```
 4. **Before rebooting**: if you have other antileak scripts in
    `/data/adb/service.d/`, remove them (see Migration Notes).
@@ -110,18 +123,22 @@ cat /data/adb/AFWall-Boot-AntiLeak/logs/boot.log
 A successful boot looks like:
 
 ```
-[2026-03-08 04:01:00] post-fs-data: start (module=AFWall-Boot-AntiLeak v2.0.0)
+[2026-03-08 04:01:00] post-fs-data: start (module=AFWall-Boot-AntiLeak v2.1.0)
 [2026-03-08 04:01:00] cleanup_legacy: phase=post-fs-data
 [2026-03-08 04:01:00] integration: configured_mode=auto
 [2026-03-08 04:01:00] integration: auto; no AFWall startup chains; module block is sole protection
-[2026-03-08 04:01:00] install_block: start
-[2026-03-08 04:01:00] install_block_v4: installed in raw table
-[2026-03-08 04:01:00] install_block_v6: installed in raw table
-[2026-03-08 04:01:00] install_block: done (v4_ok=1 v6_ok=1)
+[2026-03-08 04:01:00] install_block: start (fwd=1 in=0)
+[2026-03-08 04:01:00] install_output_block_v4: installed in raw table
+[2026-03-08 04:01:00] install_output_block_v6: installed in raw table
+[2026-03-08 04:01:00] install_forward_block_v4: installed in filter table
+[2026-03-08 04:01:00] install_forward_block_v6: installed in filter table
+[2026-03-08 04:01:00] install_block: INPUT block not enabled (set ENABLE_INPUT_BLOCK=1 to enable)
+[2026-03-08 04:01:00] install_block: done (out_v4=1 out_v6=1)
 [2026-03-08 04:01:00] post-fs-data: done
-[2026-03-08 04:01:15] service: start (timeout=120s settle=5s)
+[2026-03-08 04:01:15] service: start (timeout=120s settle=5s fwd=1 in=0)
 [2026-03-08 04:01:15] service: AFWall pkg=dev.ukanth.ufirewall
 [2026-03-08 04:01:30] service: AFWall rules detected; settling 5s
+[2026-03-08 04:01:35] service: AFWall FORWARD hook present (tether rules active)
 [2026-03-08 04:01:35] service: block removed (AFWall rules confirmed after settle)
 ```
 
@@ -129,16 +146,23 @@ A successful boot looks like:
 
 ```sh
 # While block is installed (before AFWall starts):
-iptables -t raw -S | grep MOD_PRE_AFW
-# Expected: -N MOD_PRE_AFW  and  -A OUTPUT -j MOD_PRE_AFW
+iptables  -t raw    -S | grep MOD_PRE_AFW          # OUTPUT v4 (raw)
+ip6tables -t raw    -S | grep MOD_PRE_AFW_V6        # OUTPUT v6 (raw)
+iptables  -t filter -S | grep MOD_PRE_AFW_FWD       # FORWARD v4
+ip6tables -t filter -S | grep MOD_PRE_AFW_FWD_V6    # FORWARD v6
+# Expected: chain definitions (-N) and jump rules (-A)
 
 # After block is released:
-iptables -t raw -S | grep MOD_PRE_AFW
-# Expected: no output (chain removed)
+iptables  -t raw    -S | grep MOD_PRE_AFW            # should be empty
+iptables  -t filter -S | grep MOD_PRE_AFW            # should be empty
 
 # Confirm AFWall chains are present after release:
 iptables -S | grep '^-N afwall'
 iptables -S OUTPUT | grep afwall
+
+# Check whether AFWall has FORWARD/INPUT hooks (depends on AFWall settings):
+iptables -S FORWARD | grep afwall
+iptables -S INPUT   | grep afwall
 ```
 
 ---
@@ -166,25 +190,42 @@ G.java):
 
 | Integration mode | AFWall fixLeak | Notes |
 |---|---|---|
-| `auto` (default) | Either | Module block is primary protection. fixLeak script (if functional) supplements. No conflict. |
-| `prefer_module` | Either | Module block always installed. fixLeak is ignored. |
-| `prefer_afwall` | Should be enabled | Module defers only if an AFWall-owned afwallstart script is found. On Android 16 Pixel, same as `auto`. |
-| `off` | Must be reliable | Only use if you have confirmed working init.d support. |
+| `auto` (default) | Disable | Module block is primary protection. Both can coexist but disabling AFWall fixLeak avoids script path conflicts. |
+| `prefer_module` | Disable | Module block always installed; AFWall fixLeak is redundant. |
+| `prefer_afwall` | Enable | Module defers only if an AFWall-owned afwallstart script is found (rare on Android 16+). |
+| `off` | Must be reliable | Only use if you have confirmed working init.d/Magisk-path support. |
 
-**For Android 16 Pixel users**: use `INTEGRATION_MODE=auto`. Enable AFWall's
-fixLeak as well for belt-and-suspenders, but rely on this module as the actual
-protection. The two mechanisms do not conflict.
+**For Android 16 Pixel users**: use `INTEGRATION_MODE=auto`. **Disable** AFWall's
+Fix Startup Data Leak option — this module provides complete boot-time protection
+including FORWARD (tether) and optional INPUT coverage. AFWall's fixLeak is
+non-functional on Android 16 and can create script conflicts if it targets
+Magisk paths.
 
 ### Recommended AFWall+ settings alongside this module
 
 | Setting | Recommendation | Reason |
 |---|---|---|
 | Firewall enabled on boot | Yes | Module waits for AFWall rules; if disabled, timeout fires after 120 s |
-| Fix Startup Data Leak | Enable | Belt-and-suspenders; harmless on modern Android |
+| Fix Startup Data Leak | Disable (recommended) | This module is the primary boot protection; AFWall's fixLeak is redundant and can cause conflicts if it writes to Magisk script paths |
 | IPv6 support | Enable | Module protects both; ensure AFWall covers IPv6 too |
-| Startup Delay | 0 (or minimal) | Extra delay extends the pre-AFWall window; module protects it |
+| Startup Delay | 0 | Module protects the entire pre-AFWall window; extra delay is unnecessary and increases boot protection duration |
 | Apply rules on boot | Yes | Required for module to detect AFWall and release the block |
 | iptables binary | Auto | Module uses system iptables; AFWall may use built-in; no conflict |
+
+### AFWall option interaction guide
+
+| AFWall option | Recommended setting | Reason |
+|---|---|---|
+| Fix Startup Data Leak | **Disabled** | This module covers the boot window; AFWall fixLeak is redundant and non-functional on Android 16 |
+| Startup Delay | **0** | Module covers the entire pre-AFWall window; extra delay is unnecessary |
+| Startup script path | N/A | Not relevant when Fix Startup Data Leak is disabled |
+| Active Rules | **Enabled** | Required for module to detect AFWall readiness and release the block |
+| Tether control | Enable if using tethering | Module's FORWARD block covers boot gap; AFWall takes over after release |
+| LAN control | Enable if needed | Module OUTPUT block covers LAN traffic during boot |
+| VPN control | Enable if needed | Module OUTPUT + FORWARD covers VPN traffic during boot |
+| Roaming control | Enable if needed | Module OUTPUT block covers roaming traffic during boot |
+| INPUT Chain | Enable if you want INPUT rules | Set `ENABLE_INPUT_BLOCK=1` in this module's config.sh to cover boot gap |
+| FORWARD Chain | Enable for tether rules | Module FORWARD block covers boot gap |
 
 ### Combinations to avoid
 
@@ -254,21 +295,35 @@ This usually means AFWall+ is not installed, disabled, or failed to apply rules.
 **Option B — root shell** (immediate):
 
 ```sh
-# Remove module block from raw table:
-iptables  -t raw -D OUTPUT -j MOD_PRE_AFW    2>/dev/null
-iptables  -t raw -F MOD_PRE_AFW              2>/dev/null
-iptables  -t raw -X MOD_PRE_AFW              2>/dev/null
-ip6tables -t raw -D OUTPUT -j MOD_PRE_AFW_V6 2>/dev/null
-ip6tables -t raw -F MOD_PRE_AFW_V6           2>/dev/null
-ip6tables -t raw -X MOD_PRE_AFW_V6           2>/dev/null
+# Remove OUTPUT block (raw table preferred, also try filter fallback):
+iptables  -t raw    -D OUTPUT  -j MOD_PRE_AFW       2>/dev/null
+iptables  -t raw    -F MOD_PRE_AFW                  2>/dev/null
+iptables  -t raw    -X MOD_PRE_AFW                  2>/dev/null
+ip6tables -t raw    -D OUTPUT  -j MOD_PRE_AFW_V6    2>/dev/null
+ip6tables -t raw    -F MOD_PRE_AFW_V6               2>/dev/null
+ip6tables -t raw    -X MOD_PRE_AFW_V6               2>/dev/null
+iptables  -t filter -D OUTPUT  -j MOD_PRE_AFW       2>/dev/null
+iptables  -t filter -F MOD_PRE_AFW                  2>/dev/null
+iptables  -t filter -X MOD_PRE_AFW                  2>/dev/null
+ip6tables -t filter -D OUTPUT  -j MOD_PRE_AFW_V6    2>/dev/null
+ip6tables -t filter -F MOD_PRE_AFW_V6               2>/dev/null
+ip6tables -t filter -X MOD_PRE_AFW_V6               2>/dev/null
 
-# Also try filter table (in case raw table fallback was used):
-iptables  -t filter -D OUTPUT -j MOD_PRE_AFW    2>/dev/null
-iptables  -t filter -F MOD_PRE_AFW              2>/dev/null
-iptables  -t filter -X MOD_PRE_AFW              2>/dev/null
-ip6tables -t filter -D OUTPUT -j MOD_PRE_AFW_V6 2>/dev/null
-ip6tables -t filter -F MOD_PRE_AFW_V6           2>/dev/null
-ip6tables -t filter -X MOD_PRE_AFW_V6           2>/dev/null
+# Remove FORWARD block (filter table only):
+iptables  -t filter -D FORWARD -j MOD_PRE_AFW_FWD     2>/dev/null
+iptables  -t filter -F MOD_PRE_AFW_FWD                2>/dev/null
+iptables  -t filter -X MOD_PRE_AFW_FWD                2>/dev/null
+ip6tables -t filter -D FORWARD -j MOD_PRE_AFW_FWD_V6  2>/dev/null
+ip6tables -t filter -F MOD_PRE_AFW_FWD_V6             2>/dev/null
+ip6tables -t filter -X MOD_PRE_AFW_FWD_V6             2>/dev/null
+
+# Remove INPUT block if enabled (filter table only):
+iptables  -t filter -D INPUT   -j MOD_PRE_AFW_IN      2>/dev/null
+iptables  -t filter -F MOD_PRE_AFW_IN                 2>/dev/null
+iptables  -t filter -X MOD_PRE_AFW_IN                 2>/dev/null
+ip6tables -t filter -D INPUT   -j MOD_PRE_AFW_IN_V6   2>/dev/null
+ip6tables -t filter -F MOD_PRE_AFW_IN_V6              2>/dev/null
+ip6tables -t filter -X MOD_PRE_AFW_IN_V6              2>/dev/null
 ```
 
 ### Disable the module temporarily
@@ -292,6 +347,55 @@ Uninstall via Magisk app. `uninstall.sh` runs automatically and:
 Note: Uninstall does **not** re-enable Wi-Fi or mobile data. Radio state is
 managed by AFWall+, not by this module.
 
+### Tether clients can connect during boot (hotspot / USB / Bluetooth)
+
+This should not happen with `ENABLE_FORWARD_BLOCK=1` (the default). To verify:
+
+```sh
+# Check FORWARD block is installed during early boot:
+iptables  -t filter -S FORWARD | grep MOD_PRE_AFW_FWD
+ip6tables -t filter -S FORWARD | grep MOD_PRE_AFW_FWD_V6
+
+# Check state file confirms FORWARD block was installed:
+cat /data/adb/AFWall-Boot-AntiLeak/state/ipv4_fwd_active
+
+# Check log for FORWARD installation:
+grep 'forward_block\|FORWARD' /data/adb/AFWall-Boot-AntiLeak/logs/boot.log
+```
+
+If the FORWARD block is not present, check:
+1. `ENABLE_FORWARD_BLOCK` is not set to `0` in your `config.sh`.
+2. The filter table is available: `iptables -t filter -S FORWARD` should work.
+3. No errors in the boot log related to `install_forward_block`.
+
+**Note on tether VPN**: If using a VPN while tethering, the VPN traffic may
+traverse both the OUTPUT chain (on the device itself) and the FORWARD chain
+(for tethered clients forwarded through the VPN interface). Both are blocked
+during boot.
+
+### INPUT block not releasing (if ENABLE_INPUT_BLOCK=1)
+
+If networking appears blocked after AFWall starts and you have INPUT blocking
+enabled:
+
+1. Check if the INPUT block was released:
+   ```sh
+   grep 'remove_input\|INPUT' /data/adb/AFWall-Boot-AntiLeak/logs/boot.log | tail -20
+   ```
+2. Verify AFWall's rules were detected:
+   ```sh
+   grep 'AFWall rules detected' /data/adb/AFWall-Boot-AntiLeak/logs/boot.log
+   ```
+3. Manual release:
+   ```sh
+   iptables  -t filter -D INPUT -j MOD_PRE_AFW_IN     2>/dev/null
+   iptables  -t filter -F MOD_PRE_AFW_IN               2>/dev/null
+   iptables  -t filter -X MOD_PRE_AFW_IN               2>/dev/null
+   ip6tables -t filter -D INPUT -j MOD_PRE_AFW_IN_V6  2>/dev/null
+   ip6tables -t filter -F MOD_PRE_AFW_IN_V6            2>/dev/null
+   ip6tables -t filter -X MOD_PRE_AFW_IN_V6            2>/dev/null
+   ```
+
 ### AFWall never becomes ready
 
 If AFWall is absent or permanently disabled:
@@ -310,10 +414,19 @@ All commands require a root shell (`su` in Termux, or `adb shell` + `su`).
 ### Check if the module block is currently installed
 
 ```sh
+# OUTPUT block (raw table preferred, filter fallback):
 iptables  -t raw    -S | grep MOD_PRE_AFW
 ip6tables -t raw    -S | grep MOD_PRE_AFW_V6
-iptables  -t filter -S | grep MOD_PRE_AFW      # filter fallback
-ip6tables -t filter -S | grep MOD_PRE_AFW_V6   # filter fallback
+iptables  -t filter -S | grep MOD_PRE_AFW        # filter fallback
+ip6tables -t filter -S | grep MOD_PRE_AFW_V6     # filter fallback
+
+# FORWARD block (filter table, default enabled):
+iptables  -t filter -S | grep MOD_PRE_AFW_FWD
+ip6tables -t filter -S | grep MOD_PRE_AFW_FWD_V6
+
+# INPUT block (filter table, only if ENABLE_INPUT_BLOCK=1):
+iptables  -t filter -S | grep MOD_PRE_AFW_IN
+ip6tables -t filter -S | grep MOD_PRE_AFW_IN_V6
 ```
 
 ### Check AFWall rule readiness
@@ -336,7 +449,10 @@ tail -40 /data/adb/AFWall-Boot-AntiLeak/logs/boot.log
 
 ```sh
 ls -la /data/adb/AFWall-Boot-AntiLeak/state/
-cat /data/adb/AFWall-Boot-AntiLeak/state/ipv4_table
+cat /data/adb/AFWall-Boot-AntiLeak/state/ipv4_out_table    # 'raw' or 'filter'
+cat /data/adb/AFWall-Boot-AntiLeak/state/ipv6_out_table    # 'raw' or 'filter'
+cat /data/adb/AFWall-Boot-AntiLeak/state/ipv4_fwd_active   # '1' if FORWARD block installed
+cat /data/adb/AFWall-Boot-AntiLeak/state/ipv4_in_active    # '1' if INPUT block installed
 cat /data/adb/AFWall-Boot-AntiLeak/state/integration_mode
 ```
 
@@ -369,10 +485,14 @@ sed -i 's/^DEBUG=0/DEBUG=1/' \
 
 ### Module-owned chains (only these are created/removed)
 
-| Chain | Table | Protocol |
-|---|---|---|
-| `MOD_PRE_AFW` | raw (or filter fallback) | IPv4 |
-| `MOD_PRE_AFW_V6` | raw (or filter fallback) | IPv6 |
+| Chain | Table | Direction | Protocol |
+|---|---|---|---|
+| `MOD_PRE_AFW` | raw (or filter fallback) | OUTPUT | IPv4 |
+| `MOD_PRE_AFW_V6` | raw (or filter fallback) | OUTPUT | IPv6 |
+| `MOD_PRE_AFW_FWD` | filter | FORWARD | IPv4 |
+| `MOD_PRE_AFW_FWD_V6` | filter | FORWARD | IPv6 |
+| `MOD_PRE_AFW_IN` | filter | INPUT | IPv4 (optional) |
+| `MOD_PRE_AFW_IN_V6` | filter | INPUT | IPv6 (optional) |
 
 No other chains, rules, or system files are created by this module.
 
@@ -402,12 +522,10 @@ Files without these markers are never removed.
 
 ### How the module avoids conflicting with AFWall
 
-1. Module chains (`MOD_PRE_AFW*`) live in the **raw table**. AFWall's chains
-   (`afwall*`) live in the **filter table**. Different tables, no overlap.
+1. Module OUTPUT chains (`MOD_PRE_AFW`, `MOD_PRE_AFW_V6`) live in the **raw table** by preference. Module FORWARD/INPUT chains live in the **filter table** but use dedicated names (`MOD_PRE_AFW_FWD*`, `MOD_PRE_AFW_IN*`) that never clash with AFWall's `afwall` and `afwall-*` chains.
 2. Module block is installed in `post-fs-data`. AFWall doesn't touch iptables
    until FirewallService starts (requires Zygote + framework). No timing race.
-3. Module block is removed **after** AFWall's OUTPUT jump is confirmed. AFWall's
-   rules become the sole active protection from that moment.
+3. Module blocks are all removed **after** AFWall's OUTPUT jump is confirmed. At that point AFWall has also installed any FORWARD/INPUT rules based on user configuration. AFWall's rules become the sole active protection from that moment.
 4. Module never flushes or modifies chains it does not own.
 
 ---
@@ -472,11 +590,12 @@ Modern Android may use `iptables-nft` (nftables compatibility). The filter-table
 fallback is more likely to be needed in nftables configurations. Both backends
 are supported without any user configuration.
 
-### OUTPUT only (no INPUT blocking)
+### INPUT blocking (optional)
 
-The module blocks outbound traffic (OUTPUT chain) — the primary leak vector.
-It does not block inbound connections. For inbound blocking before AFWall
-starts, consult AFWall+'s INPUT chain settings.
+The module blocks OUTPUT (device-originated) and FORWARD (tethered client)
+traffic by default. INPUT (inbound) blocking is optional and disabled by
+default; enable with `ENABLE_INPUT_BLOCK=1` in `config.sh`. Even with INPUT
+blocking, loopback (`lo`) traffic is always exempted to preserve local IPC.
 
 ### AFWall fixLeak on modern Android
 
@@ -502,6 +621,8 @@ Edit `config.sh` in the module directory, or place a persistent override at
 | Variable | Default | Description |
 |---|---|---|
 | `INTEGRATION_MODE` | `auto` | `auto` / `prefer_module` / `prefer_afwall` / `off` |
+| `ENABLE_FORWARD_BLOCK` | `1` | Set to `0` to disable the FORWARD chain block (tether coverage) |
+| `ENABLE_INPUT_BLOCK` | `0` | Set to `1` to enable the optional INPUT chain block (inbound hardening) |
 | `TIMEOUT_SECS` | `120` | Seconds before force-unblocking if AFWall never becomes ready |
 | `SETTLE_SECS` | `5` | Seconds to wait after first AFWall rule detection before releasing block |
 | `DEBUG` | `0` | Set to `1` for verbose `[DEBUG]` entries in the boot log |
@@ -516,10 +637,14 @@ Edit `config.sh` in the module directory, or place a persistent override at
   logs/
     boot.log            # all events from all boot phases (appended each boot)
   state/
-    block_installed     # present while module block is active (contains '1')
-    ipv4_table          # iptables table used for IPv4 block ('raw' or 'filter')
-    ipv6_table          # ip6tables table used for IPv6 block ('raw' or 'filter')
-    integration_mode    # integration mode chosen for this boot
+    block_installed      # present while module block is active (contains '1')
+    ipv4_out_table       # table for IPv4 OUTPUT block ('raw' or 'filter')
+    ipv6_out_table       # table for IPv6 OUTPUT block ('raw' or 'filter')
+    ipv4_fwd_active      # present ('1') while IPv4 FORWARD block is installed
+    ipv6_fwd_active      # present ('1') while IPv6 FORWARD block is installed
+    ipv4_in_active       # present ('1') while IPv4 INPUT block is installed (optional)
+    ipv6_in_active       # present ('1') while IPv6 INPUT block is installed (optional)
+    integration_mode     # integration mode chosen for this boot
 ```
 
 ---
@@ -529,12 +654,12 @@ Edit `config.sh` in the module directory, or place a persistent override at
 | Failure | Action taken |
 |---|---|
 | `iptables` not found | Log critical error; IPv4 block not installed |
-| `ip6tables` not found | Log warning; IPv6 unprotected; IPv4 still protected |
+| `ip6tables` not found | Log warning; IPv6 unprotected for all directions; IPv4 still protected |
 | Raw table unavailable | Fall back to filter table; logged as warning |
 | Filter table also fails | Log critical warning; block not installed for that protocol |
 | AFWall absent or never starts | Timeout (`TIMEOUT_SECS`) fires; block removed; networking restored |
 | `svc` unavailable | Radio toggle helpers silently skip (not primary protection) |
-| State files lost / corrupt | Removal tries both raw and filter tables defensively |
+| State files lost / corrupt | Removal tries both raw and filter tables defensively for all chain names |
 | `iptables -C` returns error | Rule is re-added (idempotent; no duplicate from chain-based check) |
 
 ---
@@ -547,14 +672,18 @@ Edit `config.sh` in the module directory, or place a persistent override at
 | AFWall not installed | Timeout fires; `timeout 120s reached; removing block (failsafe)` |
 | AFWall delayed start (< timeout) | Block maintained; released when rules appear |
 | AFWall delayed start (> timeout) | Timeout fires; networking restored; block logged as failsafe removal |
-| IPv6 ip6tables unavailable | `install_block_v6: ip6tables not found`; IPv4 protected; IPv6 warning |
+| IPv6 ip6tables unavailable | `install_output_block_v6: ip6tables not found`; IPv4 protected for all directions; IPv6 warning |
 | Raw table unavailable | `raw table failed; falling back to filter table`; block in filter |
 | Both raw and filter fail | `WARN: could not install block`; user alerted via log |
 | Second reboot (idempotent check) | Clean block installed; no duplicate chains |
 | Interrupted boot (crash/reboot mid-block) | Next boot's post-fs-data cleans up old chains before installing new ones |
 | Manual recovery via action.sh | Block removed; diagnostics printed; log entry created |
 | Module uninstall | Module chains removed from all tables; state/logs deleted; radios not changed |
-| AFWall fixLeak enabled + module `auto` | Both active; no conflict; module releases after AFWall confirms rules |
+| AFWall fixLeak enabled + module `auto` | Coexist; module releases after AFWall confirms rules; recommend disabling AFWall fixLeak |
+| `ENABLE_FORWARD_BLOCK=1` (default) | FORWARD block installed; tether clients blocked during boot |
+| `ENABLE_FORWARD_BLOCK=0` | No FORWARD block; tether clients unprotected during boot |
+| `ENABLE_INPUT_BLOCK=1` | INPUT block installed; inbound connections blocked (loopback exempted) |
+| `ENABLE_INPUT_BLOCK=0` (default) | No INPUT block; inbound connections not blocked during boot |
 | AFWall fixLeak enabled + module `prefer_afwall` | Android 16: same as auto (no afwallstart found); custom ROM with init.d: module defers |
 | `INTEGRATION_MODE=off` | No block installed; post-fs-data logs skip; networking unprotected pre-AFWall |
 | `DEBUG=1` | Extra `[DEBUG]` lines in boot.log for every iptables operation |
@@ -563,6 +692,17 @@ Edit `config.sh` in the module directory, or place a persistent override at
 ---
 
 ## ChangeLog
+
+### v2.1.0 — FORWARD and INPUT chain coverage
+
+- **FORWARD chain block** (`MOD_PRE_AFW_FWD` / `MOD_PRE_AFW_FWD_V6`): new module-owned chains in the filter table protect tethered clients (Wi-Fi hotspot, USB tether, Bluetooth PAN) from leaking traffic during boot. Enabled by default (`ENABLE_FORWARD_BLOCK=1`).
+- **INPUT chain block** (`MOD_PRE_AFW_IN` / `MOD_PRE_AFW_IN_V6`): optional module-owned chains block inbound connections during boot. Disabled by default; enable with `ENABLE_INPUT_BLOCK=1` in `config.sh`. Loopback always exempted.
+- **Config**: added `ENABLE_FORWARD_BLOCK` and `ENABLE_INPUT_BLOCK` options to `config.sh`.
+- **Refactored install/remove API**: per-direction functions (`install_output_block_v4`, `install_forward_block_v4`, `install_input_block_v4`, etc.) replace the single `install_block_v4`.
+- **AFWall readiness detection**: unchanged (OUTPUT hook is sufficient signal); added supplementary `afwall_forward_hook_present()` and `afwall_input_hook_present()` diagnostics logged at block-release time.
+- **Legacy cleanup**: `remove_legacy_raw_drop` now covers all module chain names.
+- **State files**: renamed `ipv4_table`→`ipv4_out_table` and `ipv6_table`→`ipv6_out_table`; added `ipv4_fwd_active`, `ipv6_fwd_active`, `ipv4_in_active`, `ipv6_in_active`. Backward compat: remove functions still check old state file names.
+- **AFWall interaction**: updated guidance to recommend disabling AFWall Fix Startup Data Leak when using this module.
 
 ### v2.0.0 — Major redesign (this release)
 
@@ -663,7 +803,7 @@ tools/build-release.sh dist/ AFWall-Boot-AntiLeak.zip
 ```
 
 Output:
-- `dist/AFWall-Boot-AntiLeak-v2.0.0.zip` — Magisk-installable module ZIP
+- `dist/AFWall-Boot-AntiLeak-v2.1.0.zip` — Magisk-installable module ZIP
 - `dist/sha256sum.txt` — SHA256 checksum
 - `dist/build-info.txt` — build metadata (version, git ref, date)
 
@@ -677,7 +817,7 @@ that context).
 
 ```sh
 chmod +x tools/validate-zip.sh
-tools/validate-zip.sh dist/AFWall-Boot-AntiLeak-v2.0.0.zip
+tools/validate-zip.sh dist/AFWall-Boot-AntiLeak-v2.1.0.zip
 ```
 
 This checks that all required installer and runtime files are present inside
@@ -759,7 +899,7 @@ name `AFWall-Boot-AntiLeak.zip`. When releasing a new version, `update.json`'s
 | `common/functions.sh` | Added — exact copy of MMT-Extended v3.7 installer helper. Required by `customize.sh`. Deleted from MODPATH after install. |
 | `common/install.sh` | Added — module-specific install banner. Sourced during install then deleted. |
 | `update.json` | Added — OTA update metadata consumed by Magisk app. |
-| `module.prop` | Added `updateJson` field; corrected version prefix to `v2.0.0`. |
+| `module.prop` | Added `updateJson` field; corrected version prefix to `v2.1.0`. |
 | `.gitattributes` | Updated to MMT-Extended's explicit LF line-ending rules (covers `.sh`, `.prop`, `.md`, `.json`, `META-INF/**`). |
 | `.gitignore` | Added — MMT-Extended convention (ignores `__MACOSX`, `.DS_Store`). |
 
@@ -889,7 +1029,7 @@ installable ZIP.
 ### Release workflow (`.github/workflows/release.yml`)
 
 **Tag-driven release (recommended)**:
-1. Push a version tag (e.g. `v2.0.0`) matching the value in `module.prop`.
+1. Push a version tag (e.g. `v2.1.0`) matching the value in `module.prop`.
 2. The workflow fires automatically.
 3. It validates that the tag matches `module.prop version`.
 4. It builds the ZIP with the stable filename `AFWall-Boot-AntiLeak.zip`.
@@ -923,7 +1063,7 @@ latest release without changing `update.json` on every release.
 
 1. **Latest release**: [GitHub Releases](https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/latest)
 2. **Direct download**: `https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/latest/download/AFWall-Boot-AntiLeak.zip`
-3. **Specific version**: `https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/download/v2.0.0/AFWall-Boot-AntiLeak.zip`
+3. **Specific version**: `https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/download/v2.1.0/AFWall-Boot-AntiLeak.zip`
 
 ### Verify the checksum
 
@@ -1031,16 +1171,16 @@ tools/build-release.sh dist/
 
 # Validate
 chmod +x tools/validate-zip.sh
-tools/validate-zip.sh dist/AFWall-Boot-AntiLeak-v2.0.0.zip
+tools/validate-zip.sh dist/AFWall-Boot-AntiLeak-v2.1.0.zip
 
 # Inspect ZIP contents
-unzip -l dist/AFWall-Boot-AntiLeak-v2.0.0.zip
+unzip -l dist/AFWall-Boot-AntiLeak-v2.1.0.zip
 ```
 
 ### Inspect the built ZIP structure
 
 ```sh
-unzip -l dist/AFWall-Boot-AntiLeak-v2.0.0.zip
+unzip -l dist/AFWall-Boot-AntiLeak-v2.1.0.zip
 ```
 
 Expected top-level entries: `META-INF/`, `common/`, `bin/`, `action.sh`,
@@ -1056,7 +1196,7 @@ finding the installer files.
 After building, run:
 
 ```sh
-tools/validate-zip.sh dist/AFWall-Boot-AntiLeak-v2.0.0.zip
+tools/validate-zip.sh dist/AFWall-Boot-AntiLeak-v2.1.0.zip
 ```
 
 A `VALIDATION PASSED` result means the ZIP passes structural checks. Actual

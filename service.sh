@@ -11,7 +11,7 @@
   TIMEOUT_SECS="${TIMEOUT_SECS:-120}"
   SETTLE_SECS="${SETTLE_SECS:-5}"
 
-  log "service: start (timeout=${TIMEOUT_SECS}s settle=${SETTLE_SECS}s)"
+  log "service: start (timeout=${TIMEOUT_SECS}s settle=${SETTLE_SECS}s fwd=${ENABLE_FORWARD_BLOCK:-1} in=${ENABLE_INPUT_BLOCK:-0})"
 
   # Resolve AFWall package for diagnostic logging only.
   AFW_PKG="$(resolve_afwall_pkg 2>/dev/null)" || AFW_PKG=""
@@ -30,11 +30,22 @@
     # ── Primary release condition ───────────────────────────────────────────
     # Only unblock when AFWall's own chains are installed and jumped to from
     # OUTPUT. This is the documented signal that AFWall rules are fully active.
+    # Once OUTPUT is confirmed, AFWall has also applied any FORWARD/INPUT rules
+    # based on the user's tether/LAN/VPN/INPUT chain settings.
     if afwall_rules_present; then
       log "service: AFWall rules detected; settling ${SETTLE_SECS}s"
       sleep "$SETTLE_SECS"
       # Re-verify after the settle delay to guard against transient matches.
       if afwall_rules_present; then
+        # Log supplementary FORWARD/INPUT hook state for diagnostics.
+        if afwall_forward_hook_present; then
+          log "service: AFWall FORWARD hook present (tether rules active)"
+        else
+          log "service: AFWall FORWARD hook absent (tether control not active or not configured)"
+        fi
+        if afwall_input_hook_present; then
+          log "service: AFWall INPUT hook present"
+        fi
         remove_block
         log "service: block removed (AFWall rules confirmed after settle)"
         exit 0
