@@ -1,7 +1,7 @@
 #!/system/bin/sh
-# late_start service stage: poll for AFWall+ rule readiness and remove the
-# module's temporary kernel-level block only when it is safe to do so.
-# Runs the polling loop in a background subshell so Magisk's service phase
+# late_start service stage: apply lower-layer suppression, then poll for
+# AFWall+ rule readiness and perform staged release.
+# Runs the entire logic in a background subshell so Magisk's service phase
 # is not held up.
 (
   MODDIR="${0%/*}"
@@ -11,7 +11,7 @@
   TIMEOUT_SECS="${TIMEOUT_SECS:-120}"
   SETTLE_SECS="${SETTLE_SECS:-5}"
 
-  log "service: start (timeout=${TIMEOUT_SECS}s settle=${SETTLE_SECS}s fwd=${ENABLE_FORWARD_BLOCK:-1} in=${ENABLE_INPUT_BLOCK:-0})"
+  log "service: start (timeout=${TIMEOUT_SECS}s settle=${SETTLE_SECS}s fwd=${ENABLE_FORWARD_BLOCK:-1} in=${ENABLE_INPUT_BLOCK:-0} ll_mode=${LOWLEVEL_MODE:-safe})"
 
   # Resolve AFWall package for diagnostic logging only.
   AFW_PKG="$(resolve_afwall_pkg 2>/dev/null)" || AFW_PKG=""
@@ -24,11 +24,20 @@
   # Remove any remaining legacy artifacts before entering the polling loop.
   cleanup_legacy "service"
 
+  # ── Lower-layer suppression (Layer 1 and Layer 3) ──────────────────────────
+  # Performs interface quiesce (Layer 1: no framework needed) and
+  # service-level suppression (Layer 3: Wi-Fi/data/BT/tether shutdown once
+  # framework is ready).
+  # The iptables hard block (Layer 2) is already installed from post-fs-data.
+  # This call is non-blocking for the polling loop; it retries framework
+  # service detection internally for up to 15 s before giving up.
+  lowlevel_prepare_environment
+
   START_TS="$(date +%s 2>/dev/null)" || START_TS=0
 
   while :; do
     # ── Primary release condition ───────────────────────────────────────────
-    # Only unblock when AFWall's own chains are installed and jumped to from
+    # Only proceed when AFWall's own chains are installed and jumped to from
     # OUTPUT. This is the documented signal that AFWall rules are fully active.
     # Once OUTPUT is confirmed, AFWall has also applied any FORWARD/INPUT rules
     # based on the user's tether/LAN/VPN/INPUT chain settings.
@@ -46,8 +55,17 @@
         if afwall_input_hook_present; then
           log "service: AFWall INPUT hook present"
         fi
+
+        # ── Stage B: remove module-owned iptables blocks ────────────────────
         remove_block
-        log "service: block removed (AFWall rules confirmed after settle)"
+        log "service: firewall block removed (Stage B complete)"
+
+        # ── Stage C: restore lower-layer state changed by this module ───────
+        lowlevel_restore_changed_state
+        log "service: lower-layer state restored (Stage C complete)"
+
+        # ── Stage D: final status ───────────────────────────────────────────
+        log "service: handoff complete — AFWall is now sole active protection"
         exit 0
       fi
       log "service: AFWall rules absent after settle; continuing to poll"
@@ -61,6 +79,7 @@
       if [ "$NOW" != "0" ] && [ $((NOW - START_TS)) -ge "$TIMEOUT_SECS" ]; then
         log "service: timeout ${TIMEOUT_SECS}s reached; removing block (failsafe)"
         remove_block
+        lowlevel_restore_changed_state
         exit 0
       fi
     fi

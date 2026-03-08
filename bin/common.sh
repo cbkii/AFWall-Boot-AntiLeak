@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v2.1.0 - Common library
+# AFWall Boot AntiLeak v2.2.0 - Common library
 # POSIX/ash compatible. No bashisms. Sourced by all module scripts; do not
 # execute directly.
 
@@ -722,19 +722,11 @@ cleanup_legacy() {
   return 0
 }
 
-# ── Radio helpers (secondary / best-effort) ────────────────────────────────────
-# Radio toggles are NOT the primary protection mechanism; they are provided
-# only as a belt-and-suspenders option and may be unavailable in early boot.
-restore_radios() {
-  has_cmd svc || { debug_log "restore_radios: svc not found"; return 0; }
-  svc wifi enable 2>/dev/null || true
-  svc data enable 2>/dev/null || true
-  log "radios: restore issued (best-effort)"
-}
-
-disable_radios() {
-  has_cmd svc || { debug_log "disable_radios: svc not found"; return 0; }
-  svc wifi disable 2>/dev/null || true
-  svc data disable 2>/dev/null || true
-  log "radios: disable issued (best-effort)"
-}
+# ── Lower-layer suppression subsystem ─────────────────────────────────────────
+# Source the lower-layer suppression library if present.
+# This provides: lowlevel_prepare_environment, lowlevel_restore_changed_state,
+# lowlevel_emergency_restore, and supporting helpers.
+# MODDIR is set by the calling script before sourcing common.sh.
+if [ -f "${MODDIR:-}/bin/lowlevel.sh" ]; then
+  . "${MODDIR}/bin/lowlevel.sh"
+fi

@@ -64,6 +64,91 @@ ENABLE_FORWARD_BLOCK=1
 #
 ENABLE_INPUT_BLOCK=0
 
+# ══════════════════════════════════════════════════════════════════════════════
+# LOWER-LAYER SUPPRESSION SUBSYSTEM (v2.2.0+)
+# ══════════════════════════════════════════════════════════════════════════════
+# These options control a second, lower anti-leak tier that runs beneath the
+# iptables hard block.  Service-level and interface-level suppression reduces
+# network connectivity during the pre-AFWall window even if iptables were to
+# fail or be bypassed.
+#
+# IMPORTANT: These are BEST-EFFORT measures.  They supplement the iptables hard
+# block; they do NOT replace it.  If a service command fails, the iptables
+# block remains the authoritative hard stop.
+#
+# IMPORTANT: Airplane mode is NOT used as the primary anti-leak mechanism.
+# It is a framework/policy switch, not a kernel-level hardware kill.  Wi-Fi
+# can be re-enabled while in airplane mode.  See README for details.
+#
+# State tracking: the module records every change it makes to service and
+# interface state in /data/adb/AFWall-Boot-AntiLeak/state/ll/.  Only changes
+# made by the module are restored.  Wi-Fi, mobile data, or Bluetooth that the
+# user had already disabled before boot will NOT be re-enabled.
+
+# ── Lower-layer mode ──────────────────────────────────────────────────────────
+#
+#   off    - No lower-layer suppression.  Firewall-only mode (v2.1.0 behaviour).
+#   safe   - Interface quiesce + service suppression. Uses individual flags
+#            below to control which services are disabled. (default)
+#   strict - Same as safe; individual flags still apply, but this mode signals
+#            intent to enable maximum suppression.  Upgrade path: set all
+#            LOWLEVEL_USE_* flags to 1 and set mode to strict.
+#
+LOWLEVEL_MODE=safe
+
+# ── Interface quiesce ─────────────────────────────────────────────────────────
+# When enabled, the module brings non-loopback network interfaces DOWN during
+# the service.sh phase.  Uses /sys/class/net enumeration and `ip link set`.
+# Interfaces are restored (brought UP) after AFWall rules are confirmed.
+#
+# Safety:
+#   - Loopback (lo), kernel transition tunnels, and Qualcomm IPA are exempt
+#   - The iptables hard block remains in place throughout
+#   - Routes are NOT explicitly removed; they disappear when interfaces go down
+#     and are re-acquired automatically (DHCP/RA) when interfaces come back up
+#     under AFWall's protection
+#
+# Set to 0 if you experience boot-time issues with Wi-Fi or network management
+# reacting to interface state changes.
+#
+LOWLEVEL_INTERFACE_QUIESCE=1
+
+# ── Wi-Fi service suppression ─────────────────────────────────────────────────
+# Disables Wi-Fi via Android service commands (cmd wifi / svc wifi).
+# Tracks pre-boot Wi-Fi state; only re-enables if the module disabled it.
+# Enabled by default (best-effort; requires framework to be up).
+#
+LOWLEVEL_USE_WIFI_SERVICE=1
+
+# ── Mobile data suppression ───────────────────────────────────────────────────
+# Disables mobile data via Android service commands (cmd phone / svc data).
+# Tracks pre-boot data state; only re-enables if the module disabled it.
+# Enabled by default (best-effort; requires framework to be up).
+#
+LOWLEVEL_USE_PHONE_DATA_CMD=1
+
+# ── Bluetooth suppression ─────────────────────────────────────────────────────
+# Disables Bluetooth via cmd bluetooth_manager / svc bluetooth.
+# Disabled by default because:
+#   - Bluetooth rarely carries internet traffic (iptables FORWARD block handles
+#     Bluetooth PAN forwarded traffic independently)
+#   - Disabling Bluetooth disrupts headphones, keyboards, etc. during boot
+#   - Users who specifically use Bluetooth tethering as an internet path may
+#     enable this for extra protection
+#
+# Set to 1 to enable Bluetooth suppression.
+#
+LOWLEVEL_USE_BLUETOOTH_MANAGER=0
+
+# ── Tethering suppression ─────────────────────────────────────────────────────
+# Stops active tethering via cmd connectivity and/or interface shutdown.
+# Enabled by default.  Note: tethering is NOT auto-restarted after boot
+# because it requires explicit user action; this is intentional.
+#
+LOWLEVEL_USE_TETHER_STOP=1
+
+# ══════════════════════════════════════════════════════════════════════════════
+
 # ── Timeout ───────────────────────────────────────────────────────────────────
 # Maximum seconds to wait for AFWall rules before force-unblocking.
 # Increase on very slow devices. Conservative default: 120 s.
