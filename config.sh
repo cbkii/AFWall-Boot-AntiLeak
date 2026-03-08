@@ -5,15 +5,25 @@
 # override the module's built-in defaults without modifying the module itself.
 
 # ── Integration mode ──────────────────────────────────────────────────────────
-# Controls how this module coordinates with AFWall+'s own optional startup
-# leak protection feature.
+# Controls how this module coordinates with AFWall+'s optional "Fix Startup
+# Data Leak" (fixLeak) feature.
 #
-#   auto          - Inspect AFWall state and choose the safest behaviour.
-#                   If AFWall startup chains are found the module block still
-#                   runs as a supplement. (default)
-#   prefer_module - Always install the module block regardless of AFWall state.
-#   prefer_afwall - Skip the module block if AFWall startup chains are already
-#                   active; fall back to module block if they are absent.
+# Background: AFWall+'s fixLeak feature installs a startup script called
+# 'afwallstart' into init.d or su.d paths (/etc/init.d/, /su/su.d/, etc.).
+# On modern Android (8+) this mechanism is rarely effective because init.d/su.d
+# is not supported without a special kernel or SuperSU. On Android 16 Pixel
+# devices it is effectively non-functional. The module checks for the presence
+# of that script to determine whether to defer.
+#
+#   auto          - Inspect AFWall state. Install the module block as primary
+#                   (or supplemental) protection regardless of AFWall state.
+#                   Recommended default. (default)
+#   prefer_module - Always install the module block, regardless of any detected
+#                   AFWall startup-script. Belt-and-suspenders maximum safety.
+#   prefer_afwall - Skip the module block only when an AFWall-owned afwallstart
+#                   script is detected in init.d/su.d paths. On modern Android
+#                   this is effectively the same as auto because init.d/su.d is
+#                   unsupported. Use only if you have confirmed init.d support.
 #   off           - Disable module blocking entirely. Use only in emergencies.
 #
 INTEGRATION_MODE=auto

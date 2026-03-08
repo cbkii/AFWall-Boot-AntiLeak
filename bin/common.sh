@@ -322,21 +322,53 @@ afwall_rules_present() {
   return 1
 }
 
-# Detect AFWall's built-in startup leak protection.
-# AFWall's startup protection installs chains whose names begin with 'afwall'
-# in the raw or filter table before the main rules are applied.
+# Detect AFWall's built-in startup leak protection (the "Fix Startup Data Leak"
+# preference, stored as fixLeak=true in AFWall prefs).
+#
+# How AFWall's fixLeak actually works (upstream code, G.java / Api.java):
+#   - It installs a shell script called 'afwallstart' into init.d or su.d paths
+#     such as /etc/init.d/, /su/su.d/, /system/su.d/
+#   - On modern Android (8+) this is rarely effective because init.d/su.d is
+#     not supported without a special kernel or SuperSU
+#   - AFWall does NOT install iptables chains in the raw table as startup
+#     protection; all its chains live in the filter table and are installed
+#     only when FirewallService applies rules (after Zygote and framework start)
+#
+# This function returns 0 if evidence of AFWall's startup script is found.
+# It also returns 0 if AFWall's filter-table chains are already present,
+# which indicates AFWall is currently running (relevant for service.sh context).
 afwall_startup_protection_active() {
+  # Primary check: look for an afwallstart script that is NOT module-owned.
+  local f
+  for f in \
+    "/etc/init.d/afwallstart" \
+    "/su/su.d/afwallstart" \
+    "/system/su.d/afwallstart" \
+    "/data/adb/post-fs-data.d/afwallstart" \
+    "/data/adb/service.d/afwallstart"; do
+    [ -f "$f" ] || continue
+    # Do not count our own legacy artifact as AFWall protection.
+    if grep -qE 'AFW-ANTILEAK|AFWall-?Boot-?AntiLeak|sys\.afw\.policy\.drop' \
+        "$f" 2>/dev/null; then
+      debug_log "afwall_startup_protection: skipping module-owned $f"
+      continue
+    fi
+    debug_log "afwall_startup_protection: found afwallstart script at $f"
+    return 0
+  done
+
+  # Secondary check: AFWall's filter-table chains (indicates AFWall is running).
+  # Useful when called from service.sh context after AFWall has started.
   local cmd t c
   for cmd in iptables ip6tables; do
     c="$(_find_cmd "$cmd" 2>/dev/null)" || continue
-    for t in raw filter; do
-      if _table_available "$c" "$t" && \
-         "$c" -t "$t" -S 2>/dev/null | grep -qiE '^-N afwall'; then
-        debug_log "afwall_startup_protection: found afwall chain in $t ($cmd)"
-        return 0
-      fi
-    done
+    if _table_available "$c" filter && \
+       "$c" -t filter -S 2>/dev/null | grep -qE '^-N afwall($| )'; then
+      debug_log "afwall_startup_protection: found afwall filter chain ($cmd)"
+      return 0
+    fi
   done
+
   return 1
 }
 
@@ -356,8 +388,18 @@ afwall_process_present() {
 }
 
 # ── Integration mode ───────────────────────────────────────────────────────────
-# Evaluates config and current firewall state, writes the chosen mode to the
-# state directory, and returns 0 always (failures are logged).
+# Evaluates config and current state, writes the chosen mode to the state
+# directory, and returns 0 always (failures are logged).
+#
+# Integration mode behaviour during post-fs-data:
+#   At post-fs-data stage iptables is clean (flushed on reboot).  AFWall's
+#   filter chains do NOT exist yet, so afwall_startup_protection_active() can
+#   only detect AFWall's afwallstart init.d/su.d scripts (rare on Android 8+).
+#   Because of this, prefer_afwall will DEFER only when an AFWall-owned
+#   afwallstart script is present; otherwise it installs the module block just
+#   like auto/prefer_module.  On modern Pixel devices running Android 16, the
+#   init.d/su.d mechanism is not supported, so prefer_afwall effectively
+#   behaves the same as auto unless the user has a custom ROM with init.d.
 setup_integration_mode() {
   load_config
   local mode="${INTEGRATION_MODE:-auto}"
@@ -435,14 +477,21 @@ remove_legacy_raw_drop() {
   done
 }
 
-# Remove legacy afwallstart script only if it carries a known module marker.
+# Remove legacy afwallstart scripts only if they carry a known module marker.
+# Covers every path that v1.x variants have been observed to use.
 remove_legacy_afwallstart() {
-  local f="/data/adb/service.d/afwallstart"
-  [ -f "$f" ] || return 0
-  if grep -qE 'AFW-ANTILEAK|AFWall-?Boot-?AntiLeak|sys\.afw\.policy\.drop' "$f" 2>/dev/null; then
-    rm -f "$f" 2>/dev/null || true
-    log "cleanup: removed legacy /data/adb/service.d/afwallstart"
-  fi
+  local f
+  for f in \
+    "/data/adb/service.d/afwallstart" \
+    "/data/adb/post-fs-data.d/afwallstart" \
+    "/data/adb/system.d/afwallstart"; do
+    [ -f "$f" ] || continue
+    if grep -qE 'AFW-ANTILEAK|AFWall-?Boot-?AntiLeak|sys\.afw\.policy\.drop' \
+        "$f" 2>/dev/null; then
+      rm -f "$f" 2>/dev/null || true
+      log "cleanup: removed legacy $f"
+    fi
+  done
   return 0
 }
 
