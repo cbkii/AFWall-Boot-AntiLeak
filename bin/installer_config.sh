@@ -305,7 +305,9 @@ _ic_any_input_avail() {
 }
 
 # ── Stale event flusher ───────────────────────────────────────────────────────
-# Discards any key events buffered before the interactive prompt.
+# Discards key events buffered BEFORE the upcoming interactive prompt.
+# Must be called BEFORE printing the prompt so that fast keypresses made
+# in response to the prompt text are NOT consumed by the flush.
 # A 1-second read window is used; its exit code is ignored.
 
 _ic_flush_events() {
@@ -360,6 +362,11 @@ ic_volkey_keycheck() {
 # Tries raw getevent first; on timeout, falls back to keycheck; retries up to
 # max_tries rounds before declaring no input.
 # Returns: 0=VOL+, 1=VOL-, 2=no input after all retries.
+#
+# Budget: `secs` is the TOTAL per-attempt window. When both methods are
+# available the budget is split (raw gets secs/2, keycheck gets the rest)
+# so the combined per-attempt wait never exceeds `secs`. When only one
+# method is available it receives the full budget.
 
 ic_chooseport() {
     local secs="${1:-${_IC_KEY_TIMEOUT}}"
@@ -369,12 +376,22 @@ ic_chooseport() {
     # Quick bail: no methods available
     _ic_any_input_avail || return 2
 
+    # Split per-attempt budget so total wait stays within secs.
+    local raw_secs kc_secs
+    if [ "${_IC_KEYS_AVAIL}" = "1" ] && [ "${_IC_KEYCHECK_AVAIL}" = "1" ]; then
+        raw_secs=$((secs / 2))
+        kc_secs=$((secs - raw_secs))
+    else
+        raw_secs="$secs"
+        kc_secs="$secs"
+    fi
+
     while [ "$i" -lt "$max_tries" ]; do
         i=$((i + 1))
 
         # Primary: raw getevent
         if [ "${_IC_KEYS_AVAIL}" = "1" ]; then
-            ic_volkey_raw "$secs"
+            ic_volkey_raw "$raw_secs"
             rc=$?
             if [ "$rc" != "2" ]; then
                 [ "$rc" = "0" ] && _ic_print "  [getevent] detected VOL+"
@@ -386,7 +403,7 @@ ic_chooseport() {
 
         # Fallback: keycheck binary
         if [ "${_IC_KEYCHECK_AVAIL}" = "1" ]; then
-            ic_volkey_keycheck "$secs"
+            ic_volkey_keycheck "$kc_secs"
             rc=$?
             if [ "$rc" != "2" ]; then
                 [ "$rc" = "0" ] && _ic_print "  [keycheck] detected VOL+"
@@ -430,9 +447,9 @@ ic_select_bool() {
         return 0
     fi
 
+    _ic_flush_events
     _ic_print "  $question"
     _ic_print "  VOL+: YES   VOL-: NO   (${_IC_KEY_TIMEOUT}s → ${def_label})"
-    _ic_flush_events
 
     ic_volkey "${_IC_KEY_TIMEOUT}"
     case $? in
@@ -458,9 +475,9 @@ ic_select_enum() {
         return 0
     fi
 
+    _ic_flush_events
     _ic_print "  $question"
     _ic_print "  VOL+: SELECT   VOL-: next   (${_IC_KEY_TIMEOUT}s timeout → $default)"
-    _ic_flush_events
 
     local opt count total
     count=0
@@ -734,8 +751,8 @@ ic_run_config_selection() {
 
             if [ "$is_upgrade" = "1" ]; then
                 _ic_print ""
-                _ic_print "  Reconfigure options? (VOL+=YES, VOL-=keep existing, ${_IC_KEY_TIMEOUT}s → keep)"
                 _ic_flush_events
+                _ic_print "  Reconfigure options? (VOL+=YES, VOL-=keep existing, ${_IC_KEY_TIMEOUT}s → keep)"
                 ic_volkey "${_IC_KEY_TIMEOUT}"
                 case $? in
                     0)
