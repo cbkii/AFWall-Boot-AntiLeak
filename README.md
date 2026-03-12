@@ -14,7 +14,7 @@ confirmed active.
 | Boot stage | Action |
 |---|---|
 | `post-fs-data` (before Zygote) | Installs temporary `DROP` rules: **OUTPUT**, **FORWARD** (tether clients), optional **INPUT**. IPv4 + IPv6. Loopback always exempt. |
-| `service.sh` (background) | Quiesces network interfaces; disables Wi-Fi, mobile data, and tethering via service commands once framework is ready. Polls every 2 s for AFWall's `afwall` chain. On confirmation: removes firewall blocks, restores only module-changed state. Hard timeout (120 s) prevents indefinite blocking. |
+| `service.sh` (background) | Quiesces network interfaces; disables Wi-Fi, mobile data, and tethering via service commands once framework is ready. Polls every 2 s for AFWall takeover per-family (IPv4/IPv6 independently). On confirmation: removes that family's blocks, restores only module-changed state. Timeout (`TIMEOUT_SECS`, default 120 s) fires per `TIMEOUT_POLICY`: `unblock` (default) restores networking; `fail_closed` retains blocks. |
 | `action` (manual) | Magisk action button: removes all blocks and restores service state immediately. |
 | `uninstall` | Removes module-owned chains and state; restores any services the module disabled. |
 
@@ -29,7 +29,7 @@ Lower-layer service/interface suppression is belt-and-suspenders beneath it.
 |---|---|
 | Android | 8+ (API 26+). Tested on Android 16 / Pixel. |
 | Root | Magisk ≥ 20.4 (≥ 30.6 recommended). |
-| Firewall | AFWall+ (`dev.ukanth.ufirewall`). Without it the timeout failsafe unblocks after 120 s. |
+| Firewall | AFWall+ (`dev.ukanth.ufirewall`). Without it the timeout action fires after 120 s (default `TIMEOUT_POLICY=unblock` restores networking). |
 
 ---
 
@@ -132,8 +132,9 @@ Key options:
 | `LOWLEVEL_USE_PHONE_DATA_CMD` | `1` | Disable mobile data via service commands |
 | `LOWLEVEL_USE_BLUETOOTH_MANAGER` | `0` | Disable Bluetooth (opt-in; disrupts BT peripherals) |
 | `LOWLEVEL_USE_TETHER_STOP` | `1` | Stop tethering sessions |
-| `TIMEOUT_SECS` | `120` | Max seconds to wait for AFWall before force-unblocking |
-| `SETTLE_SECS` | `5` | Seconds to settle after AFWall rules first detected |
+| `TIMEOUT_SECS` | `120` | Max seconds to wait for AFWall before timeout fires |
+| `TIMEOUT_POLICY` | `unblock` | `unblock`: remove blocks on timeout (restores networking); `fail_closed`: retain blocks (requires manual recovery) |
+| `SETTLE_SECS` | `5` | Seconds to settle after AFWall rules first detected; signature must stay stable |
 | `DEBUG` | `0` | Set to `1` for verbose logging |
 
 ---

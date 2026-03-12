@@ -475,6 +475,76 @@ remove_block() {
   log "remove_block: done"
 }
 
+# ── Live block-presence detection ─────────────────────────────────────────────
+# These helpers detect whether a module-owned block chain/jump is still present
+# in iptables/ip6tables, using live inspection rather than state-file presence.
+#
+# State files are used as a table hint (to prefer checking the right table
+# first), but the authoritative answer comes from live iptables inspection.
+# This ensures correct behaviour even when state files are lost or corrupt.
+#
+# Each helper returns:
+#   0 — block chain or jump is detectably present (block is active)
+#   1 — block not detected (either never installed or already removed)
+
+output_block_present_v4() {
+  local ipt table
+  ipt="$(_find_cmd iptables 2>/dev/null)" || return 1
+  # Try the recorded table first (fast path).
+  table="$(cat "${STATE_DIR}/ipv4_out_table" 2>/dev/null)" || table=""
+  [ -z "$table" ] && table="$(cat "${STATE_DIR}/ipv4_table" 2>/dev/null)" || true
+  if [ -n "$table" ]; then
+    _chain_exists "$ipt" "$table" "$CHAIN_OUT_V4" && return 0
+  fi
+  # Live scan: check both possible tables regardless of state file.
+  _chain_exists "$ipt" raw    "$CHAIN_OUT_V4" && return 0
+  _chain_exists "$ipt" filter "$CHAIN_OUT_V4" && return 0
+  return 1
+}
+
+output_block_present_v6() {
+  local ip6t table
+  ip6t="$(_find_cmd ip6tables 2>/dev/null)" || return 1
+  table="$(cat "${STATE_DIR}/ipv6_out_table" 2>/dev/null)" || table=""
+  [ -z "$table" ] && table="$(cat "${STATE_DIR}/ipv6_table" 2>/dev/null)" || true
+  if [ -n "$table" ]; then
+    _chain_exists "$ip6t" "$table" "$CHAIN_OUT_V6" && return 0
+  fi
+  _chain_exists "$ip6t" raw    "$CHAIN_OUT_V6" && return 0
+  _chain_exists "$ip6t" filter "$CHAIN_OUT_V6" && return 0
+  return 1
+}
+
+# FORWARD and INPUT chains live exclusively in the filter table; no table hint
+# needed — just check for chain/jump existence in filter.
+forward_block_present_v4() {
+  local ipt
+  ipt="$(_find_cmd iptables 2>/dev/null)" || return 1
+  _chain_exists "$ipt" filter "$CHAIN_FWD_V4" && return 0
+  return 1
+}
+
+forward_block_present_v6() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables 2>/dev/null)" || return 1
+  _chain_exists "$ip6t" filter "$CHAIN_FWD_V6" && return 0
+  return 1
+}
+
+input_block_present_v4() {
+  local ipt
+  ipt="$(_find_cmd iptables 2>/dev/null)" || return 1
+  _chain_exists "$ipt" filter "$CHAIN_IN_V4" && return 0
+  return 1
+}
+
+input_block_present_v6() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables 2>/dev/null)" || return 1
+  _chain_exists "$ip6t" filter "$CHAIN_IN_V6" && return 0
+  return 1
+}
+
 # ── AFWall detection ───────────────────────────────────────────────────────────
 # Prefer donate package; fall back to free package; then dumpsys scan.
 resolve_afwall_pkg() {
