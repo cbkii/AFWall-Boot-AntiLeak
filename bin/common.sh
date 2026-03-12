@@ -348,9 +348,16 @@ install_block() {
     log "install_block: INPUT block not enabled (set ENABLE_INPUT_BLOCK=1 to enable)"
   fi
 
+  if [ "$out_v4" = "1" ] && [ "$out_v6" = "1" ]; then
+    printf '1' > "${STATE_DIR}/block_installed" 2>/dev/null || true
+    log "install_block: done — both families blocked (out_v4=1 out_v6=1)"
+    return 0
+  fi
+
   if [ "$out_v4" = "1" ] || [ "$out_v6" = "1" ]; then
     printf '1' > "${STATE_DIR}/block_installed" 2>/dev/null || true
-    log "install_block: done (out_v4=$out_v4 out_v6=$out_v6)"
+    # Partial success: one family unprotected. Log clearly; do not collapse to success.
+    log "install_block: PARTIAL — only one family blocked (out_v4=$out_v4 out_v6=$out_v6)"
     return 0
   fi
 
@@ -514,6 +521,143 @@ afwall_rules_present() {
   afwall_rules_present_v4 && return 0
   afwall_rules_present_v6 && return 0
   return 1
+}
+
+# ── Stronger per-family takeover detection ─────────────────────────────────────
+# These functions are stricter than afwall_rules_present_v4/v6: they additionally
+# verify that the afwall chain is explicitly in the filter table (not raw), that
+# the OUTPUT hook uses the filter table, and that the afwall chain contains at
+# least one rule (non-trivial — not just a bare chain creation).
+#
+# Why stronger detection matters:
+#   - Custom scripts may create partial chains that do not constitute full takeover.
+#   - Stale/mid-apply state produces a chain but no rules yet.
+#   - Requiring at least one rule guards against a chain-only intermediate state.
+#   - The stability window in service.sh then ensures the rule graph is settled.
+afwall_takeover_present_v4() {
+  local ipt count
+  ipt="$(_find_cmd iptables)" || return 1
+  # Chain must exist in filter table (AFWall's primary table for app rules).
+  _chain_exists "$ipt" filter afwall || return 1
+  # OUTPUT must hook into afwall in the filter table.
+  "$ipt" -t filter -S OUTPUT 2>/dev/null | grep -qE '^-A OUTPUT .*-j afwall($| )' || return 1
+  # Chain must contain at least one rule — guards against bare chain creation.
+  count="$("$ipt" -t filter -S afwall 2>/dev/null | grep -c '^-A ')" || count=0
+  [ "${count:-0}" -ge 1 ] || return 1
+  return 0
+}
+
+afwall_takeover_present_v6() {
+  local ip6t count
+  ip6t="$(_find_cmd ip6tables)" || return 1
+  _chain_exists "$ip6t" filter afwall || return 1
+  "$ip6t" -t filter -S OUTPUT 2>/dev/null | grep -qE '^-A OUTPUT .*-j afwall($| )' || return 1
+  count="$("$ip6t" -t filter -S afwall 2>/dev/null | grep -c '^-A ')" || count=0
+  [ "${count:-0}" -ge 1 ] || return 1
+  return 0
+}
+
+# ── AFWall rule-graph stability signatures ────────────────────────────────────
+# Returns a concise snapshot of the AFWall rule graph as "rules:chains".
+# The caller compares successive snapshots to detect whether the rule graph is
+# still being populated (changing) or has settled (stable).
+# Counting rules in the afwall chain + the number of afwall-prefixed chains
+# captures both the main chain density and any custom-script sub-chains.
+afwall_takeover_signature_v4() {
+  local ipt rule_count chain_count
+  ipt="$(_find_cmd iptables 2>/dev/null)" || { printf 'na:na'; return 1; }
+  rule_count="$("$ipt" -t filter -S afwall 2>/dev/null | grep -c '^-A ')" || rule_count=0
+  chain_count="$("$ipt" -t filter -S 2>/dev/null | grep -c '^-N afwall')" || chain_count=0
+  printf '%s:%s' "$rule_count" "$chain_count"
+}
+
+afwall_takeover_signature_v6() {
+  local ip6t rule_count chain_count
+  ip6t="$(_find_cmd ip6tables 2>/dev/null)" || { printf 'na:na'; return 1; }
+  rule_count="$("$ip6t" -t filter -S afwall 2>/dev/null | grep -c '^-A ')" || rule_count=0
+  chain_count="$("$ip6t" -t filter -S 2>/dev/null | grep -c '^-N afwall')" || chain_count=0
+  printf '%s:%s' "$rule_count" "$chain_count"
+}
+
+# ── Secondary evidence of current-boot AFWall activity ───────────────────────
+# Checks whether AFWall's private data files were written after this module
+# installed its block (using the ipv4_out_table state file as a reference
+# timestamp — that file is created during post-fs-data when the block is first
+# installed). Returns 0 if evidence found; 1 otherwise.
+#
+# This is SECONDARY / CORROBORATING evidence only. It is NOT a primary gate.
+# Used in the fallback path to increase confidence when liveness is not visible.
+# Reason the state-file reference is reliable: post-fs-data runs before any user-
+# space apps start, so any AFWall data file newer than that marker was written by
+# AFWall during the current boot session.
+afwall_secondary_evidence_present() {
+  local pkg="$1" data_dir ref
+  [ -n "$pkg" ] || return 1
+  data_dir="/data/data/${pkg}"
+  [ -d "$data_dir" ] || return 1
+  # Use the earliest available state file as the reference timestamp.
+  ref="${STATE_DIR}/ipv4_out_table"
+  [ -f "$ref" ] || ref="${STATE_DIR}/ipv6_out_table"
+  [ -f "$ref" ] || return 1
+  # If any key AFWall file is newer than our state-file reference, AFWall has
+  # been active since we installed our block (current-boot evidence).
+  find "$data_dir" \
+    \( -name "Logs.db" -o -name "rules.db" -o -name "AFWallStatus.xml" \) \
+    -newer "$ref" 2>/dev/null | grep -q '.' && return 0
+  return 1
+}
+
+# ── Transition-state snapshot logging ────────────────────────────────────────
+# Log a concise snapshot of the relevant iptables chain state for one IP family.
+# Called at key transition points so future log analysis can reconstruct why
+# connectivity was blocked or released.
+# family: "v4" or "v6"; phase: short label for context (e.g. "takeover_first").
+log_transition_snapshot() {
+  local family="$1" phase="$2"
+  local cmd mod_out_chain mod_fwd_chain mod_in_chain
+  local chain_out chain_fwd chain_in
+  local afw_chain afw_hook afw_rules
+
+  if [ "$family" = "v4" ]; then
+    cmd="$(_find_cmd iptables 2>/dev/null)"
+    mod_out_chain="$CHAIN_OUT_V4"
+    mod_fwd_chain="$CHAIN_FWD_V4"
+    mod_in_chain="$CHAIN_IN_V4"
+  else
+    cmd="$(_find_cmd ip6tables 2>/dev/null)"
+    mod_out_chain="$CHAIN_OUT_V6"
+    mod_fwd_chain="$CHAIN_FWD_V6"
+    mod_in_chain="$CHAIN_IN_V6"
+  fi
+
+  if [ -z "$cmd" ]; then
+    log "snapshot[$phase]: $family cmd_not_found"
+    return 0
+  fi
+
+  # Module-owned chain state: which table holds the OUTPUT block (if any).
+  chain_out="absent"
+  _chain_exists "$cmd" raw    "$mod_out_chain" && chain_out="raw"
+  _chain_exists "$cmd" filter "$mod_out_chain" && chain_out="filter"
+
+  chain_fwd="absent"
+  _chain_exists "$cmd" filter "$mod_fwd_chain" && chain_fwd="present"
+
+  chain_in="absent"
+  _chain_exists "$cmd" filter "$mod_in_chain" && chain_in="present"
+
+  # AFWall chain state.
+  afw_chain="absent"; afw_hook="absent"; afw_rules=0
+  if _chain_exists "$cmd" filter afwall; then
+    afw_chain="present"
+    afw_rules="$("$cmd" -t filter -S afwall 2>/dev/null | grep -c '^-A ')" || afw_rules=0
+    if "$cmd" -t filter -S OUTPUT 2>/dev/null | \
+        grep -qE '^-A OUTPUT .*-j afwall($| )'; then
+      afw_hook="present"
+    fi
+  fi
+
+  log "snapshot[$phase]: $family mod_out=$chain_out mod_fwd=$chain_fwd mod_in=$chain_in afw_chain=$afw_chain afw_hook=$afw_hook afw_rules=$afw_rules"
 }
 
 # Supplementary diagnostic: check whether AFWall has set up its FORWARD hook.
