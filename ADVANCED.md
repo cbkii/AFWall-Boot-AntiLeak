@@ -119,7 +119,7 @@ service.sh    │ Layer 4 (handoff):  AFWall readiness detection (polling)
 | **Android version** | Primary target: Android 16. Works on Android 8+ (API 26+). |
 | **Device** | Tested on Google Pixel (tegu / Pixel 9a). Other Pixel devices supported. |
 | **Root** | Magisk >= 20.4 required at install time (enforced by `update-binary`). Magisk >= 30.6 recommended for Android 16 runtime compatibility. KernelSU v0.6.6+ and APatch (KSU fork) are supported by the installer framework but **untested** with this module's iptables logic. |
-| **Firewall app** | AFWall+ (`dev.ukanth.ufirewall` or donate variant). Without it the timeout failsafe unblocks after `TIMEOUT_SECS`. |
+| **Firewall app** | AFWall+ (`dev.ukanth.ufirewall` or donate variant). Without it the timeout action fires after `TIMEOUT_SECS` (behaviour per `TIMEOUT_POLICY`). |
 | **IPv4** | Required. Module will log a critical warning if IPv4 block cannot be installed. |
 | **IPv6** | Attempted. If `ip6tables` is absent or raw/filter table fails, IPv6 is unprotected (logged as warning). |
 | **Shell** | Magisk BusyBox ash standalone mode. No bash required. |
@@ -554,14 +554,20 @@ Module blocking completely disabled. Use only in emergencies (e.g. if the
 block is causing a persistent boot loop). Recovery via `action.sh` is always
 available.
 
-### Strict phase and failsafe
+### Strict phase and timeout policy
 
-The module operates as "strict then failsafe":
+The module operates as "strict then timeout":
 
 1. **Strict phase**: Block installed at post-fs-data. Maintained until AFWall
-   rules are confirmed (both chain presence AND OUTPUT jump).
-2. **Failsafe timeout**: If AFWall never becomes ready within `TIMEOUT_SECS`
-   (default 120 s from service.sh start), the block is removed automatically.
+   rules are confirmed per-family (chain presence AND OUTPUT jump AND non-trivial
+   rules AND stable signature through the settle window).
+2. **Timeout**: If AFWall never becomes ready within `TIMEOUT_SECS`
+   (default 120 s from service.sh start), the action taken depends on
+   `TIMEOUT_POLICY` (see config.sh):
+   - `unblock` (default): removes remaining module-owned blocks per family
+     and restores networking. Matches historic documented behaviour.
+   - `fail_closed`: retains unresolved iptables blocks; lower-layer state is
+     still restored. Requires manual recovery via the Magisk action button.
 3. **Manual failsafe**: `action.sh` (Magisk action button or root shell)
    removes the block immediately at any time.
 
@@ -767,8 +773,10 @@ enabled:
 If AFWall is absent or permanently disabled:
 
 - Timeout fires after `TIMEOUT_SECS` (default 120 s from `service.sh` start).
-- Log shows: `service: timeout 120s reached; removing block (failsafe)`
-- Networking is restored automatically.
+- With `TIMEOUT_POLICY=unblock` (default): blocks removed; networking restored.
+  Log shows: `service: TIMEOUT: networking restored (unblock policy)`
+- With `TIMEOUT_POLICY=fail_closed`: blocks retained; requires manual recovery.
+  Log shows: `service: TIMEOUT: lower-layer restored; iptables blocks retained (fail_closed policy)`
 - To avoid the wait on future boots: set `INTEGRATION_MODE=off` in `config.sh`.
 
 ---
@@ -834,7 +842,7 @@ cat /data/adb/AFWall-Boot-AntiLeak/state/ll/ifaces_down     # interfaces brought
 ### Confirm handoff occurred
 
 ```sh
-grep 'block removed\|timeout\|failsafe' \
+grep 'block removed\|TIMEOUT\|fail_closed\|unblock policy' \
   /data/adb/AFWall-Boot-AntiLeak/logs/boot.log
 ```
 
@@ -1035,8 +1043,9 @@ Edit `config.sh` in the module directory, or place a persistent override at
 | `LOWLEVEL_USE_PHONE_DATA_CMD` | `1` | Disable mobile data via `cmd phone` / `svc data` |
 | `LOWLEVEL_USE_BLUETOOTH_MANAGER` | `0` | Disable Bluetooth via `cmd bluetooth_manager` (opt-in) |
 | `LOWLEVEL_USE_TETHER_STOP` | `1` | Stop tethering via `cmd connectivity` + interface shutdown |
-| `TIMEOUT_SECS` | `120` | Seconds before force-unblocking if AFWall never becomes ready |
-| `SETTLE_SECS` | `5` | Seconds to wait after first AFWall rule detection before releasing block |
+| `TIMEOUT_SECS` | `120` | Seconds before timeout action fires if AFWall never becomes ready |
+| `TIMEOUT_POLICY` | `unblock` | Action on timeout: `unblock` removes remaining blocks (restores networking); `fail_closed` retains them (requires manual recovery) |
+| `SETTLE_SECS` | `5` | Seconds to wait after AFWall rule detection before releasing block; signature must be stable across the settle window |
 | `DEBUG` | `0` | Set to `1` for verbose `[DEBUG]` entries in the boot log |
 
 ---
@@ -1076,7 +1085,7 @@ Edit `config.sh` in the module directory, or place a persistent override at
 | `ip6tables` not found | Log warning; IPv6 unprotected for all directions; IPv4 still protected |
 | Raw table unavailable | Fall back to filter table; logged as warning |
 | Filter table also fails | Log critical warning; block not installed for that protocol |
-| AFWall absent or never starts | Timeout (`TIMEOUT_SECS`) fires; block removed; networking restored |
+| AFWall absent or never starts | Timeout (`TIMEOUT_SECS`) fires; action per `TIMEOUT_POLICY`: `unblock` removes blocks and restores networking; `fail_closed` retains blocks |
 | `svc` unavailable | Radio toggle helpers silently skip (not primary protection) |
 | State files lost / corrupt | Removal tries both raw and filter tables defensively for all chain names |
 | `iptables -C` returns error | Rule is re-added (idempotent; no duplicate from chain-based check) |
@@ -1093,9 +1102,9 @@ Edit `config.sh` in the module directory, or place a persistent override at
 | Scenario | Expected log / behaviour |
 |---|---|
 | Normal boot — AFWall starts normally | `install_block`, then `block removed (AFWall rules confirmed)` |
-| AFWall not installed | Timeout fires; `timeout 120s reached; removing block (failsafe)` |
-| AFWall delayed start (< timeout) | Block maintained; released when rules appear |
-| AFWall delayed start (> timeout) | Timeout fires; networking restored; block logged as failsafe removal |
+| AFWall not installed | Timeout fires; `TIMEOUT: networking restored (unblock policy)` or `TIMEOUT: iptables blocks retained (fail_closed policy)` |
+| AFWall delayed start (< timeout) | Block maintained; released per-family when AFWall takeover is confirmed and stable |
+| AFWall delayed start (> timeout) | Timeout fires; action per `TIMEOUT_POLICY` |
 | IPv6 ip6tables unavailable | `install_output_block_v6: ip6tables not found`; IPv4 protected for all directions; IPv6 warning |
 | Raw table unavailable | `raw table failed; falling back to filter table`; block in filter |
 | Both raw and filter fail | `WARN: could not install block`; user alerted via log |
@@ -1399,7 +1408,7 @@ a separate on-device library is the correct approach for this use case.
 is done at install time.
 
 **This module**: `config.sh` provides runtime-tunable settings
-(`INTEGRATION_MODE`, `TIMEOUT_SECS`, `SETTLE_SECS`, `DEBUG`). Users can place
+(`INTEGRATION_MODE`, `TIMEOUT_SECS`, `TIMEOUT_POLICY`, `SETTLE_SECS`, `DEBUG`). Users can place
 a persistent override at `/data/adb/AFWall-Boot-AntiLeak/config.sh` which
 survives module updates.
 

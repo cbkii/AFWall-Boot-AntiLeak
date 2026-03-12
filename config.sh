@@ -150,9 +150,36 @@ LOWLEVEL_USE_TETHER_STOP=1
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── Timeout ───────────────────────────────────────────────────────────────────
-# Maximum seconds to wait for AFWall rules before force-unblocking.
+# Maximum seconds to wait for AFWall rules before the timeout action fires.
 # Increase on very slow devices. Conservative default: 120 s.
 TIMEOUT_SECS=120
+
+# ── Timeout policy ────────────────────────────────────────────────────────────
+# Controls what happens when TIMEOUT_SECS is reached for a family that has not
+# yet been handed off to AFWall.
+#
+# Supported values:
+#   unblock     - Remove any still-active module-owned blocks for unresolved
+#                 families and restore lower-layer state. Networking is
+#                 restored. This matches the historic/documented behaviour.
+#                 Use this on devices where AFWall is always installed and
+#                 you want networking to recover if the module gets stuck.
+#                 (default)
+#
+#   fail_closed - Retain the module-owned blocks for unresolved families.
+#                 Lower-layer state (interfaces/services) is still restored
+#                 because it is service-level suppression, not the hard stop.
+#                 The iptables blocks remain in place.
+#                 Use this if you prefer the device stay fully offline rather
+#                 than risk an unprotected window. Requires manual recovery
+#                 via the Magisk action button (action.sh) if AFWall is
+#                 absent or broken.
+#
+# NOTE: Even with fail_closed, families that were successfully handed off
+# before the timeout do NOT have their blocks reinstated. Per-family
+# timeout operates independently.
+#
+TIMEOUT_POLICY=unblock
 
 # ── Settle delay ──────────────────────────────────────────────────────────────
 # Seconds to pause after AFWall rules are first detected before removing the
