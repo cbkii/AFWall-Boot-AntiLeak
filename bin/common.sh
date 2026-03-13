@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v2.2.2 - Common library
+# AFWall Boot AntiLeak v2.2.22 - Common library
 # POSIX/ash compatible. No bashisms. Sourced by all module scripts; do not
 # execute directly.
 
@@ -936,10 +936,114 @@ cleanup_legacy() {
   return 0
 }
 
+# ── Transport-specific AFWall chain detection ──────────────────────────────────
+# AFWall+ creates dedicated sub-chains for each transport type:
+#   afwall-wifi   — Wi-Fi rules
+#   afwall-3g     — mobile data rules
+# These are created only when AFWall has been configured with per-transport
+# rules. Detection requires: chain exists, hook present, and at least one rule.
+
+# Generic helper: check that a named afwall transport chain exists in the filter
+# table and contains at least one rule.
+_afwall_transport_chain_ready() {
+  local cmd="$1" chain="$2" count
+  [ -x "$cmd" ] || return 1
+  _chain_exists "$cmd" filter "$chain" || return 1
+  count="$("$cmd" -t filter -S "$chain" 2>/dev/null | grep -c '^-A ')" || count=0
+  [ "${count:-0}" -ge 1 ] || return 1
+  return 0
+}
+
+# Wi-Fi transport chain present (IPv4)
+afwall_wifi_chain_present_v4() {
+  local ipt
+  ipt="$(_find_cmd iptables)" || return 1
+  _afwall_transport_chain_ready "$ipt" afwall-wifi
+}
+
+# Wi-Fi transport chain present (IPv6)
+afwall_wifi_chain_present_v6() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables)" || return 1
+  _afwall_transport_chain_ready "$ip6t" afwall-wifi
+}
+
+# Mobile data transport chain present (IPv4)
+afwall_mobile_chain_present_v4() {
+  local ipt
+  ipt="$(_find_cmd iptables)" || return 1
+  _afwall_transport_chain_ready "$ipt" afwall-3g
+}
+
+# Mobile data transport chain present (IPv6)
+afwall_mobile_chain_present_v6() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables)" || return 1
+  _afwall_transport_chain_ready "$ip6t" afwall-3g
+}
+
+# Transport-specific rule-graph signature: returns "rules:chains" for the
+# named transport chain. Used to detect whether the chain is still settling.
+_afwall_transport_signature() {
+  local cmd="$1" chain="$2" rule_count
+  [ -x "$cmd" ] || { printf 'na:na'; return 1; }
+  rule_count="$("$cmd" -t filter -S "$chain" 2>/dev/null | grep -c '^-A ')" || rule_count=0
+  printf '%s' "$rule_count"
+}
+
+afwall_wifi_signature_v4() {
+  local ipt
+  ipt="$(_find_cmd iptables 2>/dev/null)" || { printf 'na'; return 1; }
+  _afwall_transport_signature "$ipt" afwall-wifi
+}
+
+afwall_wifi_signature_v6() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables 2>/dev/null)" || { printf 'na'; return 1; }
+  _afwall_transport_signature "$ip6t" afwall-wifi
+}
+
+afwall_mobile_signature_v4() {
+  local ipt
+  ipt="$(_find_cmd iptables 2>/dev/null)" || { printf 'na'; return 1; }
+  _afwall_transport_signature "$ipt" afwall-3g
+}
+
+afwall_mobile_signature_v6() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables 2>/dev/null)" || { printf 'na'; return 1; }
+  _afwall_transport_signature "$ip6t" afwall-3g
+}
+
+# ── Blackout-state persistence ─────────────────────────────────────────────────
+# State files used to communicate between post-fs-data and service phases.
+# ${STATE_DIR}/blackout_active    — written by post-fs-data; cleared after handoff
+# ${STATE_DIR}/radio_off_pending  — radios must remain off until transport handoff
+
+mark_blackout_active() {
+  _init_dirs
+  printf '1' > "${STATE_DIR}/blackout_active" 2>/dev/null || true
+  printf '1' > "${STATE_DIR}/radio_off_pending" 2>/dev/null || true
+  debug_log "mark_blackout_active: blackout state persisted"
+}
+
+clear_blackout_active() {
+  rm -f "${STATE_DIR}/blackout_active" "${STATE_DIR}/radio_off_pending" 2>/dev/null || true
+  debug_log "clear_blackout_active: blackout state cleared"
+}
+
+blackout_is_active() {
+  [ -f "${STATE_DIR}/blackout_active" ]
+}
+
+radio_off_pending() {
+  [ -f "${STATE_DIR}/radio_off_pending" ]
+}
+
 # ── Lower-layer suppression subsystem ─────────────────────────────────────────
 # Source the lower-layer suppression library if present.
-# This provides: lowlevel_prepare_environment, lowlevel_restore_changed_state,
-# lowlevel_emergency_restore, and supporting helpers.
+# This provides: lowlevel_prepare_environment_early, lowlevel_prepare_environment,
+# lowlevel_restore_changed_state, lowlevel_emergency_restore, and helpers.
 # MODDIR is set by the calling script before sourcing common.sh.
 if [ -f "${MODDIR:-}/bin/lowlevel.sh" ]; then
   . "${MODDIR}/bin/lowlevel.sh"

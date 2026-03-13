@@ -1,7 +1,7 @@
 id=AFWall-Boot-AntiLeak
 name=AFWall Boot AntiLeak Fork
-version=v2.2.2
-versionCode=222
+version=v2.2.22
+versionCode=2222
 author=GrayJackFixxxer, forked by cbkii
-description=Multi-layer boot anti-leak: iptables hard block (OUTPUT/FORWARD/INPUT) + interface quiesce + Wi-Fi/data/tether service shutdown until AFWall+ rules active. Android 16 / Magisk 30.6+.
+description=Strict total-connectivity-blackout boot model: iptables hard block + transport-aware AFWall handoff + unlock-gated timeout + Wi-Fi/mobile reassertion until AFWall ready. Android 16 / Magisk 30.6+.
 updateJson=https://raw.githubusercontent.com/cbkii/AFWall-Boot-AntiLeak/master/update.json

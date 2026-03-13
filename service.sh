@@ -1,62 +1,68 @@
 #!/system/bin/sh
-# service.sh - family-aware handoff: waits for AFWall IPv4 and IPv6 takeover
-# independently before releasing each family's temporary block.
-# Runs the entire logic in a background subshell so Magisk's service phase
-# is not held up.
+# service.sh - transport-aware handoff with unlock-gated timeout.
 #
-# Release logic per family:
+# Boot blackout model:
+#   Stage A: Hard block installed in post-fs-data. Framework radio-off deferred.
+#   Stage B: Late lower-layer suppression (Wi-Fi/data off, verified). Reasserted
+#            periodically while waiting.
+#   Stage C: Wait for per-family AFWall takeover (preferred or fallback path).
+#            Also wait for transport-specific chain readiness (afwall-wifi /
+#            afwall-3g) before releasing the corresponding radio.
+#   Stage D: Only remove global hard block when ALL required transports are ready.
+#   Stage E: Restore lower-layer state (only what the module changed).
 #
-#   Preferred path (liveness corroborated):
-#     1. AFWall takeover present (chain + OUTPUT hook + non-trivial rules).
-#     2. AFWall process alive for a sustained LIVENESS_SECS window.
-#     3. Rule-graph signature stable throughout the window.
-#     4. Final settle: signature unchanged after SETTLE_SECS delay.
-#     5. Remove that family's temporary block.
+# Timeout rules:
+#   - Countdown does NOT begin before device unlock (when TIMEOUT_UNLOCK_GATED=1).
+#   - Auto-unblocking on timeout is DISABLED by default (AUTO_TIMEOUT_UNBLOCK=0).
+#   - TIMEOUT_POLICY=unblock is a legacy option; it requires AUTO_TIMEOUT_UNBLOCK=1
+#     to have any effect; also subject to TIMEOUT_UNLOCK_GATED.
 #
-#   Fallback path (liveness unreliable, but takeover clearly stable):
-#     1. AFWall takeover present, rule-graph stable for FALLBACK_SECS.
-#     2. Optional secondary evidence (AFWall data files newer than our block).
-#     3. Final settle: signature unchanged after SETTLE_SECS delay.
-#     4. Remove that family's temporary block.
+# Transport tracking:
+#   wifi_done  = 1 when Wi-Fi release criteria are met (or not gating Wi-Fi).
+#   mobile_done = 1 when mobile data release criteria are met (or not gating).
+#   Global block is kept until BOTH wifi_done AND mobile_done.
 #
-# Families are handled independently — IPv6 readiness does NOT unlock IPv4
-# and vice versa. Only families actually blocked by this module are considered.
-#
-# Timeout behaviour is governed by TIMEOUT_POLICY (see config.sh):
-#   unblock    — remove remaining blocks on timeout (default; matches historic
-#                documented behaviour; restores networking if AFWall is absent)
-#   fail_closed — retain blocks on timeout; require manual recovery
+# Runs in a background subshell so Magisk's service phase is not held up.
 (
   MODDIR="${0%/*}"
   . "$MODDIR/bin/common.sh"
 
   load_config
+
+  # ── Config with safe defaults ───────────────────────────────────────────────
   TIMEOUT_SECS="${TIMEOUT_SECS:-120}"
-  TIMEOUT_POLICY="${TIMEOUT_POLICY:-unblock}"
+  TIMEOUT_POLICY="${TIMEOUT_POLICY:-fail_closed}"
+  AUTO_TIMEOUT_UNBLOCK="${AUTO_TIMEOUT_UNBLOCK:-0}"
+  TIMEOUT_UNLOCK_GATED="${TIMEOUT_UNLOCK_GATED:-1}"
   SETTLE_SECS="${SETTLE_SECS:-5}"
-  # LIVENESS_SECS: sustained AFWall process-visibility window required for the
-  # preferred handoff path. ~6 s as specified in the module design requirements.
   LIVENESS_SECS="${LIVENESS_SECS:-6}"
-  # FALLBACK_SECS: extended rule-stability window used when liveness is not
-  # visible. Must be longer than LIVENESS_SECS to be a meaningful fallback.
   FALLBACK_SECS="${FALLBACK_SECS:-$((LIVENESS_SECS * 2))}"
+  WIFI_AFWALL_GATE="${WIFI_AFWALL_GATE:-1}"
+  MOBILE_AFWALL_GATE="${MOBILE_AFWALL_GATE:-1}"
+  RADIO_REASSERT_INTERVAL="${RADIO_REASSERT_INTERVAL:-10}"
+  UNLOCK_POLL_INTERVAL="${UNLOCK_POLL_INTERVAL:-5}"
 
-  log "service: start"
-  log "service: config: timeout=${TIMEOUT_SECS}s policy=${TIMEOUT_POLICY} settle=${SETTLE_SECS}s liveness=${LIVENESS_SECS}s fallback=${FALLBACK_SECS}s"
+  log "service: start (v2.2.22)"
+  log "service: config: timeout=${TIMEOUT_SECS}s policy=${TIMEOUT_POLICY} auto_unblock=${AUTO_TIMEOUT_UNBLOCK} unlock_gated=${TIMEOUT_UNLOCK_GATED}"
+  log "service: config: settle=${SETTLE_SECS}s liveness=${LIVENESS_SECS}s fallback=${FALLBACK_SECS}s"
   log "service: config: fwd=${ENABLE_FORWARD_BLOCK:-1} in=${ENABLE_INPUT_BLOCK:-0} ll_mode=${LOWLEVEL_MODE:-safe}"
+  log "service: config: wifi_gate=${WIFI_AFWALL_GATE} mobile_gate=${MOBILE_AFWALL_GATE} reassert_interval=${RADIO_REASSERT_INTERVAL}s"
 
-  # Validate TIMEOUT_POLICY; default to unblock on unknown value.
+  # Validate TIMEOUT_POLICY; default to fail_closed on unknown value.
   case "$TIMEOUT_POLICY" in
     unblock|fail_closed) ;;
     *)
-      log "service: unknown TIMEOUT_POLICY='$TIMEOUT_POLICY'; defaulting to unblock"
-      TIMEOUT_POLICY=unblock
+      log "service: unknown TIMEOUT_POLICY='$TIMEOUT_POLICY'; defaulting to fail_closed"
+      TIMEOUT_POLICY=fail_closed
       ;;
   esac
 
+  # Warn if TIMEOUT_POLICY=unblock but AUTO_TIMEOUT_UNBLOCK is not set.
+  if [ "$TIMEOUT_POLICY" = "unblock" ] && [ "$AUTO_TIMEOUT_UNBLOCK" != "1" ]; then
+    log "service: WARN: TIMEOUT_POLICY=unblock but AUTO_TIMEOUT_UNBLOCK=0; timeout will NOT unblock (set AUTO_TIMEOUT_UNBLOCK=1 to enable)"
+  fi
+
   # ── Detect AFWall package ───────────────────────────────────────────────────
-  # Prefer donate variant (dev.ukanth.ufirewall.donate); fall back to free.
-  # Used for process-level liveness checks and secondary evidence.
   AFW_PKG="$(resolve_afwall_pkg 2>/dev/null)" || AFW_PKG=""
   if [ -n "$AFW_PKG" ]; then
     log "service: AFWall pkg=$AFW_PKG"
@@ -64,31 +70,26 @@
     log "service: AFWall package not found — liveness checks disabled; rule-detection only"
   fi
 
-  # Remove any remaining legacy artifacts before entering the polling loop.
+  # Remove any remaining legacy artifacts.
   cleanup_legacy "service"
 
-  # ── Lower-layer suppression (Layer 1 and Layer 3) ──────────────────────────
-  # Performs interface quiesce (Layer 1: no framework needed) and
-  # service-level suppression (Layer 3: Wi-Fi/data/BT/tether shutdown once
-  # framework is ready).
-  # The iptables hard block (Layer 2) is already installed from post-fs-data.
+  # ── Stage B: Late lower-layer suppression ──────────────────────────────────
+  # Re-assert and verify Wi-Fi/data off-state now that framework is available.
+  # This re-asserts any early-phase quiesce and adds service-level suppression.
   lowlevel_prepare_environment
 
   START_TS="$(date +%s 2>/dev/null)" || START_TS=0
+  last_reassert_ts="$START_TS"
 
   # ── Determine which families are actually blocked ───────────────────────────
-  # Use live iptables inspection (output_block_present_v4/v6) as the primary
-  # source of truth. State files serve only as a table hint, not as sole proof.
-  # This ensures correct behaviour even when state files were never written,
-  # were lost, or were corrupted.
   v4_blocked=0; v6_blocked=0
 
   if output_block_present_v4; then
     v4_blocked=1
     if [ -f "${STATE_DIR}/ipv4_out_table" ]; then
-      log "service: v4 OUTPUT block detected (state-file+live; table=$(cat "${STATE_DIR}/ipv4_out_table" 2>/dev/null))"
+      log "service: v4 OUTPUT block detected (table=$(cat "${STATE_DIR}/ipv4_out_table" 2>/dev/null))"
     else
-      log "service: v4 OUTPUT block detected (live detection; state-file missing)"
+      log "service: v4 OUTPUT block detected (live; state-file missing)"
     fi
   else
     log "service: v4 OUTPUT block not detected — no v4 handoff needed"
@@ -97,15 +98,14 @@
   if output_block_present_v6; then
     v6_blocked=1
     if [ -f "${STATE_DIR}/ipv6_out_table" ]; then
-      log "service: v6 OUTPUT block detected (state-file+live; table=$(cat "${STATE_DIR}/ipv6_out_table" 2>/dev/null))"
+      log "service: v6 OUTPUT block detected (table=$(cat "${STATE_DIR}/ipv6_out_table" 2>/dev/null))"
     else
-      log "service: v6 OUTPUT block detected (live detection; state-file missing)"
+      log "service: v6 OUTPUT block detected (live; state-file missing)"
     fi
   else
     log "service: v6 OUTPUT block not detected — no v6 handoff needed"
   fi
 
-  # Log supplementary FORWARD/INPUT block state using live detection + state files.
   if forward_block_present_v4 || [ -f "${STATE_DIR}/ipv4_fwd_active" ]; then
     log "service: v4 FORWARD block active"
   fi
@@ -121,51 +121,69 @@
 
   if [ "$v4_blocked" = "0" ] && [ "$v6_blocked" = "0" ]; then
     log "service: no OUTPUT blocks detected — skipping handoff; restoring lower-layer"
+    clear_blackout_active
     lowlevel_restore_changed_state
     exit 0
   fi
 
   # ── Per-family handoff tracking ─────────────────────────────────────────────
-  # v4_done / v6_done: 1 once that family's block has been safely removed.
+  # v4_done/v6_done: AFWall takeover confirmed for that family.
+  # v4_released/v6_released: block has been removed for that family.
   v4_done=0; v6_done=0
-  [ "$v4_blocked" = "0" ] && v4_done=1
-  [ "$v6_blocked" = "0" ] && v6_done=1
+  v4_released=0; v6_released=0
+  [ "$v4_blocked" = "0" ] && v4_done=1 && v4_released=1
+  [ "$v6_blocked" = "0" ] && v6_done=1 && v6_released=1
 
-  # Per-family state (all times in seconds since epoch; 0 = "not yet started").
-  # takeover_ts: timestamp of first confirmed takeover detection in current window.
-  # sig:         last observed rule-graph signature (rules:chains).
-  # alive_ts:    start of current continuous liveness window (0 = not running).
-  # fallback_ts: start of current stability window for the fallback path.
-  # path:        "preferred" or "fallback" once handoff completes (for logging).
   v4_takeover_ts=0; v4_sig=""; v4_alive_ts=0; v4_fallback_ts=0; v4_path=""
   v6_takeover_ts=0; v6_sig=""; v6_alive_ts=0; v6_fallback_ts=0; v6_path=""
 
-  # ── Final-settle confirmation helpers ──────────────────────────────────────
-  # _sig_is_valid: returns 0 if a signature string is non-empty and not the
-  # "na:na" error sentinel that afwall_takeover_signature_* emits when iptables
-  # is unavailable. Used to distinguish a real signature from an error value.
+  # ── Transport readiness tracking ────────────────────────────────────────────
+  # wifi_done/mobile_done: 1 when the corresponding transport's AFWall readiness
+  # is confirmed (or when gating is not required for that transport).
+  #
+  # Gating is bypassed if:
+  #   - The corresponding AFWALL_GATE flag is 0, OR
+  #   - The module did not suppress that service (state file absent), OR
+  #   - AFWall doesn't use transport-specific chains (graceful fallback)
+
+  # Check whether the module suppressed Wi-Fi / mobile in this boot.
+  _wifi_was_suppressed=0; _mobile_was_suppressed=0
+  if _ll_state_exists "wifi_was_enabled" 2>/dev/null; then
+    _wifi_was_suppressed=1
+  fi
+  if _ll_state_exists "data_was_enabled" 2>/dev/null; then
+    _mobile_was_suppressed=1
+  fi
+
+  wifi_done=0; mobile_done=0
+
+  # If not gating or not suppressed, mark as done immediately.
+  if [ "$WIFI_AFWALL_GATE" != "1" ] || [ "$_wifi_was_suppressed" = "0" ]; then
+    wifi_done=1
+    log "service: wifi transport gate: skipped (gate=${WIFI_AFWALL_GATE} suppressed=${_wifi_was_suppressed})"
+  fi
+  if [ "$MOBILE_AFWALL_GATE" != "1" ] || [ "$_mobile_was_suppressed" = "0" ]; then
+    mobile_done=1
+    log "service: mobile transport gate: skipped (gate=${MOBILE_AFWALL_GATE} suppressed=${_mobile_was_suppressed})"
+  fi
+
+  # Per-transport stability windows (timestamps and signatures)
+  wifi_check_ts=0; wifi_sig=""
+  mobile_check_ts=0; mobile_sig=""
+  # Track whether transport chains were found (for fallback to main-chain readiness)
+  wifi_chain_seen=0; mobile_chain_seen=0
+  # How long to wait for transport chains before falling back to main-chain-only readiness
+  _TRANSPORT_WAIT_SECS=30
+
+  # ── Unlock state for timeout gating ────────────────────────────────────────
+  device_unlocked=0
+  unlock_ts=0
+  timeout_start_ts=0  # timestamp when timeout countdown began (0 = not started)
+
+  # ── Signature validity helper ───────────────────────────────────────────────
   _sig_is_valid() { [ -n "$1" ] && [ "$1" != "na:na" ]; }
 
-  # _settle_confirm_v4 / _settle_confirm_v6
-  #
-  # Purpose: Perform a final stability check after the liveness or fallback
-  # window has been satisfied. Ensures the AFWall rule graph has not changed
-  # during the settle delay before the block is actually removed.
-  #
-  # Arguments:
-  #   $1 path_label — short label for log context ("preferred-path"/"fallback-path")
-  #   $2 pre_sig    — rule-graph signature captured just before calling (caller
-  #                   must pass the current v4_sig / v6_sig value)
-  #
-  # Behaviour:
-  #   1. Sleeps SETTLE_SECS.
-  #   2. Re-verifies AFWall takeover presence; returns 1 (logs reason) if absent.
-  #   3. Computes post_sig; returns 1 if invalid (logs invalid sig).
-  #   4. Compares post_sig to pre_sig; returns 1 (logs drift) if they differ.
-  #   5. Returns 0 only when takeover is present AND signature is stable.
-  #
-  # On non-zero return the CALLER is responsible for resetting the family's
-  # tracking state (takeover_ts, sig, alive_ts, fallback_ts = 0).
+  # ── Final-settle helpers ────────────────────────────────────────────────────
   _settle_confirm_v4() {
     local path_label="$1" pre_sig="$2" post_sig
     sleep "$SETTLE_SECS"
@@ -182,7 +200,7 @@
       log "service: v4 ${path_label}: settle sig drift (pre=$pre_sig post=$post_sig) — reset"
       return 1
     fi
-    log "service: v4 ${path_label}: settle confirmed (pre_sig=$pre_sig post_sig=$post_sig)"
+    log "service: v4 ${path_label}: settle confirmed (sig=$pre_sig)"
     return 0
   }
 
@@ -202,32 +220,165 @@
       log "service: v6 ${path_label}: settle sig drift (pre=$pre_sig post=$post_sig) — reset"
       return 1
     fi
-    log "service: v6 ${path_label}: settle confirmed (pre_sig=$pre_sig post_sig=$post_sig)"
+    log "service: v6 ${path_label}: settle confirmed (sig=$pre_sig)"
     return 0
+  }
+
+  # ── Transport readiness check ────────────────────────────────────────────────
+  # Called after the main AFWall chain is confirmed stable for at least one family.
+  # Updates wifi_done and mobile_done based on transport-specific chain evidence.
+  _check_transport_readiness() {
+    local fam_ready=0
+    [ "$v4_done" = "1" ] || [ "$v6_done" = "1" ] && fam_ready=1
+    [ "$fam_ready" = "1" ] || return 0
+
+    local now_ts
+    now_ts="$(date +%s 2>/dev/null)" || now_ts=0
+
+    # ── Wi-Fi transport ───────────────────────────────────────────────────────
+    if [ "$wifi_done" = "0" ]; then
+      local w_sig_v4 w_sig_v6 w_sig
+      # Check for afwall-wifi chain in either family
+      if afwall_wifi_chain_present_v4 || afwall_wifi_chain_present_v6; then
+        wifi_chain_seen=1
+        w_sig_v4="$(afwall_wifi_signature_v4 2>/dev/null)" || w_sig_v4="na"
+        w_sig_v6="$(afwall_wifi_signature_v6 2>/dev/null)" || w_sig_v6="na"
+        w_sig="${w_sig_v4}:${w_sig_v6}"
+        if [ "$wifi_check_ts" = "0" ]; then
+          wifi_check_ts="$now_ts"
+          wifi_sig="$w_sig"
+          log "service: wifi transport: afwall-wifi chain first seen (sig=${w_sig})"
+        elif [ "$w_sig" != "$wifi_sig" ]; then
+          log "service: wifi transport: sig changed ($wifi_sig -> $w_sig) — reset"
+          wifi_check_ts="$now_ts"
+          wifi_sig="$w_sig"
+        else
+          local w_elapsed
+          w_elapsed=$((now_ts - wifi_check_ts))
+          if [ "$w_elapsed" -ge "$SETTLE_SECS" ]; then
+            wifi_done=1
+            log "service: wifi transport: afwall-wifi chain stable (sig=${w_sig} elapsed=${w_elapsed}s) — Wi-Fi ready"
+            lowlevel_restore_wifi_if_allowed
+          fi
+        fi
+      else
+        # Transport chain not (yet) present.
+        # If enough time has passed since main chain was first confirmed and
+        # we have never seen the transport chain, fall back to main-chain-only
+        # readiness (AFWall may not be using transport-specific chains).
+        if [ "$wifi_chain_seen" = "0" ] && [ "$v4_done" = "1" ] && \
+           [ "$now_ts" != "0" ] && [ "$v4_takeover_ts" != "0" ]; then
+          local w_wait
+          w_wait=$((now_ts - v4_takeover_ts))
+          if [ "$w_wait" -ge "$_TRANSPORT_WAIT_SECS" ]; then
+            wifi_done=1
+            log "service: wifi transport: no afwall-wifi chain after ${w_wait}s; accepting main chain readiness"
+            lowlevel_restore_wifi_if_allowed
+          fi
+        fi
+      fi
+    fi
+
+    # ── Mobile data transport ─────────────────────────────────────────────────
+    if [ "$mobile_done" = "0" ]; then
+      local m_sig_v4 m_sig_v6 m_sig
+      if afwall_mobile_chain_present_v4 || afwall_mobile_chain_present_v6; then
+        mobile_chain_seen=1
+        m_sig_v4="$(afwall_mobile_signature_v4 2>/dev/null)" || m_sig_v4="na"
+        m_sig_v6="$(afwall_mobile_signature_v6 2>/dev/null)" || m_sig_v6="na"
+        m_sig="${m_sig_v4}:${m_sig_v6}"
+        if [ "$mobile_check_ts" = "0" ]; then
+          mobile_check_ts="$now_ts"
+          mobile_sig="$m_sig"
+          log "service: mobile transport: afwall-3g chain first seen (sig=${m_sig})"
+        elif [ "$m_sig" != "$mobile_sig" ]; then
+          log "service: mobile transport: sig changed ($mobile_sig -> $m_sig) — reset"
+          mobile_check_ts="$now_ts"
+          mobile_sig="$m_sig"
+        else
+          local m_elapsed
+          m_elapsed=$((now_ts - mobile_check_ts))
+          if [ "$m_elapsed" -ge "$SETTLE_SECS" ]; then
+            mobile_done=1
+            log "service: mobile transport: afwall-3g chain stable (sig=${m_sig} elapsed=${m_elapsed}s) — mobile ready"
+            lowlevel_restore_mobile_data_if_allowed
+          fi
+        fi
+      else
+        if [ "$mobile_chain_seen" = "0" ] && [ "$v4_done" = "1" ] && \
+           [ "$now_ts" != "0" ] && [ "$v4_takeover_ts" != "0" ]; then
+          local m_wait
+          m_wait=$((now_ts - v4_takeover_ts))
+          if [ "$m_wait" -ge "$_TRANSPORT_WAIT_SECS" ]; then
+            mobile_done=1
+            log "service: mobile transport: no afwall-3g chain after ${m_wait}s; accepting main chain readiness"
+            lowlevel_restore_mobile_data_if_allowed
+          fi
+        fi
+      fi
+    fi
   }
 
   # ── Main polling loop ───────────────────────────────────────────────────────
   while :; do
     NOW="$(date +%s 2>/dev/null)" || NOW=0
 
-    # ── Per-family timeout ─────────────────────────────────────────────────────
-    # Behaviour depends on TIMEOUT_POLICY:
-    #   unblock    — removes remaining module-owned blocks for unresolved families
-    #                (defensive, uses live detection to handle missing state files),
-    #                then restores lower-layer state. Networking is restored.
-    #   fail_closed — retains unresolved iptables blocks; only restores lower-layer
-    #                 state (service-level suppression). Requires manual recovery.
-    if [ "$START_TS" != "0" ] && [ "$NOW" != "0" ]; then
-      ELAPSED=$((NOW - START_TS))
-      if [ "$ELAPSED" -ge "$TIMEOUT_SECS" ]; then
-        log "service: TIMEOUT ${TIMEOUT_SECS}s — policy=${TIMEOUT_POLICY}"
+    # ── Radio reassertion ───────────────────────────────────────────────────
+    # Periodically re-assert Wi-Fi and mobile data off while blackout is active.
+    if [ "$NOW" != "0" ] && [ "$last_reassert_ts" != "0" ]; then
+      _reassert_elapsed=$((NOW - last_reassert_ts))
+      if [ "$_reassert_elapsed" -ge "$RADIO_REASSERT_INTERVAL" ]; then
+        if [ "$wifi_done" = "0" ] || [ "$mobile_done" = "0" ]; then
+          lowlevel_reassert_radios_off
+        fi
+        last_reassert_ts="$NOW"
+      fi
+    fi
 
-        if [ "$TIMEOUT_POLICY" = "unblock" ]; then
-          # ── Timeout: unblock policy ──────────────────────────────────────────
-          # Remove blocks per family. Use live detection to handle state-file
-          # loss gracefully. removal functions already tolerate missing state.
-          if [ "$v4_done" = "0" ]; then
-            log "service: TIMEOUT v4: removing block by policy (takeover_ts=$v4_takeover_ts sig=$v4_sig alive_ts=$v4_alive_ts)"
+    # ── Unlock detection ────────────────────────────────────────────────────
+    # Determine if the device has been unlocked; used for timeout gating.
+    if [ "$device_unlocked" = "0" ]; then
+      if lowlevel_device_is_unlocked; then
+        device_unlocked=1
+        unlock_ts="$NOW"
+        log "service: device unlock detected (elapsed=${NOW:-?}s from start)"
+      else
+        debug_log "service: device not yet unlocked — timeout gate active"
+      fi
+    fi
+
+    # ── Timeout countdown and timeout start ─────────────────────────────────
+    # Timeout only starts after unlock (when TIMEOUT_UNLOCK_GATED=1).
+    if [ "$timeout_start_ts" = "0" ]; then
+      if [ "$TIMEOUT_UNLOCK_GATED" = "1" ]; then
+        if [ "$device_unlocked" = "1" ]; then
+          timeout_start_ts="$NOW"
+          log "service: timeout countdown started after unlock (timeout=${TIMEOUT_SECS}s)"
+        fi
+        # else: waiting for unlock; do not start timeout
+      else
+        # Not gated by unlock: start counting from service.sh start
+        timeout_start_ts="${timeout_start_ts:-$START_TS}"
+        if [ "$timeout_start_ts" = "0" ]; then
+          timeout_start_ts="$NOW"
+        fi
+      fi
+    fi
+
+    # ── Timeout check ───────────────────────────────────────────────────────
+    if [ "$timeout_start_ts" != "0" ] && [ "$NOW" != "0" ]; then
+      ELAPSED_SINCE_TIMEOUT_START=$((NOW - timeout_start_ts))
+      if [ "$ELAPSED_SINCE_TIMEOUT_START" -ge "$TIMEOUT_SECS" ]; then
+        log "service: TIMEOUT ${TIMEOUT_SECS}s reached — policy=${TIMEOUT_POLICY} auto_unblock=${AUTO_TIMEOUT_UNBLOCK} unlocked=${device_unlocked}"
+
+        # Check whether timeout-based unblocking is permitted.
+        if [ "$AUTO_TIMEOUT_UNBLOCK" = "1" ] && \
+           [ "$TIMEOUT_POLICY" = "unblock" ] && \
+           [ "$device_unlocked" = "1" ]; then
+          # ── Timeout: unblock policy (user opted in, device unlocked) ──────
+          log "service: TIMEOUT: unblocking per AUTO_TIMEOUT_UNBLOCK=1 + TIMEOUT_POLICY=unblock"
+          if [ "$v4_done" = "0" ] || [ "$v4_released" = "0" ]; then
+            log "service: TIMEOUT v4: removing block"
             log_transition_snapshot "v4" "timeout_unblock"
             remove_output_block_v4
             if [ -f "${STATE_DIR}/ipv4_fwd_active" ] || forward_block_present_v4; then
@@ -236,10 +387,9 @@
             if [ -f "${STATE_DIR}/ipv4_in_active" ] || input_block_present_v4; then
               remove_input_block_v4
             fi
-            log "service: TIMEOUT v4: block removed"
           fi
-          if [ "$v6_done" = "0" ]; then
-            log "service: TIMEOUT v6: removing block by policy (takeover_ts=$v6_takeover_ts sig=$v6_sig alive_ts=$v6_alive_ts)"
+          if [ "$v6_done" = "0" ] || [ "$v6_released" = "0" ]; then
+            log "service: TIMEOUT v6: removing block"
             log_transition_snapshot "v6" "timeout_unblock"
             remove_output_block_v6
             if [ -f "${STATE_DIR}/ipv6_fwd_active" ] || forward_block_present_v6; then
@@ -248,47 +398,48 @@
             if [ -f "${STATE_DIR}/ipv6_in_active" ] || input_block_present_v6; then
               remove_input_block_v6
             fi
-            log "service: TIMEOUT v6: block removed"
           fi
           rm -f "${STATE_DIR}/block_installed" 2>/dev/null || true
+          clear_blackout_active
           lowlevel_restore_changed_state
-          log "service: TIMEOUT: networking restored (unblock policy)"
-
+          log "service: TIMEOUT: networking restored (unblock policy after unlock)"
         else
-          # ── Timeout: fail_closed policy ──────────────────────────────────────
-          # Retain all unresolved family blocks. Log exactly why each was denied.
-          if [ "$v4_done" = "0" ]; then
-            log "service: TIMEOUT v4: block RETAINED by policy — AFWall v4 takeover not confirmed (takeover_ts=$v4_takeover_ts sig=$v4_sig alive_ts=$v4_alive_ts fallback_ts=$v4_fallback_ts)"
+          # ── Timeout: fail_closed or auto_unblock disabled or not unlocked ──
+          _reason=""
+          if [ "$AUTO_TIMEOUT_UNBLOCK" != "1" ]; then
+            _reason="AUTO_TIMEOUT_UNBLOCK=0 (auto-unblocking disabled)"
+          elif [ "$TIMEOUT_POLICY" != "unblock" ]; then
+            _reason="TIMEOUT_POLICY=${TIMEOUT_POLICY}"
+          else
+            _reason="device not yet unlocked"
+          fi
+          if [ "$v4_done" = "0" ] || [ "$v4_released" = "0" ]; then
+            log "service: TIMEOUT v4: block RETAINED — ${_reason}"
             log_transition_snapshot "v4" "timeout_fail_closed"
           fi
-          if [ "$v6_done" = "0" ]; then
-            log "service: TIMEOUT v6: block RETAINED by policy — AFWall v6 takeover not confirmed (takeover_ts=$v6_takeover_ts sig=$v6_sig alive_ts=$v6_alive_ts fallback_ts=$v6_fallback_ts)"
+          if [ "$v6_done" = "0" ] || [ "$v6_released" = "0" ]; then
+            log "service: TIMEOUT v6: block RETAINED — ${_reason}"
             log_transition_snapshot "v6" "timeout_fail_closed"
           fi
-          # Restore lower-layer suppression state; iptables blocks remain.
           lowlevel_restore_changed_state
-          log "service: TIMEOUT: lower-layer restored; iptables blocks retained (fail_closed policy)"
+          log "service: TIMEOUT: lower-layer restored; iptables blocks retained (${_reason})"
         fi
 
         exit 0
       fi
     fi
 
-    # ── Boot-completion diagnostic hint ────────────────────────────────────────
-    # sys.boot_completed is used for logging correlation only; it is NOT a gate.
+    # ── Boot-completion diagnostic ──────────────────────────────────────────
     if [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ]; then
-      debug_log "service: sys.boot_completed=1 elapsed=${ELAPSED:-?}s v4_done=$v4_done v6_done=$v6_done"
+      debug_log "service: sys.boot_completed=1 v4_done=$v4_done v6_done=$v6_done wifi_done=$wifi_done mobile_done=$mobile_done"
     fi
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # IPv4 family handoff
-    # ──────────────────────────────────────────────────────────────────────────
+    # ── IPv4 family handoff ────────────────────────────────────────────────
     if [ "$v4_blocked" = "1" ] && [ "$v4_done" = "0" ]; then
 
       if afwall_takeover_present_v4; then
         new_sig="$(afwall_takeover_signature_v4)"
 
-        # First detection in this window: record timestamp and initial signature.
         if [ "$v4_takeover_ts" = "0" ]; then
           v4_takeover_ts="$NOW"
           v4_sig="$new_sig"
@@ -297,8 +448,6 @@
           log_transition_snapshot "v4" "takeover_first"
         fi
 
-        # If the rule-graph signature has changed, the chain is still being
-        # populated. Reset liveness and fallback windows to ensure stability.
         if [ "$new_sig" != "$v4_sig" ]; then
           log "service: v4 sig changed ($v4_sig -> $new_sig) — resetting stability windows"
           v4_sig="$new_sig"
@@ -307,36 +456,20 @@
           v4_fallback_ts="$NOW"
         fi
 
-        # Check AFWall process liveness for preferred-path corroboration.
-        # Liveness check uses process-level visibility (pidof / ps). This is
-        # reliable for the service phase because Zygote is up and the AFWall
-        # process should be running if it just applied rules. It is not required
-        # to be foreground; background/service/receiver process presence suffices.
         if [ -n "$AFW_PKG" ] && afwall_process_present "$AFW_PKG"; then
-          # Liveness confirmed this iteration.
           if [ "$v4_alive_ts" = "0" ]; then
             v4_alive_ts="$NOW"
             debug_log "service: v4 liveness window started"
           fi
 
-          # ── Preferred path ──────────────────────────────────────────────────
-          # Condition: liveness continuously observed for >= LIVENESS_SECS AND
-          # rule-graph signature has been stable (no reset above) throughout.
+          # Preferred path: liveness confirmed for >= LIVENESS_SECS
           if [ "$NOW" != "0" ] && [ "$v4_alive_ts" != "0" ]; then
             alive_elapsed=$((NOW - v4_alive_ts))
             if [ "$alive_elapsed" -ge "$LIVENESS_SECS" ]; then
-              log "service: v4 preferred-path: liveness confirmed ${alive_elapsed}s + takeover stable; settling ${SETTLE_SECS}s (pre_sig=$v4_sig)"
+              log "service: v4 preferred-path: liveness ${alive_elapsed}s + takeover stable; settling ${SETTLE_SECS}s"
               if _settle_confirm_v4 "preferred-path" "$v4_sig"; then
-                log_transition_snapshot "v4" "pre_remove_preferred"
-                remove_output_block_v4
-                if [ -f "${STATE_DIR}/ipv4_fwd_active" ] || forward_block_present_v4; then
-                  remove_forward_block_v4
-                fi
-                if [ -f "${STATE_DIR}/ipv4_in_active" ] || input_block_present_v4; then
-                  remove_input_block_v4
-                fi
                 v4_done=1; v4_path="preferred"
-                log "service: v4 block removed (preferred path; liveness=${alive_elapsed}s sig=$v4_sig)"
+                log "service: v4 takeover confirmed (preferred path; liveness=${alive_elapsed}s sig=$v4_sig)"
               else
                 v4_takeover_ts=0; v4_sig=""; v4_alive_ts=0; v4_fallback_ts=0
               fi
@@ -344,37 +477,23 @@
           fi
 
         else
-          # Liveness not observed this iteration.
           if [ "$v4_alive_ts" != "0" ]; then
             log "service: v4 AFWall liveness lost — resetting liveness window"
           fi
           v4_alive_ts=0
 
-          # ── Fallback path ───────────────────────────────────────────────────
-          # Used when liveness is not visible but rule-graph has been stable for
-          # an extended window. Allowed only when takeover evidence is clearly
-          # present and stable; never fails open on ambiguous state.
-          if [ "$v4_done" = "0" ] && \
-             [ "$v4_fallback_ts" != "0" ] && [ "$NOW" != "0" ]; then
+          # Fallback path: stability window without liveness
+          if [ "$v4_fallback_ts" != "0" ] && [ "$NOW" != "0" ]; then
             fallback_elapsed=$((NOW - v4_fallback_ts))
             if [ "$fallback_elapsed" -ge "$FALLBACK_SECS" ]; then
-              # Secondary evidence increases confidence (but is not mandatory).
               if afwall_secondary_evidence_present "$AFW_PKG"; then
-                log "service: v4 fallback-path: stable ${fallback_elapsed}s + secondary-evidence; settling ${SETTLE_SECS}s (pre_sig=$v4_sig)"
+                log "service: v4 fallback-path: stable ${fallback_elapsed}s + secondary-evidence; settling ${SETTLE_SECS}s"
               else
-                log "service: v4 fallback-path: stable ${fallback_elapsed}s (no secondary-evidence); settling ${SETTLE_SECS}s (pre_sig=$v4_sig)"
+                log "service: v4 fallback-path: stable ${fallback_elapsed}s; settling ${SETTLE_SECS}s"
               fi
               if _settle_confirm_v4 "fallback-path" "$v4_sig"; then
-                log_transition_snapshot "v4" "pre_remove_fallback"
-                remove_output_block_v4
-                if [ -f "${STATE_DIR}/ipv4_fwd_active" ] || forward_block_present_v4; then
-                  remove_forward_block_v4
-                fi
-                if [ -f "${STATE_DIR}/ipv4_in_active" ] || input_block_present_v4; then
-                  remove_input_block_v4
-                fi
                 v4_done=1; v4_path="fallback"
-                log "service: v4 block removed (fallback path; stable=${fallback_elapsed}s sig=$v4_sig)"
+                log "service: v4 takeover confirmed (fallback path; stable=${fallback_elapsed}s sig=$v4_sig)"
               else
                 v4_takeover_ts=0; v4_sig=""; v4_alive_ts=0; v4_fallback_ts=0
               fi
@@ -383,7 +502,6 @@
         fi
 
       else
-        # AFWall takeover not present for v4; reset all windows.
         if [ "$v4_takeover_ts" != "0" ]; then
           log "service: v4 takeover was present but is now absent — reset"
           log_transition_snapshot "v4" "takeover_lost"
@@ -391,11 +509,9 @@
         v4_takeover_ts=0; v4_sig=""; v4_alive_ts=0; v4_fallback_ts=0
       fi
 
-    fi # end v4
+    fi # end v4 family handoff
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # IPv6 family handoff (same logic as v4; evaluated independently)
-    # ──────────────────────────────────────────────────────────────────────────
+    # ── IPv6 family handoff ────────────────────────────────────────────────
     if [ "$v6_blocked" = "1" ] && [ "$v6_done" = "0" ]; then
 
       if afwall_takeover_present_v6; then
@@ -423,22 +539,13 @@
             debug_log "service: v6 liveness window started"
           fi
 
-          # ── Preferred path ──────────────────────────────────────────────────
           if [ "$NOW" != "0" ] && [ "$v6_alive_ts" != "0" ]; then
             alive_elapsed=$((NOW - v6_alive_ts))
             if [ "$alive_elapsed" -ge "$LIVENESS_SECS" ]; then
-              log "service: v6 preferred-path: liveness confirmed ${alive_elapsed}s + takeover stable; settling ${SETTLE_SECS}s (pre_sig=$v6_sig)"
+              log "service: v6 preferred-path: liveness ${alive_elapsed}s + takeover stable; settling ${SETTLE_SECS}s"
               if _settle_confirm_v6 "preferred-path" "$v6_sig"; then
-                log_transition_snapshot "v6" "pre_remove_preferred"
-                remove_output_block_v6
-                if [ -f "${STATE_DIR}/ipv6_fwd_active" ] || forward_block_present_v6; then
-                  remove_forward_block_v6
-                fi
-                if [ -f "${STATE_DIR}/ipv6_in_active" ] || input_block_present_v6; then
-                  remove_input_block_v6
-                fi
                 v6_done=1; v6_path="preferred"
-                log "service: v6 block removed (preferred path; liveness=${alive_elapsed}s sig=$v6_sig)"
+                log "service: v6 takeover confirmed (preferred path; liveness=${alive_elapsed}s sig=$v6_sig)"
               else
                 v6_takeover_ts=0; v6_sig=""; v6_alive_ts=0; v6_fallback_ts=0
               fi
@@ -451,27 +558,17 @@
           fi
           v6_alive_ts=0
 
-          # ── Fallback path ───────────────────────────────────────────────────
-          if [ "$v6_done" = "0" ] && \
-             [ "$v6_fallback_ts" != "0" ] && [ "$NOW" != "0" ]; then
+          if [ "$v6_fallback_ts" != "0" ] && [ "$NOW" != "0" ]; then
             fallback_elapsed=$((NOW - v6_fallback_ts))
             if [ "$fallback_elapsed" -ge "$FALLBACK_SECS" ]; then
               if afwall_secondary_evidence_present "$AFW_PKG"; then
-                log "service: v6 fallback-path: stable ${fallback_elapsed}s + secondary-evidence; settling ${SETTLE_SECS}s (pre_sig=$v6_sig)"
+                log "service: v6 fallback-path: stable ${fallback_elapsed}s + secondary-evidence; settling ${SETTLE_SECS}s"
               else
-                log "service: v6 fallback-path: stable ${fallback_elapsed}s (no secondary-evidence); settling ${SETTLE_SECS}s (pre_sig=$v6_sig)"
+                log "service: v6 fallback-path: stable ${fallback_elapsed}s; settling ${SETTLE_SECS}s"
               fi
               if _settle_confirm_v6 "fallback-path" "$v6_sig"; then
-                log_transition_snapshot "v6" "pre_remove_fallback"
-                remove_output_block_v6
-                if [ -f "${STATE_DIR}/ipv6_fwd_active" ] || forward_block_present_v6; then
-                  remove_forward_block_v6
-                fi
-                if [ -f "${STATE_DIR}/ipv6_in_active" ] || input_block_present_v6; then
-                  remove_input_block_v6
-                fi
                 v6_done=1; v6_path="fallback"
-                log "service: v6 block removed (fallback path; stable=${fallback_elapsed}s sig=$v6_sig)"
+                log "service: v6 takeover confirmed (fallback path; stable=${fallback_elapsed}s sig=$v6_sig)"
               else
                 v6_takeover_ts=0; v6_sig=""; v6_alive_ts=0; v6_fallback_ts=0
               fi
@@ -487,15 +584,68 @@
         v6_takeover_ts=0; v6_sig=""; v6_alive_ts=0; v6_fallback_ts=0
       fi
 
-    fi # end v6
+    fi # end v6 family handoff
 
-    # ── All families resolved? ─────────────────────────────────────────────────
-    if [ "$v4_done" = "1" ] && [ "$v6_done" = "1" ]; then
-      log "service: all families handed off (v4=${v4_path:-skipped} v6=${v6_path:-skipped})"
+    # ── Transport readiness check ──────────────────────────────────────────
+    # Only runs after at least one family's AFWall takeover is confirmed.
+    if [ "$v4_done" = "1" ] || [ "$v6_done" = "1" ]; then
+      if [ "$wifi_done" = "0" ] || [ "$mobile_done" = "0" ]; then
+        _check_transport_readiness
+      fi
+    fi
+
+    # ── Block release: remove blocks when transports are ready ────────────
+    # Safety rule: do not remove a family's block until ALL required transports
+    # are ready, to prevent unprotected windows on any transport.
+    if [ "$v4_done" = "1" ] && [ "$wifi_done" = "1" ] && [ "$mobile_done" = "1" ] && \
+       [ "$v4_released" = "0" ]; then
+      log "service: v4 all transports ready; removing v4 block (path=${v4_path:-confirmed})"
+      log_transition_snapshot "v4" "pre_remove"
+      remove_output_block_v4
+      if [ -f "${STATE_DIR}/ipv4_fwd_active" ] || forward_block_present_v4; then
+        remove_forward_block_v4
+      fi
+      if [ -f "${STATE_DIR}/ipv4_in_active" ] || input_block_present_v4; then
+        remove_input_block_v4
+      fi
+      v4_released=1
+      log "service: v4 block removed"
+    fi
+
+    if [ "$v6_done" = "1" ] && [ "$wifi_done" = "1" ] && [ "$mobile_done" = "1" ] && \
+       [ "$v6_released" = "0" ]; then
+      log "service: v6 all transports ready; removing v6 block (path=${v6_path:-confirmed})"
+      log_transition_snapshot "v6" "pre_remove"
+      remove_output_block_v6
+      if [ -f "${STATE_DIR}/ipv6_fwd_active" ] || forward_block_present_v6; then
+        remove_forward_block_v6
+      fi
+      if [ -f "${STATE_DIR}/ipv6_in_active" ] || input_block_present_v6; then
+        remove_input_block_v6
+      fi
+      v6_released=1
+      log "service: v6 block removed"
+    fi
+
+    # ── All done? ──────────────────────────────────────────────────────────
+    # Only declare handoff complete when all blocked families are released AND
+    # all transport gates are satisfied.
+    _v4_complete=1; _v6_complete=1
+    [ "$v4_blocked" = "1" ] && [ "$v4_released" = "0" ] && _v4_complete=0
+    [ "$v6_blocked" = "1" ] && [ "$v6_released" = "0" ] && _v6_complete=0
+
+    if [ "$_v4_complete" = "1" ] && [ "$_v6_complete" = "1" ] && \
+       [ "$wifi_done" = "1" ] && [ "$mobile_done" = "1" ]; then
+      log "service: handoff complete (v4=${v4_path:-skipped} v6=${v6_path:-skipped} wifi=done mobile=done)"
       rm -f "${STATE_DIR}/block_installed" 2>/dev/null || true
+      clear_blackout_active
 
-      # ── Stage C: restore lower-layer state changed by this module ───────────
-      lowlevel_restore_changed_state
+      # Stage E: restore remaining lower-layer state not yet restored by
+      # transport-specific helpers (interfaces, bluetooth, tethering note).
+      lowlevel_restore_interfaces 2>/dev/null || true
+      lowlevel_restore_bluetooth 2>/dev/null || true
+      lowlevel_restore_tethering_note 2>/dev/null || true
+      _ll_state_rm "mode" 2>/dev/null || true
       log "service: handoff complete — AFWall is now sole active protection"
       exit 0
     fi

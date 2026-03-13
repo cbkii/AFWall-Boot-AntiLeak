@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak - User Configuration
+# AFWall Boot AntiLeak v2.2.22 - User Configuration
 # This file is sourced during boot. Keep syntax POSIX/ash compatible.
 # Place a custom copy at /data/adb/AFWall-Boot-AntiLeak/config.sh to
 # override the module's built-in defaults without modifying the module itself.
@@ -159,13 +159,6 @@ TIMEOUT_SECS=120
 # yet been handed off to AFWall.
 #
 # Supported values:
-#   unblock     - Remove any still-active module-owned blocks for unresolved
-#                 families and restore lower-layer state. Networking is
-#                 restored. This matches the historic/documented behaviour.
-#                 Use this on devices where AFWall is always installed and
-#                 you want networking to recover if the module gets stuck.
-#                 (default)
-#
 #   fail_closed - Retain the module-owned blocks for unresolved families.
 #                 Lower-layer state (interfaces/services) is still restored
 #                 because it is service-level suppression, not the hard stop.
@@ -173,13 +166,71 @@ TIMEOUT_SECS=120
 #                 Use this if you prefer the device stay fully offline rather
 #                 than risk an unprotected window. Requires manual recovery
 #                 via the Magisk action button (action.sh) if AFWall is
-#                 absent or broken.
+#                 absent or broken. (default — safest choice)
+#
+#   unblock     - Remove any still-active module-owned blocks for unresolved
+#                 families and restore lower-layer state. Networking is
+#                 restored. This matches the historic/documented behaviour.
+#                 Use this on devices where AFWall is always installed and
+#                 you want networking to recover if the module gets stuck.
+#                 WARNING: only takes effect when AUTO_TIMEOUT_UNBLOCK=1 AND
+#                 the device has been unlocked (if TIMEOUT_UNLOCK_GATED=1).
 #
 # NOTE: Even with fail_closed, families that were successfully handed off
 # before the timeout do NOT have their blocks reinstated. Per-family
 # timeout operates independently.
 #
-TIMEOUT_POLICY=unblock
+TIMEOUT_POLICY=fail_closed
+
+# ── Automatic timeout-based unblocking ───────────────────────────────────────
+# Master gate: when set to 0 (default) the module NEVER automatically
+# unblocks connectivity on timeout, regardless of TIMEOUT_POLICY.
+# Set to 1 only if you explicitly want timeout-based unblocking AND have set
+# TIMEOUT_POLICY=unblock.
+#
+# Default: 0 (disabled — fail-safe)
+#
+AUTO_TIMEOUT_UNBLOCK=0
+
+# ── Unlock-gated timeout counting ────────────────────────────────────────────
+# When set to 1 (default), the timeout countdown does NOT start until the
+# device has been positively detected as unlocked. If unlock cannot be
+# confirmed (e.g., device is at the lock screen), the countdown never begins.
+#
+# Default: 1 (enabled — timeout cannot expire before device is unlocked)
+#
+TIMEOUT_UNLOCK_GATED=1
+
+# ── Transport-aware Wi-Fi gating ──────────────────────────────────────────────
+# When set to 1 (default), Wi-Fi is not restored until AFWall's Wi-Fi
+# transport chain (afwall-wifi) is confirmed present and stable. If AFWall
+# does not use a dedicated Wi-Fi chain, falls back to main chain readiness.
+#
+# Default: 1 (enabled)
+#
+WIFI_AFWALL_GATE=1
+
+# ── Transport-aware mobile-data gating ───────────────────────────────────────
+# When set to 1 (default), mobile data is not restored until AFWall's mobile
+# transport chain (afwall-3g) is confirmed present and stable. If AFWall
+# does not use a dedicated mobile chain, falls back to main chain readiness.
+#
+# Default: 1 (enabled)
+#
+MOBILE_AFWALL_GATE=1
+
+# ── Radio-off reassertion interval ───────────────────────────────────────────
+# While waiting for AFWall transport readiness, the module periodically
+# re-verifies and re-asserts that Wi-Fi and mobile data are off. This is the
+# interval in seconds between reassertion checks.
+#
+RADIO_REASSERT_INTERVAL=10
+
+# ── Unlock detection poll interval ───────────────────────────────────────────
+# How often (in seconds) to check whether the device has been unlocked,
+# while TIMEOUT_UNLOCK_GATED=1 and timeout has not started yet.
+#
+UNLOCK_POLL_INTERVAL=5
 
 # ── Settle delay ──────────────────────────────────────────────────────────────
 # Seconds to pause after AFWall rules are first detected before removing the
