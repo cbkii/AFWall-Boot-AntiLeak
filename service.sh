@@ -41,10 +41,13 @@
   MOBILE_AFWALL_GATE="${MOBILE_AFWALL_GATE:-1}"
   RADIO_REASSERT_INTERVAL="${RADIO_REASSERT_INTERVAL:-10}"
   UNLOCK_POLL_INTERVAL="${UNLOCK_POLL_INTERVAL:-5}"
+  # How long to wait for transport-specific chains before falling back to
+  # main-chain-only readiness (AFWall may not emit afwall-wifi / afwall-3g).
+  TRANSPORT_WAIT_SECS="${TRANSPORT_WAIT_SECS:-30}"
 
-  log "service: start (v2.2.22)"
+  log "service: start ($MODULE_VERSION)"
   log "service: config: timeout=${TIMEOUT_SECS}s policy=${TIMEOUT_POLICY} auto_unblock=${AUTO_TIMEOUT_UNBLOCK} unlock_gated=${TIMEOUT_UNLOCK_GATED}"
-  log "service: config: settle=${SETTLE_SECS}s liveness=${LIVENESS_SECS}s fallback=${FALLBACK_SECS}s"
+  log "service: config: settle=${SETTLE_SECS}s liveness=${LIVENESS_SECS}s fallback=${FALLBACK_SECS}s transport_wait=${TRANSPORT_WAIT_SECS}s"
   log "service: config: fwd=${ENABLE_FORWARD_BLOCK:-1} in=${ENABLE_INPUT_BLOCK:-0} ll_mode=${LOWLEVEL_MODE:-safe}"
   log "service: config: wifi_gate=${WIFI_AFWALL_GATE} mobile_gate=${MOBILE_AFWALL_GATE} reassert_interval=${RADIO_REASSERT_INTERVAL}s"
 
@@ -172,8 +175,6 @@
   mobile_check_ts=0; mobile_sig=""
   # Track whether transport chains were found (for fallback to main-chain readiness)
   wifi_chain_seen=0; mobile_chain_seen=0
-  # How long to wait for transport chains before falling back to main-chain-only readiness
-  _TRANSPORT_WAIT_SECS=30
 
   # ── Unlock state for timeout gating ────────────────────────────────────────
   device_unlocked=0
@@ -235,6 +236,15 @@
     local now_ts
     now_ts="$(date +%s 2>/dev/null)" || now_ts=0
 
+    # First confirmed takeover timestamp from either family.
+    # Used for the transport-chain fallback timer so the fallback works
+    # correctly even when only one IP family was blocked/confirmed.
+    local _afwall_confirmed_ts
+    _afwall_confirmed_ts="${v4_takeover_ts:-0}"
+    if [ "$_afwall_confirmed_ts" = "0" ]; then
+      _afwall_confirmed_ts="${v6_takeover_ts:-0}"
+    fi
+
     # ── Wi-Fi transport ───────────────────────────────────────────────────────
     if [ "$wifi_done" = "0" ]; then
       local w_sig_v4 w_sig_v6 w_sig
@@ -247,7 +257,7 @@
         if [ "$wifi_check_ts" = "0" ]; then
           wifi_check_ts="$now_ts"
           wifi_sig="$w_sig"
-          log "service: wifi transport: afwall-wifi chain first seen (sig=${w_sig})"
+          log "service: wifi transport: ${AFWALL_CHAIN_WIFI} chain first seen (sig=${w_sig})"
         elif [ "$w_sig" != "$wifi_sig" ]; then
           log "service: wifi transport: sig changed ($wifi_sig -> $w_sig) — reset"
           wifi_check_ts="$now_ts"
@@ -257,7 +267,7 @@
           w_elapsed=$((now_ts - wifi_check_ts))
           if [ "$w_elapsed" -ge "$SETTLE_SECS" ]; then
             wifi_done=1
-            log "service: wifi transport: afwall-wifi chain stable (sig=${w_sig} elapsed=${w_elapsed}s) — Wi-Fi ready"
+            log "service: wifi transport: ${AFWALL_CHAIN_WIFI} chain stable (sig=${w_sig} elapsed=${w_elapsed}s) — Wi-Fi ready"
             lowlevel_restore_wifi_if_allowed
           fi
         fi
@@ -266,13 +276,13 @@
         # If enough time has passed since main chain was first confirmed and
         # we have never seen the transport chain, fall back to main-chain-only
         # readiness (AFWall may not be using transport-specific chains).
-        if [ "$wifi_chain_seen" = "0" ] && [ "$v4_done" = "1" ] && \
-           [ "$now_ts" != "0" ] && [ "$v4_takeover_ts" != "0" ]; then
+        if [ "$wifi_chain_seen" = "0" ] && \
+           [ "$now_ts" != "0" ] && [ "$_afwall_confirmed_ts" != "0" ]; then
           local w_wait
-          w_wait=$((now_ts - v4_takeover_ts))
-          if [ "$w_wait" -ge "$_TRANSPORT_WAIT_SECS" ]; then
+          w_wait=$((now_ts - _afwall_confirmed_ts))
+          if [ "$w_wait" -ge "$TRANSPORT_WAIT_SECS" ]; then
             wifi_done=1
-            log "service: wifi transport: no afwall-wifi chain after ${w_wait}s; accepting main chain readiness"
+            log "service: wifi transport: no ${AFWALL_CHAIN_WIFI} chain after ${w_wait}s; accepting main chain readiness"
             lowlevel_restore_wifi_if_allowed
           fi
         fi
@@ -290,7 +300,7 @@
         if [ "$mobile_check_ts" = "0" ]; then
           mobile_check_ts="$now_ts"
           mobile_sig="$m_sig"
-          log "service: mobile transport: afwall-3g chain first seen (sig=${m_sig})"
+          log "service: mobile transport: ${AFWALL_CHAIN_MOBILE} chain first seen (sig=${m_sig})"
         elif [ "$m_sig" != "$mobile_sig" ]; then
           log "service: mobile transport: sig changed ($mobile_sig -> $m_sig) — reset"
           mobile_check_ts="$now_ts"
@@ -300,18 +310,18 @@
           m_elapsed=$((now_ts - mobile_check_ts))
           if [ "$m_elapsed" -ge "$SETTLE_SECS" ]; then
             mobile_done=1
-            log "service: mobile transport: afwall-3g chain stable (sig=${m_sig} elapsed=${m_elapsed}s) — mobile ready"
+            log "service: mobile transport: ${AFWALL_CHAIN_MOBILE} chain stable (sig=${m_sig} elapsed=${m_elapsed}s) — mobile ready"
             lowlevel_restore_mobile_data_if_allowed
           fi
         fi
       else
-        if [ "$mobile_chain_seen" = "0" ] && [ "$v4_done" = "1" ] && \
-           [ "$now_ts" != "0" ] && [ "$v4_takeover_ts" != "0" ]; then
+        if [ "$mobile_chain_seen" = "0" ] && \
+           [ "$now_ts" != "0" ] && [ "$_afwall_confirmed_ts" != "0" ]; then
           local m_wait
-          m_wait=$((now_ts - v4_takeover_ts))
-          if [ "$m_wait" -ge "$_TRANSPORT_WAIT_SECS" ]; then
+          m_wait=$((now_ts - _afwall_confirmed_ts))
+          if [ "$m_wait" -ge "$TRANSPORT_WAIT_SECS" ]; then
             mobile_done=1
-            log "service: mobile transport: no afwall-3g chain after ${m_wait}s; accepting main chain readiness"
+            log "service: mobile transport: no ${AFWALL_CHAIN_MOBILE} chain after ${m_wait}s; accepting main chain readiness"
             lowlevel_restore_mobile_data_if_allowed
           fi
         fi
@@ -341,7 +351,10 @@
       if lowlevel_device_is_unlocked; then
         device_unlocked=1
         unlock_ts="$NOW"
-        log "service: device unlock detected (elapsed=${NOW:-?}s from start)"
+        _unlock_elapsed=0
+        [ "$NOW" != "0" ] && [ "$START_TS" != "0" ] && \
+          _unlock_elapsed=$((NOW - START_TS))
+        log "service: device unlock detected (elapsed=${_unlock_elapsed}s from start)"
       else
         debug_log "service: device not yet unlocked — timeout gate active"
       fi
@@ -357,11 +370,10 @@
         fi
         # else: waiting for unlock; do not start timeout
       else
-        # Not gated by unlock: start counting from service.sh start
-        timeout_start_ts="${timeout_start_ts:-$START_TS}"
-        if [ "$timeout_start_ts" = "0" ]; then
-          timeout_start_ts="$NOW"
-        fi
+        # Not gated by unlock: start counting from service.sh start.
+        # Use START_TS if it is a valid (non-zero) timestamp; fall back to NOW.
+        timeout_start_ts="$START_TS"
+        [ "$timeout_start_ts" = "0" ] && timeout_start_ts="$NOW"
       fi
     fi
 
@@ -641,7 +653,15 @@
       clear_blackout_active
 
       # Stage E: restore remaining lower-layer state not yet restored by
-      # transport-specific helpers (interfaces, bluetooth, tethering note).
+      # transport-specific helpers.
+      # Wi-Fi and mobile data are restored here for the case where transport
+      # gating was bypassed (AFWALL_GATE=0 or service not suppressed) — the
+      # transport-specific helper calls inside _check_transport_readiness would
+      # have been skipped if wifi_done/mobile_done started as 1.
+      lowlevel_restore_wifi_if_allowed || \
+        log "service: WARN: Wi-Fi restore encountered an error"
+      lowlevel_restore_mobile_data_if_allowed || \
+        log "service: WARN: mobile-data restore encountered an error"
       lowlevel_restore_interfaces 2>/dev/null || true
       lowlevel_restore_bluetooth 2>/dev/null || true
       lowlevel_restore_tethering_note 2>/dev/null || true

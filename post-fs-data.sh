@@ -7,7 +7,7 @@ MODDIR="${0%/*}"
 
 load_config
 
-log "post-fs-data: start (module=$MODULE_ID v2.2.22)"
+log "post-fs-data: start (module=$MODULE_ID $MODULE_VERSION)"
 
 # Remove legacy artifacts from older module versions (v1.x).
 cleanup_legacy "post-fs-data"

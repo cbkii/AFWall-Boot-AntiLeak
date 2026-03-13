@@ -21,7 +21,8 @@
 
 # ── Module paths ──────────────────────────────────────────────────────────────
 
-_IC_MODULE_DATA="/data/adb/AFWall-Boot-AntiLeak"
+_IC_MODULE_ID="AFWall-Boot-AntiLeak"
+_IC_MODULE_DATA="/data/adb/${_IC_MODULE_ID}"
 _IC_PERSISTENT_CFG="${_IC_MODULE_DATA}/config.sh"
 _IC_INSTALLER_CFG="${_IC_MODULE_DATA}/installer.cfg"
 _IC_KEY_TIMEOUT=10
@@ -213,7 +214,7 @@ _ic_get_keycheck_path() {
     local _arch _kcdir _kc_bin _dir
     _arch="$(uname -m 2>/dev/null)"
 
-    for _dir in "${MODPATH:-}" "${MODDIR:-}" "/data/adb/modules/AFWall-Boot-AntiLeak"; do
+    for _dir in "${MODPATH:-}" "${MODDIR:-}" "/data/adb/modules/${_IC_MODULE_ID}"; do
         [ -z "$_dir" ] && continue
         _kcdir="${_dir}/bin/keycheck"
         [ -d "$_kcdir" ] || continue
