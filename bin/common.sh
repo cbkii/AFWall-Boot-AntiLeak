@@ -191,9 +191,13 @@ _install_chain_block_table() {
 _install_block_table() { _install_chain_block_table "$1" "$2" "$3" OUTPUT; }
 
 # ── OUTPUT block (device-originated traffic) ───────────────────────────────────
-# Prefers raw table (pre-conntrack); falls back to filter table.
+# Dual-layer blackout: installs OUTPUT block in BOTH raw (primary) and filter
+# (shadow/failsafe) tables for defence-in-depth.
+# If raw disappears unexpectedly, filter still blocks OUTPUT traffic.
+# The primary table recorded in the state file is "raw" when raw succeeds;
+# both tables are always attempted for maximum coverage.
 install_output_block_v4() {
-  local ipt
+  local ipt raw_ok=0 filter_ok=0
   ipt="$(_find_cmd iptables)" || {
     log "install_output_block_v4: iptables not found"
     return 1
@@ -201,26 +205,38 @@ install_output_block_v4() {
   _init_dirs
 
   if _install_chain_block_table "$ipt" raw "$CHAIN_OUT_V4" OUTPUT; then
+    raw_ok=1
+    log "install_output_block_v4: raw layer installed"
+  else
+    log "install_output_block_v4: raw layer failed"
+  fi
+
+  # Always attempt filter layer as shadow/failsafe regardless of raw result.
+  if _install_chain_block_table "$ipt" filter "$CHAIN_OUT_V4" OUTPUT; then
+    filter_ok=1
+    log "install_output_block_v4: filter layer installed (shadow)"
+  else
+    log "install_output_block_v4: filter layer failed (shadow unavailable)"
+  fi
+
+  if [ "$raw_ok" = "1" ]; then
     printf 'raw' > "${STATE_DIR}/ipv4_out_table" 2>/dev/null || true
     rm -f "${STATE_DIR}/ipv4_table" 2>/dev/null || true
-    log "install_output_block_v4: installed in raw table"
+    log "install_output_block_v4: done (raw=primary filter=${filter_ok})"
     return 0
-  fi
-
-  log "install_output_block_v4: raw table failed; falling back to filter table"
-  if _install_chain_block_table "$ipt" filter "$CHAIN_OUT_V4" OUTPUT; then
+  elif [ "$filter_ok" = "1" ]; then
     printf 'filter' > "${STATE_DIR}/ipv4_out_table" 2>/dev/null || true
     rm -f "${STATE_DIR}/ipv4_table" 2>/dev/null || true
-    log "install_output_block_v4: installed in filter table (fallback)"
+    log "install_output_block_v4: done (filter=primary; raw unavailable)"
     return 0
   fi
 
-  log "install_output_block_v4: WARN: could not install IPv4 OUTPUT block"
+  log "install_output_block_v4: WARN: could not install IPv4 OUTPUT block in any table"
   return 1
 }
 
 install_output_block_v6() {
-  local ip6t
+  local ip6t raw_ok=0 filter_ok=0
   ip6t="$(_find_cmd ip6tables)" || {
     log "install_output_block_v6: ip6tables not found; IPv6 OUTPUT unprotected"
     return 1
@@ -228,21 +244,32 @@ install_output_block_v6() {
   _init_dirs
 
   if _install_chain_block_table "$ip6t" raw "$CHAIN_OUT_V6" OUTPUT; then
+    raw_ok=1
+    log "install_output_block_v6: raw layer installed"
+  else
+    log "install_output_block_v6: raw layer failed"
+  fi
+
+  if _install_chain_block_table "$ip6t" filter "$CHAIN_OUT_V6" OUTPUT; then
+    filter_ok=1
+    log "install_output_block_v6: filter layer installed (shadow)"
+  else
+    log "install_output_block_v6: filter layer failed (shadow unavailable)"
+  fi
+
+  if [ "$raw_ok" = "1" ]; then
     printf 'raw' > "${STATE_DIR}/ipv6_out_table" 2>/dev/null || true
     rm -f "${STATE_DIR}/ipv6_table" 2>/dev/null || true
-    log "install_output_block_v6: installed in raw table"
+    log "install_output_block_v6: done (raw=primary filter=${filter_ok})"
     return 0
-  fi
-
-  log "install_output_block_v6: raw table failed; falling back to filter table"
-  if _install_chain_block_table "$ip6t" filter "$CHAIN_OUT_V6" OUTPUT; then
+  elif [ "$filter_ok" = "1" ]; then
     printf 'filter' > "${STATE_DIR}/ipv6_out_table" 2>/dev/null || true
     rm -f "${STATE_DIR}/ipv6_table" 2>/dev/null || true
-    log "install_output_block_v6: installed in filter table (fallback)"
+    log "install_output_block_v6: done (filter=primary; raw unavailable)"
     return 0
   fi
 
-  log "install_output_block_v6: WARN: could not install IPv6 OUTPUT block"
+  log "install_output_block_v6: WARN: could not install IPv6 OUTPUT block in any table"
   return 1
 }
 
@@ -401,19 +428,14 @@ _remove_block_table() { _remove_chain_block_table "$1" "$2" "$3" OUTPUT; }
 remove_output_block_v4() {
   local ipt table
   ipt="$(_find_cmd iptables)" || return 0
-  # Support both new state file name and legacy name from v2.0.0.
+  # Always remove from both tables to handle dual-layer installs and state-loss.
+  # The state file is used only for log context.
   table="$(cat "${STATE_DIR}/ipv4_out_table" 2>/dev/null)" || table=""
   [ -z "$table" ] && table="$(cat "${STATE_DIR}/ipv4_table" 2>/dev/null)" || true
-
-  if [ -n "$table" ]; then
-    _remove_chain_block_table "$ipt" "$table" "$CHAIN_OUT_V4" OUTPUT
-    rm -f "${STATE_DIR}/ipv4_out_table" "${STATE_DIR}/ipv4_table" 2>/dev/null || true
-  else
-    # State lost; try both tables defensively.
-    _remove_chain_block_table "$ipt" raw    "$CHAIN_OUT_V4" OUTPUT
-    _remove_chain_block_table "$ipt" filter "$CHAIN_OUT_V4" OUTPUT
-  fi
-  log "remove_output_block_v4: done"
+  _remove_chain_block_table "$ipt" raw    "$CHAIN_OUT_V4" OUTPUT
+  _remove_chain_block_table "$ipt" filter "$CHAIN_OUT_V4" OUTPUT
+  rm -f "${STATE_DIR}/ipv4_out_table" "${STATE_DIR}/ipv4_table" 2>/dev/null || true
+  log "remove_output_block_v4: done (primary_table=${table:-unknown})"
 }
 
 remove_output_block_v6() {
@@ -421,15 +443,10 @@ remove_output_block_v6() {
   ip6t="$(_find_cmd ip6tables)" || return 0
   table="$(cat "${STATE_DIR}/ipv6_out_table" 2>/dev/null)" || table=""
   [ -z "$table" ] && table="$(cat "${STATE_DIR}/ipv6_table" 2>/dev/null)" || true
-
-  if [ -n "$table" ]; then
-    _remove_chain_block_table "$ip6t" "$table" "$CHAIN_OUT_V6" OUTPUT
-    rm -f "${STATE_DIR}/ipv6_out_table" "${STATE_DIR}/ipv6_table" 2>/dev/null || true
-  else
-    _remove_chain_block_table "$ip6t" raw    "$CHAIN_OUT_V6" OUTPUT
-    _remove_chain_block_table "$ip6t" filter "$CHAIN_OUT_V6" OUTPUT
-  fi
-  log "remove_output_block_v6: done"
+  _remove_chain_block_table "$ip6t" raw    "$CHAIN_OUT_V6" OUTPUT
+  _remove_chain_block_table "$ip6t" filter "$CHAIN_OUT_V6" OUTPUT
+  rm -f "${STATE_DIR}/ipv6_out_table" "${STATE_DIR}/ipv6_table" 2>/dev/null || true
+  log "remove_output_block_v6: done (primary_table=${table:-unknown})"
 }
 
 remove_forward_block_v4() {
@@ -546,7 +563,179 @@ input_block_present_v6() {
   return 1
 }
 
-# ── AFWall detection ───────────────────────────────────────────────────────────
+# ── Stronger OUTPUT blackout integrity detection ───────────────────────────────
+# Bare chain existence alone is NOT sufficient to confirm active protection.
+# These helpers require ALL THREE conditions to be true for a given table:
+#   1. The module OUTPUT chain exists in that table
+#   2. The chain contains the expected DROP rule
+#   3. The OUTPUT hook (jump to the chain) exists in that table
+#
+# Per-table atomic helpers ────────────────────────────────────────────────────
+
+output_jump_present_v4_raw() {
+  local ipt
+  ipt="$(_find_cmd iptables 2>/dev/null)" || return 1
+  _jump_exists "$ipt" raw OUTPUT "$CHAIN_OUT_V4"
+}
+
+output_jump_present_v4_filter() {
+  local ipt
+  ipt="$(_find_cmd iptables 2>/dev/null)" || return 1
+  _jump_exists "$ipt" filter OUTPUT "$CHAIN_OUT_V4"
+}
+
+output_jump_present_v6_raw() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables 2>/dev/null)" || return 1
+  _jump_exists "$ip6t" raw OUTPUT "$CHAIN_OUT_V6"
+}
+
+output_jump_present_v6_filter() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables 2>/dev/null)" || return 1
+  _jump_exists "$ip6t" filter OUTPUT "$CHAIN_OUT_V6"
+}
+
+output_drop_rule_present_v4_raw() {
+  local ipt
+  ipt="$(_find_cmd iptables 2>/dev/null)" || return 1
+  "$ipt" -t raw -C "$CHAIN_OUT_V4" -j DROP 2>/dev/null
+}
+
+output_drop_rule_present_v4_filter() {
+  local ipt
+  ipt="$(_find_cmd iptables 2>/dev/null)" || return 1
+  "$ipt" -t filter -C "$CHAIN_OUT_V4" -j DROP 2>/dev/null
+}
+
+output_drop_rule_present_v6_raw() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables 2>/dev/null)" || return 1
+  "$ip6t" -t raw -C "$CHAIN_OUT_V6" -j DROP 2>/dev/null
+}
+
+output_drop_rule_present_v6_filter() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables 2>/dev/null)" || return 1
+  "$ip6t" -t filter -C "$CHAIN_OUT_V6" -j DROP 2>/dev/null
+}
+
+# Composite helpers: true only when chain + DROP + jump are ALL present ───────
+
+# Returns 0 if the v4 OUTPUT block is fully intact in the raw table.
+_output_block_intact_v4_raw() {
+  local ipt
+  ipt="$(_find_cmd iptables 2>/dev/null)" || return 1
+  _chain_exists "$ipt" raw "$CHAIN_OUT_V4" || return 1
+  "$ipt" -t raw -C "$CHAIN_OUT_V4" -j DROP 2>/dev/null || return 1
+  _jump_exists "$ipt" raw OUTPUT "$CHAIN_OUT_V4"
+}
+
+# Returns 0 if the v4 OUTPUT block is fully intact in the filter table.
+_output_block_intact_v4_filter() {
+  local ipt
+  ipt="$(_find_cmd iptables 2>/dev/null)" || return 1
+  _chain_exists "$ipt" filter "$CHAIN_OUT_V4" || return 1
+  "$ipt" -t filter -C "$CHAIN_OUT_V4" -j DROP 2>/dev/null || return 1
+  _jump_exists "$ipt" filter OUTPUT "$CHAIN_OUT_V4"
+}
+
+# Returns 0 if the v6 OUTPUT block is fully intact in the raw table.
+_output_block_intact_v6_raw() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables 2>/dev/null)" || return 1
+  _chain_exists "$ip6t" raw "$CHAIN_OUT_V6" || return 1
+  "$ip6t" -t raw -C "$CHAIN_OUT_V6" -j DROP 2>/dev/null || return 1
+  _jump_exists "$ip6t" raw OUTPUT "$CHAIN_OUT_V6"
+}
+
+# Returns 0 if the v6 OUTPUT block is fully intact in the filter table.
+_output_block_intact_v6_filter() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables 2>/dev/null)" || return 1
+  _chain_exists "$ip6t" filter "$CHAIN_OUT_V6" || return 1
+  "$ip6t" -t filter -C "$CHAIN_OUT_V6" -j DROP 2>/dev/null || return 1
+  _jump_exists "$ip6t" filter OUTPUT "$CHAIN_OUT_V6"
+}
+
+# output_block_intact_v4: returns 0 only when at least one full layer (chain +
+# DROP + jump) is confirmed intact for IPv4 OUTPUT.  Logs detailed results.
+output_block_intact_v4() {
+  local raw_ok=1 filter_ok=1
+  _output_block_intact_v4_raw    && raw_ok=0
+  _output_block_intact_v4_filter && filter_ok=0
+  debug_log "output_block_intact_v4: raw=${raw_ok} filter=${filter_ok}"
+  [ "$raw_ok" = "0" ] || [ "$filter_ok" = "0" ]
+}
+
+# output_block_intact_v6: same for IPv6 OUTPUT.
+output_block_intact_v6() {
+  local raw_ok=1 filter_ok=1
+  _output_block_intact_v6_raw    && raw_ok=0
+  _output_block_intact_v6_filter && filter_ok=0
+  debug_log "output_block_intact_v6: raw=${raw_ok} filter=${filter_ok}"
+  [ "$raw_ok" = "0" ] || [ "$filter_ok" = "0" ]
+}
+
+# ── Blackout integrity log helper ─────────────────────────────────────────────
+# Emit a structured log line describing the exact integrity state of the
+# dual-layer OUTPUT blackout for a family. Used at key decision points.
+log_blackout_integrity() {
+  local family="$1" label="${2:-check}"
+  local raw_chain=0 raw_drop=0 raw_jump=0
+  local flt_chain=0 flt_drop=0 flt_jump=0
+  local cmd chain
+
+  if [ "$family" = "v4" ]; then
+    cmd="$(_find_cmd iptables 2>/dev/null)"
+    chain="$CHAIN_OUT_V4"
+  else
+    cmd="$(_find_cmd ip6tables 2>/dev/null)"
+    chain="$CHAIN_OUT_V6"
+  fi
+
+  if [ -n "$cmd" ]; then
+    _chain_exists "$cmd" raw    "$chain" && raw_chain=1
+    _chain_exists "$cmd" filter "$chain" && flt_chain=1
+    [ "$raw_chain" = "1" ] && "$cmd" -t raw    -C "$chain" -j DROP 2>/dev/null && raw_drop=1
+    [ "$flt_chain" = "1" ] && "$cmd" -t filter -C "$chain" -j DROP 2>/dev/null && flt_drop=1
+    [ "$raw_chain" = "1" ] && _jump_exists "$cmd" raw    OUTPUT "$chain" && raw_jump=1
+    [ "$flt_chain" = "1" ] && _jump_exists "$cmd" filter OUTPUT "$chain" && flt_jump=1
+  fi
+
+  log "blackout_integrity[$label]: ${family} raw(chain=${raw_chain} drop=${raw_drop} jump=${raw_jump}) filter(chain=${flt_chain} drop=${flt_drop} jump=${flt_jump})"
+}
+
+# ── Self-healing OUTPUT block repair ──────────────────────────────────────────
+# Called when block_installed=1 but live integrity check fails.
+# Re-installs both raw and filter layers and logs as a repair event.
+# Blackout state markers are preserved (not cleared) during repair.
+
+repair_output_block_v4() {
+  log "repair_output_block_v4: INTEGRITY REPAIR — reinstalling v4 OUTPUT block"
+  log_blackout_integrity "v4" "pre_repair"
+  if install_output_block_v4; then
+    log "repair_output_block_v4: repair successful"
+    log_blackout_integrity "v4" "post_repair"
+    return 0
+  fi
+  log "repair_output_block_v4: repair FAILED — v4 OUTPUT may be unprotected"
+  return 1
+}
+
+repair_output_block_v6() {
+  log "repair_output_block_v6: INTEGRITY REPAIR — reinstalling v6 OUTPUT block"
+  log_blackout_integrity "v6" "pre_repair"
+  if install_output_block_v6; then
+    log "repair_output_block_v6: repair successful"
+    log_blackout_integrity "v6" "post_repair"
+    return 0
+  fi
+  log "repair_output_block_v6: repair FAILED — v6 OUTPUT may be unprotected"
+  return 1
+}
+
+
 # Chain name constants — AFWall+'s well-known iptables chain names.
 # Defined once here so all detection and signature functions share the same
 # string. If AFWall ever renames a chain only this section needs updating.
@@ -713,10 +902,11 @@ log_transition_snapshot() {
     return 0
   fi
 
-  # Module-owned chain state: which table holds the OUTPUT block (if any).
-  chain_out="absent"
-  _chain_exists "$cmd" raw    "$mod_out_chain" && chain_out="raw"
-  _chain_exists "$cmd" filter "$mod_out_chain" && chain_out="filter"
+  # Module-owned chain state: show dual-layer (raw + filter) for OUTPUT.
+  local chain_out_raw="absent" chain_out_flt="absent"
+  _chain_exists "$cmd" raw    "$mod_out_chain" && chain_out_raw="present"
+  _chain_exists "$cmd" filter "$mod_out_chain" && chain_out_flt="present"
+  chain_out="raw=${chain_out_raw}/filter=${chain_out_flt}"
 
   chain_fwd="absent"
   _chain_exists "$cmd" filter "$mod_fwd_chain" && chain_fwd="present"
@@ -893,29 +1083,28 @@ should_install_block() {
 }
 
 # ── Legacy cleanup ─────────────────────────────────────────────────────────────
-# Remove legacy hard-drop raw-table chain left by older module variants.
+# Remove hard-drop raw-table chains left by older module variants ONLY.
+# CRITICAL: Must NEVER remove the current active chain names:
+#   MOD_PRE_AFW, MOD_PRE_AFW_V6, MOD_PRE_AFW_FWD, MOD_PRE_AFW_FWD_V6,
+#   MOD_PRE_AFW_IN, MOD_PRE_AFW_IN_V6.
+#
+# These ARE the current blackout chains installed by post-fs-data and must not
+# be touched during the service phase.  Restrict this function to truly legacy
+# (retired) chain names from older module versions only.
+#
+# Note: No separate legacy chain names are currently known (the chain names
+# have been stable since v2.0).  The loop is intentionally empty so that no
+# current active chain can be silently removed by a legacy-cleanup call.
+# If a genuinely retired chain name is discovered in the future, add it here.
 remove_legacy_raw_drop() {
-  local b c n chain
-  for b in iptables ip6tables; do
-    c="$(_find_cmd "$b" 2>/dev/null)" || continue
-    # Clean up all known module-owned chain names from raw table (legacy + current).
-    for chain in MOD_PRE_AFW MOD_PRE_AFW_V6 \
-                 MOD_PRE_AFW_FWD MOD_PRE_AFW_FWD_V6 \
-                 MOD_PRE_AFW_IN MOD_PRE_AFW_IN_V6; do
-      n=0
-      while "$c" -t raw -C OUTPUT -j "$chain" 2>/dev/null; do
-        "$c" -t raw -D OUTPUT -j "$chain" 2>/dev/null || break
-        n=$((n + 1)); [ "$n" -gt 10 ] && break
-      done
-      n=0
-      while "$c" -t raw -C PREROUTING -j "$chain" 2>/dev/null; do
-        "$c" -t raw -D PREROUTING -j "$chain" 2>/dev/null || break
-        n=$((n + 1)); [ "$n" -gt 10 ] && break
-      done
-      "$c" -t raw -F "$chain" 2>/dev/null || true
-      "$c" -t raw -X "$chain" 2>/dev/null || true
-    done
-  done
+  # No truly legacy (retired) chain names are currently known.  The current
+  # active chain names (MOD_PRE_AFW, MOD_PRE_AFW_V6, MOD_PRE_AFW_FWD,
+  # MOD_PRE_AFW_FWD_V6, MOD_PRE_AFW_IN, MOD_PRE_AFW_IN_V6) must NEVER appear
+  # here, as they are the live blackout chains installed by post-fs-data.
+  # If a genuinely retired chain name is discovered in the future, add a
+  # removal block for it here (and ONLY for names that are no longer created).
+  debug_log "remove_legacy_raw_drop: complete (no retired chain names to clean)"
+  return 0
 }
 
 # Remove legacy afwallstart scripts only if they carry a known module marker.
@@ -938,8 +1127,18 @@ remove_legacy_afwallstart() {
 
 cleanup_legacy() {
   local phase="${1:-unknown}"
-  log "cleanup_legacy: phase=$phase"
+  log "cleanup_legacy: phase=$phase (chains + scripts)"
   remove_legacy_raw_drop
+  remove_legacy_afwallstart
+  return 0
+}
+
+# Restricted legacy cleanup: remove only legacy startup scripts; never touches
+# any iptables chains.  Use this during the service phase so that the current
+# active OUTPUT blackout chains installed by post-fs-data are NOT disturbed.
+cleanup_legacy_scripts_only() {
+  local phase="${1:-unknown}"
+  log "cleanup_legacy_scripts_only: phase=$phase (scripts only; chains untouched)"
   remove_legacy_afwallstart
   return 0
 }

@@ -73,8 +73,10 @@
     log "service: AFWall package not found — liveness checks disabled; rule-detection only"
   fi
 
-  # Remove any remaining legacy artifacts.
-  cleanup_legacy "service"
+  # ── A) Legacy cleanup (scripts only) ────────────────────────────────────────
+  # Only remove legacy afwallstart scripts; never touch current active
+  # MOD_PRE_AFW* chains which were installed by post-fs-data this boot.
+  cleanup_legacy_scripts_only "service"
 
   # ── Stage B: Late lower-layer suppression ──────────────────────────────────
   # Re-assert and verify Wi-Fi/data off-state now that framework is available.
@@ -83,28 +85,81 @@
 
   START_TS="$(date +%s 2>/dev/null)" || START_TS=0
   last_reassert_ts="$START_TS"
+  last_blackout_reassert_ts="$START_TS"
 
-  # ── Determine which families are actually blocked ───────────────────────────
-  v4_blocked=0; v6_blocked=0
+  # ── Read block_installed state flag ─────────────────────────────────────────
+  # block_installed=1 means post-fs-data successfully installed the block this
+  # boot.  If this is set but the live block is missing, that is an integrity
+  # failure that must be repaired — NOT silently treated as "no handoff needed".
+  _block_was_installed=0
+  if [ -f "${STATE_DIR}/block_installed" ]; then
+    _block_was_installed=1
+    log "service: block_installed=1 from state file"
+    log "service: blackout_active=$([ -f "${STATE_DIR}/blackout_active" ] && printf 1 || printf 0) radio_off_pending=$([ -f "${STATE_DIR}/radio_off_pending" ] && printf 1 || printf 0)"
+  else
+    log "service: block_installed not set (post-fs-data did not install block this boot)"
+  fi
 
-  if output_block_present_v4; then
-    v4_blocked=1
-    if [ -f "${STATE_DIR}/ipv4_out_table" ]; then
-      log "service: v4 OUTPUT block detected (table=$(cat "${STATE_DIR}/ipv4_out_table" 2>/dev/null))"
+  # ── C/E) Blackout integrity check and repair on startup ─────────────────────
+  # If block_installed=1 but the live block is missing or degraded, immediately
+  # repair it.  Do NOT treat missing live block as "no handoff needed" when the
+  # state says the block should be present.
+  if [ "$_block_was_installed" = "1" ]; then
+    log "service: integrity check: verifying live OUTPUT blackout state"
+    log_blackout_integrity "v4" "startup"
+    log_blackout_integrity "v6" "startup"
+    if ! output_block_intact_v4; then
+      log "service: INTEGRITY FAILURE: v4 block_installed=1 but v4 OUTPUT block not intact — repairing"
+      repair_output_block_v4 || log "service: v4 startup repair FAILED"
     else
-      log "service: v4 OUTPUT block detected (live; state-file missing)"
+      log "service: integrity check: v4 OUTPUT block intact"
     fi
+    if ! output_block_intact_v6; then
+      log "service: INTEGRITY FAILURE: v6 block_installed=1 but v6 OUTPUT block not intact — repairing"
+      repair_output_block_v6 || log "service: v6 startup repair FAILED"
+    else
+      log "service: integrity check: v6 OUTPUT block intact"
+    fi
+  fi
+
+  # ── Determine which families are blocked ────────────────────────────────────
+  v4_blocked=0; v6_blocked=0
+  _v4_table="$(cat "${STATE_DIR}/ipv4_out_table" 2>/dev/null || cat "${STATE_DIR}/ipv4_table" 2>/dev/null || printf '')"
+  _v6_table="$(cat "${STATE_DIR}/ipv6_out_table" 2>/dev/null || cat "${STATE_DIR}/ipv6_table" 2>/dev/null || printf '')"
+  # _v4_state_exists / _v6_state_exists: per-family indicators that a block was
+  # installed for that family this boot (table state file present).
+  _v4_state_exists=0; _v6_state_exists=0
+  [ -n "$_v4_table" ] && _v4_state_exists=1
+  [ -n "$_v6_table" ] && _v6_state_exists=1
+
+  # Use strong integrity check: chain + DROP rule + OUTPUT jump required.
+  if output_block_intact_v4; then
+    v4_blocked=1
+    log "service: v4 OUTPUT block intact (table=${_v4_table:-unknown})"
+  elif output_block_present_v4; then
+    # Chain exists but integrity degraded; count as blocked and repair will run.
+    v4_blocked=1
+    log "service: v4 OUTPUT block partially present (degraded; chain exists but DROP/jump incomplete)"
+    log_blackout_integrity "v4" "degraded_startup"
+  elif [ "$_block_was_installed" = "1" ] && [ "$_v4_state_exists" = "1" ]; then
+    # block_installed=1 and per-family state file confirms v4 was installed, but
+    # the live block is absent even after repair attempt: fail-closed.
+    v4_blocked=1
+    log "service: v4 OUTPUT block ABSENT after repair attempt — treating as blocked (fail-closed)"
   else
     log "service: v4 OUTPUT block not detected — no v4 handoff needed"
   fi
 
-  if output_block_present_v6; then
+  if output_block_intact_v6; then
     v6_blocked=1
-    if [ -f "${STATE_DIR}/ipv6_out_table" ]; then
-      log "service: v6 OUTPUT block detected (table=$(cat "${STATE_DIR}/ipv6_out_table" 2>/dev/null))"
-    else
-      log "service: v6 OUTPUT block detected (live; state-file missing)"
-    fi
+    log "service: v6 OUTPUT block intact (table=${_v6_table:-unknown})"
+  elif output_block_present_v6; then
+    v6_blocked=1
+    log "service: v6 OUTPUT block partially present (degraded; chain exists but DROP/jump incomplete)"
+    log_blackout_integrity "v6" "degraded_startup"
+  elif [ "$_block_was_installed" = "1" ] && [ "$_v6_state_exists" = "1" ]; then
+    v6_blocked=1
+    log "service: v6 OUTPUT block ABSENT after repair attempt — treating as blocked (fail-closed)"
   else
     log "service: v6 OUTPUT block not detected — no v6 handoff needed"
   fi
@@ -122,11 +177,25 @@
     log "service: v6 INPUT block active"
   fi
 
+  # ── E) Safe early-exit gate ──────────────────────────────────────────────────
+  # Only exit without handoff when the module TRULY never installed a block AND
+  # no live block is detected.  If block_installed=1, we must perform handoff
+  # even if the live block is unexpectedly absent (integrity failure already
+  # logged and repair attempted above).
   if [ "$v4_blocked" = "0" ] && [ "$v6_blocked" = "0" ]; then
-    log "service: no OUTPUT blocks detected — skipping handoff; restoring lower-layer"
-    clear_blackout_active
-    lowlevel_restore_changed_state
-    exit 0
+    if [ "$_block_was_installed" = "1" ]; then
+      # block_installed=1 but no per-family state files or live blocks found.
+      # This is an unusual state (state files lost or cleared).  Fail-closed:
+      # assume both families were blocked and perform full handoff wait.
+      log "service: WARN: block_installed=1 but no per-family state/live blocks detected — failing closed (assuming both families blocked)"
+      v4_blocked=1
+      v6_blocked=1
+    else
+      log "service: no OUTPUT blocks detected and block_installed not set — skipping handoff; restoring lower-layer"
+      clear_blackout_active
+      lowlevel_restore_changed_state
+      exit 0
+    fi
   fi
 
   # ── Per-family handoff tracking ─────────────────────────────────────────────
@@ -184,6 +253,33 @@
 
   # ── Signature validity helper ───────────────────────────────────────────────
   _sig_is_valid() { [ -n "$1" ] && [ "$1" != "na:na" ]; }
+
+  # ── Pre-removal integrity log helpers ────────────────────────────────────────
+  # Called immediately before a block is removed to confirm it is still present.
+  # Logs an error if the block is unexpectedly already absent (F requirement).
+  _log_pre_remove_integrity_v4() {
+    local context="${1:-remove}"
+    if output_block_intact_v4; then
+      log "service: ${context} v4 pre-remove integrity: block intact — proceeding"
+    elif output_block_present_v4; then
+      log "service: ${context} v4 pre-remove integrity: block partially present (degraded)"
+    else
+      log "service: ${context} v4 pre-remove integrity: ERROR: block already absent before intentional removal"
+    fi
+    log_blackout_integrity "v4" "${context}_pre_remove"
+  }
+
+  _log_pre_remove_integrity_v6() {
+    local context="${1:-remove}"
+    if output_block_intact_v6; then
+      log "service: ${context} v6 pre-remove integrity: block intact — proceeding"
+    elif output_block_present_v6; then
+      log "service: ${context} v6 pre-remove integrity: block partially present (degraded)"
+    else
+      log "service: ${context} v6 pre-remove integrity: ERROR: block already absent before intentional removal"
+    fi
+    log_blackout_integrity "v6" "${context}_pre_remove"
+  }
 
   # ── Final-settle helpers ────────────────────────────────────────────────────
   _settle_confirm_v4() {
@@ -348,6 +444,37 @@
       fi
     fi
 
+    # ── C/D) Periodic blackout integrity reassertion ─────────────────────────
+    # While the blackout is active, verify that the OUTPUT block (chain + DROP
+    # rule + OUTPUT jump) is still intact for each family.  Repair immediately
+    # if any layer is missing.  Runs on the same interval as radio reassertion.
+    [ "$last_blackout_reassert_ts" = "0" ] && [ "$NOW" != "0" ] && last_blackout_reassert_ts="$NOW"
+    if [ "$NOW" != "0" ] && [ "$last_blackout_reassert_ts" != "0" ]; then
+      _blackout_reassert_elapsed=$((NOW - last_blackout_reassert_ts))
+      if [ "$_blackout_reassert_elapsed" -ge "$RADIO_REASSERT_INTERVAL" ]; then
+        last_blackout_reassert_ts="$NOW"
+        if [ "$v4_blocked" = "1" ] && [ "$v4_released" = "0" ]; then
+          if ! output_block_intact_v4; then
+            log "service: INTEGRITY REPAIR v4: OUTPUT block missing or degraded — repairing"
+            repair_output_block_v4 || log "service: v4 periodic repair FAILED"
+            # Re-assert blackout state markers (must not be cleared by repair).
+            mark_blackout_active
+          else
+            debug_log "service: blackout_reassert v4: intact"
+          fi
+        fi
+        if [ "$v6_blocked" = "1" ] && [ "$v6_released" = "0" ]; then
+          if ! output_block_intact_v6; then
+            log "service: INTEGRITY REPAIR v6: OUTPUT block missing or degraded — repairing"
+            repair_output_block_v6 || log "service: v6 periodic repair FAILED"
+            mark_blackout_active
+          else
+            debug_log "service: blackout_reassert v6: intact"
+          fi
+        fi
+      fi
+    fi
+
     # ── Unlock detection ────────────────────────────────────────────────────
     # Determine if the device has been unlocked; used for timeout gating.
     # Probe only when the configured UNLOCK_POLL_INTERVAL has elapsed.
@@ -403,6 +530,7 @@
           log "service: TIMEOUT: unblocking per AUTO_TIMEOUT_UNBLOCK=1 + TIMEOUT_POLICY=unblock"
           if [ "$v4_done" = "0" ] || [ "$v4_released" = "0" ]; then
             log "service: TIMEOUT v4: removing block"
+            _log_pre_remove_integrity_v4 "timeout"
             log_transition_snapshot "v4" "timeout_unblock"
             remove_output_block_v4
             if [ -f "${STATE_DIR}/ipv4_fwd_active" ] || forward_block_present_v4; then
@@ -414,6 +542,7 @@
           fi
           if [ "$v6_done" = "0" ] || [ "$v6_released" = "0" ]; then
             log "service: TIMEOUT v6: removing block"
+            _log_pre_remove_integrity_v6 "timeout"
             log_transition_snapshot "v6" "timeout_unblock"
             remove_output_block_v6
             if [ -f "${STATE_DIR}/ipv6_fwd_active" ] || forward_block_present_v6; then
@@ -621,9 +750,12 @@
     # ── Block release: remove blocks when transports are ready ────────────
     # Safety rule: do not remove a family's block until ALL required transports
     # are ready, to prevent unprotected windows on any transport.
+    # F) Integrity check immediately before removal: if block is already missing
+    # at this point, log as an error condition (not a silent "success").
     if [ "$v4_done" = "1" ] && [ "$wifi_done" = "1" ] && [ "$mobile_done" = "1" ] && \
        [ "$v4_released" = "0" ]; then
-      log "service: v4 all transports ready; removing v4 block (path=${v4_path:-confirmed})"
+      log "service: v4 release preconditions satisfied: afwall_takeover=1 wifi_done=1 mobile_done=1 path=${v4_path:-confirmed}"
+      _log_pre_remove_integrity_v4 "handoff"
       log_transition_snapshot "v4" "pre_remove"
       remove_output_block_v4
       if [ -f "${STATE_DIR}/ipv4_fwd_active" ] || forward_block_present_v4; then
@@ -633,12 +765,13 @@
         remove_input_block_v4
       fi
       v4_released=1
-      log "service: v4 block removed"
+      log "service: v4 block removed (intentional handoff)"
     fi
 
     if [ "$v6_done" = "1" ] && [ "$wifi_done" = "1" ] && [ "$mobile_done" = "1" ] && \
        [ "$v6_released" = "0" ]; then
-      log "service: v6 all transports ready; removing v6 block (path=${v6_path:-confirmed})"
+      log "service: v6 release preconditions satisfied: afwall_takeover=1 wifi_done=1 mobile_done=1 path=${v6_path:-confirmed}"
+      _log_pre_remove_integrity_v6 "handoff"
       log_transition_snapshot "v6" "pre_remove"
       remove_output_block_v6
       if [ -f "${STATE_DIR}/ipv6_fwd_active" ] || forward_block_present_v6; then
@@ -648,7 +781,7 @@
         remove_input_block_v6
       fi
       v6_released=1
-      log "service: v6 block removed"
+      log "service: v6 block removed (intentional handoff)"
     fi
 
     # ── All done? ──────────────────────────────────────────────────────────
