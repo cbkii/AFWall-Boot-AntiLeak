@@ -1,14 +1,16 @@
 #!/system/bin/sh
-# service.sh - transport-aware handoff with unlock-gated timeout.
+# service.sh - composite-readiness handoff with coherent per-poll snapshots.
 #
 # Boot blackout model:
 #   Stage A: Hard block installed in post-fs-data. Framework radio-off deferred.
 #   Stage B: Late lower-layer suppression (Wi-Fi/data off, verified). Reasserted
 #            periodically while waiting.
-#   Stage C: Wait for per-family AFWall takeover (preferred or fallback path).
-#            Also wait for transport-specific chain readiness (afwall-wifi /
-#            afwall-3g) before releasing the corresponding radio.
+#   Stage C: Wait for per-family AFWall takeover (fast / conservative / boot-complete
+#            path). Full AFWall graph fingerprints derived from coherent per-poll
+#            snapshots. Non-blocking stability tracking (no inline sleep settle).
 #   Stage D: Only remove global hard block when ALL required transports are ready.
+#            Transport readiness requires reachability + subtree fingerprint stability.
+#            Transport absence is accepted after TRANSPORT_ABSENCE_STABLE_SECS.
 #   Stage E: Restore lower-layer state (only what the module changed).
 #
 # Timeout rules:
@@ -42,15 +44,35 @@
   RADIO_REASSERT_INTERVAL="${RADIO_REASSERT_INTERVAL:-10}"
   BLACKOUT_REASSERT_INTERVAL="${BLACKOUT_REASSERT_INTERVAL:-5}"
   UNLOCK_POLL_INTERVAL="${UNLOCK_POLL_INTERVAL:-5}"
-  # How long to wait for transport-specific chains before falling back to
-  # main-chain-only readiness (AFWall may not emit afwall-wifi / afwall-3g).
+  # Retained as a last-resort safety net; primary transport-absence path is now
+  # TRANSPORT_ABSENCE_STABLE_SECS.
   TRANSPORT_WAIT_SECS="${TRANSPORT_WAIT_SECS:-30}"
+
+  # ── Composite-readiness timing ─────────────────────────────────────────────
+  # POLL_INTERVAL_SECS: how often the loop iterates (1s default → faster reaction).
+  # FAST_STABLE_SECS:   full-graph fingerprint must be stable this long + corroboration.
+  # SLOW_STABLE_SECS:   full-graph fingerprint must be stable this long (no corroborator).
+  # TRANSPORT_ABSENCE_STABLE_SECS: how long absence of a transport subtree must be
+  #   stable (after main family confirmed) before accepting main-chain-only readiness.
+  POLL_INTERVAL_SECS="${POLL_INTERVAL_SECS:-1}"
+  FAST_STABLE_SECS="${FAST_STABLE_SECS:-2}"
+  SLOW_STABLE_SECS="${SLOW_STABLE_SECS:-6}"
+  TRANSPORT_ABSENCE_STABLE_SECS="${TRANSPORT_ABSENCE_STABLE_SECS:-3}"
+
+  # ── Boot-completion acceleration ───────────────────────────────────────────
+  BOOT_COMPLETE_ACCELERATE="${BOOT_COMPLETE_ACCELERATE:-1}"
+  AFWALL_RULE_DENSITY_MIN="${AFWALL_RULE_DENSITY_MIN:-3}"
+  LIVENESS_SECS_POST_BOOT="${LIVENESS_SECS_POST_BOOT:-2}"
+  FALLBACK_SECS_POST_BOOT="${FALLBACK_SECS_POST_BOOT:-4}"
+  SETTLE_SECS_POST_BOOT="${SETTLE_SECS_POST_BOOT:-1}"
+  TRANSPORT_WAIT_SECS_POST_BOOT="${TRANSPORT_WAIT_SECS_POST_BOOT:-5}"
 
   log "service: start ($MODULE_VERSION)"
   log "service: config: timeout=${TIMEOUT_SECS}s policy=${TIMEOUT_POLICY} auto_unblock=${AUTO_TIMEOUT_UNBLOCK} unlock_gated=${TIMEOUT_UNLOCK_GATED}"
-  log "service: config: settle=${SETTLE_SECS}s liveness=${LIVENESS_SECS}s fallback=${FALLBACK_SECS}s transport_wait=${TRANSPORT_WAIT_SECS}s"
+  log "service: config: poll=${POLL_INTERVAL_SECS}s fast=${FAST_STABLE_SECS}s slow=${SLOW_STABLE_SECS}s transport_absence=${TRANSPORT_ABSENCE_STABLE_SECS}s"
   log "service: config: fwd=${ENABLE_FORWARD_BLOCK:-1} in=${ENABLE_INPUT_BLOCK:-0} ll_mode=${LOWLEVEL_MODE:-safe}"
-  log "service: config: wifi_gate=${WIFI_AFWALL_GATE} mobile_gate=${MOBILE_AFWALL_GATE} reassert_interval=${RADIO_REASSERT_INTERVAL}s blackout_reassert=${BLACKOUT_REASSERT_INTERVAL}s"
+  log "service: config: wifi_gate=${WIFI_AFWALL_GATE} mobile_gate=${MOBILE_AFWALL_GATE} reassert=${RADIO_REASSERT_INTERVAL}s blackout_reassert=${BLACKOUT_REASSERT_INTERVAL}s"
+  log "service: config: boot_accel=${BOOT_COMPLETE_ACCELERATE} density_min=${AFWALL_RULE_DENSITY_MIN} liveness_pb=${LIVENESS_SECS_POST_BOOT}s fallback_pb=${FALLBACK_SECS_POST_BOOT}s settle_pb=${SETTLE_SECS_POST_BOOT}s twait_pb=${TRANSPORT_WAIT_SECS_POST_BOOT}s"
 
   # Validate TIMEOUT_POLICY; default to fail_closed on unknown value.
   case "$TIMEOUT_POLICY" in
@@ -207,8 +229,14 @@
   [ "$v4_blocked" = "0" ] && v4_done=1 && v4_released=1
   [ "$v6_blocked" = "0" ] && v6_done=1 && v6_released=1
 
-  v4_takeover_ts=0; v4_sig=""; v4_alive_ts=0; v4_fallback_ts=0; v4_path=""
-  v6_takeover_ts=0; v6_sig=""; v6_alive_ts=0; v6_fallback_ts=0; v6_path=""
+  # Per-family stable-since fingerprint tracking.
+  # v4_last_fp / v6_last_fp: last seen full AFWall graph fingerprint.
+  # v4_fp_stable_since / v6_fp_stable_since: timestamp when the current
+  #   fingerprint was first observed (reset on drift).
+  # v4_graph_seen_ts / v6_graph_seen_ts: timestamp when the AFWall graph was
+  #   first observed to be non-trivially present.
+  v4_last_fp=""; v4_fp_stable_since=0; v4_graph_seen_ts=0; v4_path=""
+  v6_last_fp=""; v6_fp_stable_since=0; v6_graph_seen_ts=0; v6_path=""
 
   # ── Transport readiness tracking ────────────────────────────────────────────
   # wifi_done/mobile_done: 1 when the corresponding transport's AFWall readiness
@@ -216,8 +244,7 @@
   #
   # Gating is bypassed if:
   #   - The corresponding AFWALL_GATE flag is 0, OR
-  #   - The module did not suppress that service (state file absent), OR
-  #   - AFWall doesn't use transport-specific chains (graceful fallback)
+  #   - The module did not suppress that service (state file absent)
 
   # Check whether the module suppressed Wi-Fi / mobile in this boot.
   _wifi_was_suppressed=0; _mobile_was_suppressed=0
@@ -240,11 +267,14 @@
     log "service: mobile transport gate: skipped (gate=${MOBILE_AFWALL_GATE} suppressed=${_mobile_was_suppressed})"
   fi
 
-  # Per-transport stability windows (timestamps and signatures)
-  wifi_check_ts=0; wifi_sig=""
-  mobile_check_ts=0; mobile_sig=""
-  # Track whether transport chains were found (for fallback to main-chain readiness)
-  wifi_chain_seen=0; mobile_chain_seen=0
+  # Per-transport fingerprint stable-since tracking.
+  # *_last_fp:           last seen transport subtree fingerprint.
+  # *_fp_stable_since:   timestamp when the current fingerprint was first seen.
+  # *_absent_since:      timestamp when the transport prefix was first confirmed
+  #                      absent from a snapshot (after main family confirmed).
+  #                      0 means "not yet checked" or "subtree is present".
+  wifi_last_fp="";   wifi_fp_stable_since=0;   wifi_absent_since=0
+  mobile_last_fp=""; mobile_fp_stable_since=0; mobile_absent_since=0
 
   # ── Unlock state for timeout gating ────────────────────────────────────────
   device_unlocked=0
@@ -252,12 +282,9 @@
   timeout_start_ts=0  # timestamp when timeout countdown began (0 = not started)
   last_unlock_poll_ts=0  # timestamp of last lowlevel_device_is_unlocked probe
 
-  # ── Signature validity helper ───────────────────────────────────────────────
-  _sig_is_valid() { [ -n "$1" ] && [ "$1" != "na:na" ]; }
-
   # ── Pre-removal integrity log helpers ────────────────────────────────────────
   # Called immediately before a block is removed to confirm it is still present.
-  # Logs an error if the block is unexpectedly already absent (F requirement).
+  # Logs an error if the block is unexpectedly already absent.
   _log_pre_remove_integrity_v4() {
     local context="${1:-remove}"
     if output_block_intact_v4; then
@@ -282,154 +309,172 @@
     log_blackout_integrity "v6" "${context}_pre_remove"
   }
 
-  # ── Final-settle helpers ────────────────────────────────────────────────────
-  _settle_confirm_v4() {
-    local path_label="$1" pre_sig="$2" post_sig
-    sleep "$SETTLE_SECS"
-    if ! afwall_takeover_present_v4; then
-      log "service: v4 ${path_label}: takeover absent after settle — reset"
-      return 1
-    fi
-    post_sig="$(afwall_takeover_signature_v4)"
-    if ! _sig_is_valid "$post_sig"; then
-      log "service: v4 ${path_label}: post_sig invalid (${post_sig:-empty}) — reset"
-      return 1
-    fi
-    if [ "$post_sig" != "$pre_sig" ]; then
-      log "service: v4 ${path_label}: settle sig drift (pre=$pre_sig post=$post_sig) — reset"
-      return 1
-    fi
-    log "service: v4 ${path_label}: settle confirmed (sig=$pre_sig)"
-    return 0
-  }
-
-  _settle_confirm_v6() {
-    local path_label="$1" pre_sig="$2" post_sig
-    sleep "$SETTLE_SECS"
-    if ! afwall_takeover_present_v6; then
-      log "service: v6 ${path_label}: takeover absent after settle — reset"
-      return 1
-    fi
-    post_sig="$(afwall_takeover_signature_v6)"
-    if ! _sig_is_valid "$post_sig"; then
-      log "service: v6 ${path_label}: post_sig invalid (${post_sig:-empty}) — reset"
-      return 1
-    fi
-    if [ "$post_sig" != "$pre_sig" ]; then
-      log "service: v6 ${path_label}: settle sig drift (pre=$pre_sig post=$post_sig) — reset"
-      return 1
-    fi
-    log "service: v6 ${path_label}: settle confirmed (sig=$pre_sig)"
-    return 0
-  }
-
-  # ── Transport readiness check ────────────────────────────────────────────────
-  # Called after the main AFWall chain is confirmed stable for at least one family.
-  # Updates wifi_done and mobile_done based on transport-specific chain evidence.
+  # ── Transport readiness check (snapshot-based, non-blocking) ─────────────────
+  # Called once per poll iteration after at least one IP family is confirmed.
+  # Uses the per-poll coherent snapshots (v4_snap, v6_snap) for all checks.
+  # Stability is tracked via timestamps, not blocking sleep.
   _check_transport_readiness() {
-    local fam_ready=0
-    [ "$v4_done" = "1" ] || [ "$v6_done" = "1" ] && fam_ready=1
-    [ "$fam_ready" = "1" ] || return 0
+    local now_ts="$NOW"
 
-    local now_ts
-    now_ts="$(date +%s 2>/dev/null)" || now_ts=0
-
-    # First confirmed takeover timestamp from either family.
-    # Used for the transport-chain fallback timer so the fallback works
-    # correctly even when only one IP family was blocked/confirmed.
-    local _afwall_confirmed_ts
-    _afwall_confirmed_ts="${v4_takeover_ts:-0}"
-    if [ "$_afwall_confirmed_ts" = "0" ]; then
-      _afwall_confirmed_ts="${v6_takeover_ts:-0}"
-    fi
-
-    # ── Wi-Fi transport ───────────────────────────────────────────────────────
+    # ── Wi-Fi transport ─────────────────────────────────────────────────────
     if [ "$wifi_done" = "0" ]; then
-      local w_sig_v4 w_sig_v6 w_sig
-      # Check for afwall-wifi chain in either family
-      if afwall_wifi_chain_present_v4 || afwall_wifi_chain_present_v6; then
-        wifi_chain_seen=1
-        w_sig_v4="$(afwall_wifi_signature_v4 2>/dev/null)" || w_sig_v4="na"
-        w_sig_v6="$(afwall_wifi_signature_v6 2>/dev/null)" || w_sig_v6="na"
-        w_sig="${w_sig_v4}:${w_sig_v6}"
-        if [ "$wifi_check_ts" = "0" ]; then
-          wifi_check_ts="$now_ts"
-          wifi_sig="$w_sig"
-          log "service: wifi transport: ${AFWALL_CHAIN_WIFI} chain first seen (sig=${w_sig})"
-        elif [ "$w_sig" != "$wifi_sig" ]; then
-          log "service: wifi transport: sig changed ($wifi_sig -> $w_sig) — reset"
-          wifi_check_ts="$now_ts"
-          wifi_sig="$w_sig"
+      # Check both v4 and v6 snapshots for any afwall-wifi-prefixed subtree.
+      local _wifi_in_snap=0
+      afwall_prefix_present_from_snapshot "$v4_snap" "$AFWALL_CHAIN_WIFI" && _wifi_in_snap=1
+      afwall_prefix_present_from_snapshot "$v6_snap" "$AFWALL_CHAIN_WIFI" && _wifi_in_snap=1
+
+      if [ "$_wifi_in_snap" = "1" ]; then
+        # Transport subtree is present — reset absence counter.
+        wifi_absent_since=0
+
+        # Check reachability from within the AFWall graph.
+        local _wifi_reachable=0
+        afwall_prefix_reachable_from_snapshot "$v4_snap" "$AFWALL_CHAIN_WIFI" && _wifi_reachable=1
+        afwall_prefix_reachable_from_snapshot "$v6_snap" "$AFWALL_CHAIN_WIFI" && _wifi_reachable=1
+
+        if [ "$_wifi_reachable" = "0" ]; then
+          debug_log "service: wifi subtree exists but is unreachable from AFWall graph — not accepting"
         else
-          local w_elapsed
-          w_elapsed=$((now_ts - wifi_check_ts))
-          if [ "$w_elapsed" -ge "$SETTLE_SECS" ]; then
+          # Compute combined transport subtree fingerprint from both families.
+          local _w_fp_v4 _w_fp_v6 _new_wifi_fp
+          _w_fp_v4="$(afwall_transport_fingerprint_from_snapshot "$v4_snap" "$AFWALL_CHAIN_WIFI")"
+          _w_fp_v6="$(afwall_transport_fingerprint_from_snapshot "$v6_snap" "$AFWALL_CHAIN_WIFI")"
+          _new_wifi_fp="${_w_fp_v4}:${_w_fp_v6}"
+
+          if [ -z "$wifi_last_fp" ]; then
+            wifi_last_fp="$_new_wifi_fp"
+            wifi_fp_stable_since="$now_ts"
+            log "service: wifi subtree first seen fp=$_new_wifi_fp reachable=1"
+          elif [ "$_new_wifi_fp" != "$wifi_last_fp" ]; then
+            log "service: wifi subtree drift old=$wifi_last_fp new=$_new_wifi_fp reset"
+            wifi_last_fp="$_new_wifi_fp"
+            wifi_fp_stable_since="$now_ts"
+          fi
+
+          local _wifi_stable=0
+          [ "$now_ts" != "0" ] && [ "$wifi_fp_stable_since" != "0" ] && \
+            _wifi_stable=$((now_ts - wifi_fp_stable_since))
+          local _wifi_settle="$SETTLE_SECS"
+          [ "$_boot_complete_now" = "1" ] && _wifi_settle="$SETTLE_SECS_POST_BOOT"
+          if [ "$_wifi_stable" -ge "$_wifi_settle" ]; then
             wifi_done=1
-            log "service: wifi transport: ${AFWALL_CHAIN_WIFI} chain stable (sig=${w_sig} elapsed=${w_elapsed}s) — Wi-Fi ready"
+            log "service: wifi transport: subtree stable=${_wifi_stable}s fp=$wifi_last_fp — Wi-Fi ready"
             lowlevel_restore_wifi_if_allowed
           fi
         fi
       else
-        # Transport chain not (yet) present.
-        # If enough time has passed since main chain was first confirmed and
-        # we have never seen the transport chain, fall back to main-chain-only
-        # readiness (AFWall may not be using transport-specific chains).
-        if [ "$wifi_chain_seen" = "0" ] && \
-           [ "$now_ts" != "0" ] && [ "$_afwall_confirmed_ts" != "0" ]; then
-          local w_wait
-          w_wait=$((now_ts - _afwall_confirmed_ts))
-          if [ "$w_wait" -ge "$TRANSPORT_WAIT_SECS" ]; then
+        # No wifi prefix in either snapshot — track absence stability.
+        # Reset fingerprint state since there is nothing to track.
+        wifi_last_fp=""; wifi_fp_stable_since=0
+        if [ "$wifi_absent_since" = "0" ] && [ "$now_ts" != "0" ]; then
+          wifi_absent_since="$now_ts"
+          debug_log "service: wifi: no ${AFWALL_CHAIN_WIFI}-prefix subtree seen in snapshot"
+        fi
+        if [ "$wifi_absent_since" != "0" ] && [ "$now_ts" != "0" ]; then
+          local _w_absent_elapsed _w_absent_threshold
+          _w_absent_elapsed=$((now_ts - wifi_absent_since))
+          _w_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS"
+          [ "$_boot_complete_now" = "1" ] && _w_absent_threshold="$TRANSPORT_WAIT_SECS_POST_BOOT"
+          if [ "$_w_absent_elapsed" -ge "$_w_absent_threshold" ]; then
             wifi_done=1
-            log "service: wifi transport: no ${AFWALL_CHAIN_WIFI} chain after ${w_wait}s; accepting main chain readiness"
+            log "service: wifi transport accepted via absence-stable fallback after ${_w_absent_elapsed}s (no wifi-prefixed subtree detected in snapshot)"
             lowlevel_restore_wifi_if_allowed
           fi
         fi
       fi
     fi
 
-    # ── Mobile data transport ─────────────────────────────────────────────────
+    # ── Mobile data transport ───────────────────────────────────────────────
     if [ "$mobile_done" = "0" ]; then
-      local m_sig_v4 m_sig_v6 m_sig
-      if afwall_mobile_chain_present_v4 || afwall_mobile_chain_present_v6; then
-        mobile_chain_seen=1
-        m_sig_v4="$(afwall_mobile_signature_v4 2>/dev/null)" || m_sig_v4="na"
-        m_sig_v6="$(afwall_mobile_signature_v6 2>/dev/null)" || m_sig_v6="na"
-        m_sig="${m_sig_v4}:${m_sig_v6}"
-        if [ "$mobile_check_ts" = "0" ]; then
-          mobile_check_ts="$now_ts"
-          mobile_sig="$m_sig"
-          log "service: mobile transport: ${AFWALL_CHAIN_MOBILE} chain first seen (sig=${m_sig})"
-        elif [ "$m_sig" != "$mobile_sig" ]; then
-          log "service: mobile transport: sig changed ($mobile_sig -> $m_sig) — reset"
-          mobile_check_ts="$now_ts"
-          mobile_sig="$m_sig"
+      local _mobile_in_snap=0
+      afwall_prefix_present_from_snapshot "$v4_snap" "$AFWALL_CHAIN_MOBILE" && _mobile_in_snap=1
+      afwall_prefix_present_from_snapshot "$v6_snap" "$AFWALL_CHAIN_MOBILE" && _mobile_in_snap=1
+
+      if [ "$_mobile_in_snap" = "1" ]; then
+        mobile_absent_since=0
+
+        local _mobile_reachable=0
+        afwall_prefix_reachable_from_snapshot "$v4_snap" "$AFWALL_CHAIN_MOBILE" && _mobile_reachable=1
+        afwall_prefix_reachable_from_snapshot "$v6_snap" "$AFWALL_CHAIN_MOBILE" && _mobile_reachable=1
+
+        if [ "$_mobile_reachable" = "0" ]; then
+          debug_log "service: mobile subtree exists but is unreachable from AFWall graph — not accepting"
         else
-          local m_elapsed
-          m_elapsed=$((now_ts - mobile_check_ts))
-          if [ "$m_elapsed" -ge "$SETTLE_SECS" ]; then
+          local _m_fp_v4 _m_fp_v6 _new_mobile_fp
+          _m_fp_v4="$(afwall_transport_fingerprint_from_snapshot "$v4_snap" "$AFWALL_CHAIN_MOBILE")"
+          _m_fp_v6="$(afwall_transport_fingerprint_from_snapshot "$v6_snap" "$AFWALL_CHAIN_MOBILE")"
+          _new_mobile_fp="${_m_fp_v4}:${_m_fp_v6}"
+
+          if [ -z "$mobile_last_fp" ]; then
+            mobile_last_fp="$_new_mobile_fp"
+            mobile_fp_stable_since="$now_ts"
+            log "service: mobile subtree first seen fp=$_new_mobile_fp reachable=1"
+          elif [ "$_new_mobile_fp" != "$mobile_last_fp" ]; then
+            log "service: mobile subtree drift old=$mobile_last_fp new=$_new_mobile_fp reset"
+            mobile_last_fp="$_new_mobile_fp"
+            mobile_fp_stable_since="$now_ts"
+          fi
+
+          local _mobile_stable=0
+          [ "$now_ts" != "0" ] && [ "$mobile_fp_stable_since" != "0" ] && \
+            _mobile_stable=$((now_ts - mobile_fp_stable_since))
+          local _mobile_settle="$SETTLE_SECS"
+          [ "$_boot_complete_now" = "1" ] && _mobile_settle="$SETTLE_SECS_POST_BOOT"
+          if [ "$_mobile_stable" -ge "$_mobile_settle" ]; then
             mobile_done=1
-            log "service: mobile transport: ${AFWALL_CHAIN_MOBILE} chain stable (sig=${m_sig} elapsed=${m_elapsed}s) — mobile ready"
+            log "service: mobile transport: subtree stable=${_mobile_stable}s fp=$mobile_last_fp — mobile ready"
             lowlevel_restore_mobile_data_if_allowed
           fi
         fi
       else
-        if [ "$mobile_chain_seen" = "0" ] && \
-           [ "$now_ts" != "0" ] && [ "$_afwall_confirmed_ts" != "0" ]; then
-          local m_wait
-          m_wait=$((now_ts - _afwall_confirmed_ts))
-          if [ "$m_wait" -ge "$TRANSPORT_WAIT_SECS" ]; then
+        mobile_last_fp=""; mobile_fp_stable_since=0
+        if [ "$mobile_absent_since" = "0" ] && [ "$now_ts" != "0" ]; then
+          mobile_absent_since="$now_ts"
+          debug_log "service: mobile: no ${AFWALL_CHAIN_MOBILE}-prefix subtree seen in snapshot"
+        fi
+        if [ "$mobile_absent_since" != "0" ] && [ "$now_ts" != "0" ]; then
+          local _m_absent_elapsed _m_absent_threshold
+          _m_absent_elapsed=$((now_ts - mobile_absent_since))
+          _m_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS"
+          [ "$_boot_complete_now" = "1" ] && _m_absent_threshold="$TRANSPORT_WAIT_SECS_POST_BOOT"
+          if [ "$_m_absent_elapsed" -ge "$_m_absent_threshold" ]; then
             mobile_done=1
-            log "service: mobile transport: no ${AFWALL_CHAIN_MOBILE} chain after ${m_wait}s; accepting main chain readiness"
+            log "service: mobile transport accepted via absence-stable fallback after ${_m_absent_elapsed}s (no mobile-prefixed subtree detected in snapshot)"
             lowlevel_restore_mobile_data_if_allowed
           fi
         fi
       fi
     fi
+
   }
 
   # ── Main polling loop ───────────────────────────────────────────────────────
   while :; do
     NOW="$(date +%s 2>/dev/null)" || NOW=0
+
+    # Cache sys.boot_completed result once per iteration to avoid repeated
+    # getprop calls across all the boot-completion acceleration checks below.
+    _boot_complete_now=0
+    if [ "$BOOT_COMPLETE_ACCELERATE" = "1" ] && sys_boot_completed; then
+      _boot_complete_now=1
+    fi
+
+    # ── Capture coherent per-poll filter-table snapshots ────────────────────
+    # One consistent read of the filter table per family per iteration.
+    # All presence / fingerprint / reachability checks below use these
+    # variables — none of them call iptables independently.
+    v4_snap=""; v6_snap=""
+    if [ "$v4_blocked" = "1" ] && [ "$v4_done" = "0" ]; then
+      v4_snap="$(capture_filter_snapshot_v4 2>/dev/null)" || v4_snap=""
+    fi
+    if [ "$v6_blocked" = "1" ] && [ "$v6_done" = "0" ]; then
+      v6_snap="$(capture_filter_snapshot_v6 2>/dev/null)" || v6_snap=""
+    fi
+    # Transport checks also need snapshots even after family is confirmed.
+    if [ "$wifi_done" = "0" ] || [ "$mobile_done" = "0" ]; then
+      [ -z "$v4_snap" ] && v4_snap="$(capture_filter_snapshot_v4 2>/dev/null)"
+      [ -z "$v6_snap" ] && v6_snap="$(capture_filter_snapshot_v6 2>/dev/null)"
+    fi
 
     # ── Radio reassertion ───────────────────────────────────────────────────
     # Periodically re-assert Wi-Fi and mobile data off while blackout is active.
@@ -586,164 +631,184 @@
     fi
 
     # ── Boot-completion diagnostic ──────────────────────────────────────────
-    if [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ]; then
-      debug_log "service: sys.boot_completed=1 v4_done=$v4_done v6_done=$v6_done wifi_done=$wifi_done mobile_done=$mobile_done"
+    if [ "$_boot_complete_now" = "1" ]; then
+      debug_log "service: sys.boot_completed=1 boot_accel=${BOOT_COMPLETE_ACCELERATE} v4_done=$v4_done v6_done=$v6_done wifi_done=$wifi_done mobile_done=$mobile_done"
     fi
 
-    # ── IPv4 family handoff ────────────────────────────────────────────────
+    # ── IPv4 family handoff (composite readiness, non-blocking) ───────────
     if [ "$v4_blocked" = "1" ] && [ "$v4_done" = "0" ]; then
 
-      if afwall_takeover_present_v4; then
-        new_sig="$(afwall_takeover_signature_v4)"
+      if afwall_graph_present_from_snapshot "$v4_snap" && \
+         afwall_graph_nontrivial_from_snapshot "$v4_snap"; then
 
-        if [ "$v4_takeover_ts" = "0" ]; then
-          v4_takeover_ts="$NOW"
-          v4_sig="$new_sig"
-          v4_fallback_ts="$NOW"
-          log "service: v4 takeover first detected (sig=$new_sig)"
+        # Compute full AFWall graph fingerprint from this poll's snapshot.
+        _new_v4_fp="$(afwall_graph_fingerprint_from_snapshot "$v4_snap")"
+
+        if [ -z "$v4_last_fp" ]; then
+          # First time a non-trivial AFWall graph is observed for v4.
+          v4_last_fp="$_new_v4_fp"
+          v4_fp_stable_since="$NOW"
+          v4_graph_seen_ts="$NOW"
+          log "service: v4 graph first seen fp=$_new_v4_fp"
           log_transition_snapshot "v4" "takeover_first"
+        elif [ "$_new_v4_fp" != "$v4_last_fp" ]; then
+          # Fingerprint drifted — AFWall is still populating rules.
+          log "service: v4 graph drift old=$v4_last_fp new=$_new_v4_fp reset"
+          v4_last_fp="$_new_v4_fp"
+          v4_fp_stable_since="$NOW"
         fi
 
-        if [ "$new_sig" != "$v4_sig" ]; then
-          log "service: v4 sig changed ($v4_sig -> $new_sig) — resetting stability windows"
-          v4_sig="$new_sig"
-          v4_takeover_ts="$NOW"
-          v4_alive_ts=0
-          v4_fallback_ts="$NOW"
-        fi
+        # Compute how long the fingerprint has been continuously stable.
+        _v4_stable=0
+        [ "$NOW" != "0" ] && [ "$v4_fp_stable_since" != "0" ] && \
+          _v4_stable=$((NOW - v4_fp_stable_since))
 
+        # Determine corroborating evidence.
+        _v4_corroborator="none"
         if [ -n "$AFW_PKG" ] && afwall_process_present "$AFW_PKG"; then
-          if [ "$v4_alive_ts" = "0" ]; then
-            v4_alive_ts="$NOW"
-            debug_log "service: v4 liveness window started"
-          fi
+          _v4_corroborator="process"
+        elif afwall_secondary_evidence_present "$AFW_PKG"; then
+          _v4_corroborator="file_mtime"
+        fi
+        [ "$_boot_complete_now" = "1" ] && \
+          afwall_rules_dense_v4 "$AFWALL_RULE_DENSITY_MIN" && \
+          [ "$_v4_corroborator" = "none" ] && _v4_corroborator="boot_complete_dense"
 
-          # Preferred path: liveness confirmed for >= LIVENESS_SECS
-          if [ "$NOW" != "0" ] && [ "$v4_alive_ts" != "0" ]; then
-            alive_elapsed=$((NOW - v4_alive_ts))
-            if [ "$alive_elapsed" -ge "$LIVENESS_SECS" ]; then
-              log "service: v4 preferred-path: liveness ${alive_elapsed}s + takeover stable; settling ${SETTLE_SECS}s"
-              if _settle_confirm_v4 "preferred-path" "$v4_sig"; then
-                v4_done=1; v4_path="preferred"
-                log "service: v4 takeover confirmed (preferred path; liveness=${alive_elapsed}s sig=$v4_sig)"
-              else
-                v4_takeover_ts=0; v4_sig=""; v4_alive_ts=0; v4_fallback_ts=0
-              fi
-            fi
+        # Select effective stability thresholds.
+        _v4_fast_secs="$FAST_STABLE_SECS"
+        _v4_slow_secs="$SLOW_STABLE_SECS"
+        if [ "$_boot_complete_now" = "1" ]; then
+          _v4_fast_secs="$LIVENESS_SECS_POST_BOOT"
+          _v4_slow_secs="$FALLBACK_SECS_POST_BOOT"
+        fi
+
+        # ── Fast path: corroboration + shorter stable window ──────────────
+        if [ "$_v4_corroborator" != "none" ] && \
+           [ "$_v4_stable" -ge "$_v4_fast_secs" ]; then
+          v4_done=1; v4_path="fast"
+          _v4_seen_elapsed=0
+          [ "$NOW" != "0" ] && [ "$v4_graph_seen_ts" != "0" ] && \
+            _v4_seen_elapsed=$((NOW - v4_graph_seen_ts))
+          log "service: v4 fast-path confirmed stable=${_v4_stable}s seen_elapsed=${_v4_seen_elapsed}s corroboration=${_v4_corroborator} fp=$v4_last_fp"
+          log_transition_snapshot "v4" "pre_remove"
+
+        # ── Conservative path: longer stable window, no corroboration needed ──
+        elif [ "$_v4_stable" -ge "$_v4_slow_secs" ]; then
+          _v4_seen_elapsed=0
+          [ "$NOW" != "0" ] && [ "$v4_graph_seen_ts" != "0" ] && \
+            _v4_seen_elapsed=$((NOW - v4_graph_seen_ts))
+          if [ "$_v4_corroborator" = "none" ]; then
+            log "service: v4 conservative-path confirmed stable=${_v4_stable}s seen_elapsed=${_v4_seen_elapsed}s fp=$v4_last_fp (corroboration absent)"
+          else
+            log "service: v4 conservative-path confirmed stable=${_v4_stable}s seen_elapsed=${_v4_seen_elapsed}s corroboration=${_v4_corroborator} fp=$v4_last_fp"
           fi
+          v4_done=1; v4_path="conservative"
+          log_transition_snapshot "v4" "pre_remove"
 
         else
-          if [ "$v4_alive_ts" != "0" ]; then
-            log "service: v4 AFWall liveness lost — resetting liveness window"
-          fi
-          v4_alive_ts=0
-
-          # Fallback path: stability window without liveness
-          if [ "$v4_fallback_ts" != "0" ] && [ "$NOW" != "0" ]; then
-            fallback_elapsed=$((NOW - v4_fallback_ts))
-            if [ "$fallback_elapsed" -ge "$FALLBACK_SECS" ]; then
-              if afwall_secondary_evidence_present "$AFW_PKG"; then
-                log "service: v4 fallback-path: stable ${fallback_elapsed}s + secondary-evidence; settling ${SETTLE_SECS}s"
-              else
-                log "service: v4 fallback-path: stable ${fallback_elapsed}s; settling ${SETTLE_SECS}s"
-              fi
-              if _settle_confirm_v4 "fallback-path" "$v4_sig"; then
-                v4_done=1; v4_path="fallback"
-                log "service: v4 takeover confirmed (fallback path; stable=${fallback_elapsed}s sig=$v4_sig)"
-              else
-                v4_takeover_ts=0; v4_sig=""; v4_alive_ts=0; v4_fallback_ts=0
-              fi
-            fi
+          # Not yet stable enough — log diagnostic and stay blocked.
+          if [ "$_v4_corroborator" = "none" ]; then
+            debug_log "service: v4 graph stable=${_v4_stable}s (need fast=${_v4_fast_secs}s/slow=${_v4_slow_secs}s) corroboration=none — conservative path active"
+          else
+            debug_log "service: v4 graph stable=${_v4_stable}s (need ${_v4_fast_secs}s) corroborator=${_v4_corroborator}"
           fi
         fi
 
       else
-        if [ "$v4_takeover_ts" != "0" ]; then
-          log "service: v4 takeover was present but is now absent — reset"
+        # Graph absent or trivial — reset fingerprint state.
+        if [ -n "$v4_last_fp" ]; then
+          log "service: v4 AFWall graph gone/trivial — resetting stability"
           log_transition_snapshot "v4" "takeover_lost"
         fi
-        v4_takeover_ts=0; v4_sig=""; v4_alive_ts=0; v4_fallback_ts=0
+        v4_last_fp=""; v4_fp_stable_since=0
       fi
 
     fi # end v4 family handoff
 
-    # ── IPv6 family handoff ────────────────────────────────────────────────
+    # ── IPv6 family handoff (composite readiness, non-blocking) ───────────
     if [ "$v6_blocked" = "1" ] && [ "$v6_done" = "0" ]; then
 
-      if afwall_takeover_present_v6; then
-        new_sig="$(afwall_takeover_signature_v6)"
+      if afwall_graph_present_from_snapshot "$v6_snap" && \
+         afwall_graph_nontrivial_from_snapshot "$v6_snap"; then
 
-        if [ "$v6_takeover_ts" = "0" ]; then
-          v6_takeover_ts="$NOW"
-          v6_sig="$new_sig"
-          v6_fallback_ts="$NOW"
-          log "service: v6 takeover first detected (sig=$new_sig)"
+        _new_v6_fp="$(afwall_graph_fingerprint_from_snapshot "$v6_snap")"
+
+        if [ -z "$v6_last_fp" ]; then
+          v6_last_fp="$_new_v6_fp"
+          v6_fp_stable_since="$NOW"
+          v6_graph_seen_ts="$NOW"
+          log "service: v6 graph first seen fp=$_new_v6_fp"
           log_transition_snapshot "v6" "takeover_first"
+        elif [ "$_new_v6_fp" != "$v6_last_fp" ]; then
+          log "service: v6 graph drift old=$v6_last_fp new=$_new_v6_fp reset"
+          v6_last_fp="$_new_v6_fp"
+          v6_fp_stable_since="$NOW"
         fi
 
-        if [ "$new_sig" != "$v6_sig" ]; then
-          log "service: v6 sig changed ($v6_sig -> $new_sig) — resetting stability windows"
-          v6_sig="$new_sig"
-          v6_takeover_ts="$NOW"
-          v6_alive_ts=0
-          v6_fallback_ts="$NOW"
-        fi
+        _v6_stable=0
+        [ "$NOW" != "0" ] && [ "$v6_fp_stable_since" != "0" ] && \
+          _v6_stable=$((NOW - v6_fp_stable_since))
 
+        _v6_corroborator="none"
         if [ -n "$AFW_PKG" ] && afwall_process_present "$AFW_PKG"; then
-          if [ "$v6_alive_ts" = "0" ]; then
-            v6_alive_ts="$NOW"
-            debug_log "service: v6 liveness window started"
-          fi
+          _v6_corroborator="process"
+        elif afwall_secondary_evidence_present "$AFW_PKG"; then
+          _v6_corroborator="file_mtime"
+        fi
+        [ "$_boot_complete_now" = "1" ] && \
+          afwall_rules_dense_v6 "$AFWALL_RULE_DENSITY_MIN" && \
+          [ "$_v6_corroborator" = "none" ] && _v6_corroborator="boot_complete_dense"
 
-          if [ "$NOW" != "0" ] && [ "$v6_alive_ts" != "0" ]; then
-            alive_elapsed=$((NOW - v6_alive_ts))
-            if [ "$alive_elapsed" -ge "$LIVENESS_SECS" ]; then
-              log "service: v6 preferred-path: liveness ${alive_elapsed}s + takeover stable; settling ${SETTLE_SECS}s"
-              if _settle_confirm_v6 "preferred-path" "$v6_sig"; then
-                v6_done=1; v6_path="preferred"
-                log "service: v6 takeover confirmed (preferred path; liveness=${alive_elapsed}s sig=$v6_sig)"
-              else
-                v6_takeover_ts=0; v6_sig=""; v6_alive_ts=0; v6_fallback_ts=0
-              fi
-            fi
+        _v6_fast_secs="$FAST_STABLE_SECS"
+        _v6_slow_secs="$SLOW_STABLE_SECS"
+        if [ "$_boot_complete_now" = "1" ]; then
+          _v6_fast_secs="$LIVENESS_SECS_POST_BOOT"
+          _v6_slow_secs="$FALLBACK_SECS_POST_BOOT"
+        fi
+
+        if [ "$_v6_corroborator" != "none" ] && \
+           [ "$_v6_stable" -ge "$_v6_fast_secs" ]; then
+          v6_done=1; v6_path="fast"
+          _v6_seen_elapsed=0
+          [ "$NOW" != "0" ] && [ "$v6_graph_seen_ts" != "0" ] && \
+            _v6_seen_elapsed=$((NOW - v6_graph_seen_ts))
+          log "service: v6 fast-path confirmed stable=${_v6_stable}s seen_elapsed=${_v6_seen_elapsed}s corroboration=${_v6_corroborator} fp=$v6_last_fp"
+          log_transition_snapshot "v6" "pre_remove"
+
+        # ── Conservative path: longer stable window, no corroboration needed ──
+        elif [ "$_v6_stable" -ge "$_v6_slow_secs" ]; then
+          _v6_seen_elapsed=0
+          [ "$NOW" != "0" ] && [ "$v6_graph_seen_ts" != "0" ] && \
+            _v6_seen_elapsed=$((NOW - v6_graph_seen_ts))
+          if [ "$_v6_corroborator" = "none" ]; then
+            log "service: v6 conservative-path confirmed stable=${_v6_stable}s seen_elapsed=${_v6_seen_elapsed}s fp=$v6_last_fp (corroboration absent)"
+          else
+            log "service: v6 conservative-path confirmed stable=${_v6_stable}s seen_elapsed=${_v6_seen_elapsed}s corroboration=${_v6_corroborator} fp=$v6_last_fp"
           fi
+          v6_done=1; v6_path="conservative"
+          log_transition_snapshot "v6" "pre_remove"
 
         else
-          if [ "$v6_alive_ts" != "0" ]; then
-            log "service: v6 AFWall liveness lost — resetting liveness window"
-          fi
-          v6_alive_ts=0
-
-          if [ "$v6_fallback_ts" != "0" ] && [ "$NOW" != "0" ]; then
-            fallback_elapsed=$((NOW - v6_fallback_ts))
-            if [ "$fallback_elapsed" -ge "$FALLBACK_SECS" ]; then
-              if afwall_secondary_evidence_present "$AFW_PKG"; then
-                log "service: v6 fallback-path: stable ${fallback_elapsed}s + secondary-evidence; settling ${SETTLE_SECS}s"
-              else
-                log "service: v6 fallback-path: stable ${fallback_elapsed}s; settling ${SETTLE_SECS}s"
-              fi
-              if _settle_confirm_v6 "fallback-path" "$v6_sig"; then
-                v6_done=1; v6_path="fallback"
-                log "service: v6 takeover confirmed (fallback path; stable=${fallback_elapsed}s sig=$v6_sig)"
-              else
-                v6_takeover_ts=0; v6_sig=""; v6_alive_ts=0; v6_fallback_ts=0
-              fi
-            fi
+          if [ "$_v6_corroborator" = "none" ]; then
+            debug_log "service: v6 graph stable=${_v6_stable}s (need fast=${_v6_fast_secs}s/slow=${_v6_slow_secs}s) corroboration=none — conservative path active"
+          else
+            debug_log "service: v6 graph stable=${_v6_stable}s (need ${_v6_fast_secs}s) corroborator=${_v6_corroborator}"
           fi
         fi
 
       else
-        if [ "$v6_takeover_ts" != "0" ]; then
-          log "service: v6 takeover was present but is now absent — reset"
+        if [ -n "$v6_last_fp" ]; then
+          log "service: v6 AFWall graph gone/trivial — resetting stability"
           log_transition_snapshot "v6" "takeover_lost"
         fi
-        v6_takeover_ts=0; v6_sig=""; v6_alive_ts=0; v6_fallback_ts=0
+        v6_last_fp=""; v6_fp_stable_since=0
       fi
 
     fi # end v6 family handoff
 
     # ── Transport readiness check ──────────────────────────────────────────
     # Only runs after at least one family's AFWall takeover is confirmed.
+    # Uses the per-poll coherent snapshots (v4_snap, v6_snap).
     if [ "$v4_done" = "1" ] || [ "$v6_done" = "1" ]; then
       if [ "$wifi_done" = "0" ] || [ "$mobile_done" = "0" ]; then
         _check_transport_readiness
@@ -818,7 +883,7 @@
       exit 0
     fi
 
-    sleep 2
+    sleep "$POLL_INTERVAL_SECS"
   done
 ) &
 exit 0

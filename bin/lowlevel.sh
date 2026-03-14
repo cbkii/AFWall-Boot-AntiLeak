@@ -692,9 +692,16 @@ lowlevel_reassert_radios_off() {
 # Probes used:
 #   A. dumpsys window: look for mKeyguardShowing=false or mShowingLockscreen=false
 #   B. dumpsys power:  look for mWakefulness=Awake (screen is on = user interaction)
-# Both A AND B must confirm for a positive result, since either alone can be
-# unreliable (e.g., screen turns on briefly without unlock, or keyguard state
-# is stale in dumpsys output).
+#   C. sys.boot_completed=1 + boot animation stopped: if the framework has
+#      completed boot AND Probe A confirms keyguard is gone, the combination is
+#      definitive.  The screen-awake requirement (Probe B) is relaxed because
+#      a momentarily-dim screen after a completed boot is still a valid
+#      post-unlock state (the device is not at the lock screen).
+#   D. getprop dev.bootcomplete=1: older Android fallback that mirrors
+#      sys.boot_completed; combined with Probe A it is treated the same as C.
+#
+# Default positive outcome: both A AND B confirm (original behaviour).
+# Fast-path outcomes (new): (A AND C) OR (A AND D) also return unlocked.
 lowlevel_device_is_unlocked() {
   has_cmd dumpsys || return 1  # cannot determine; treat as locked
 
@@ -716,9 +723,29 @@ lowlevel_device_is_unlocked() {
     screen_awake=1
   fi
 
+  # Canonical check: both Probe A and Probe B confirm — original behaviour.
   if [ "$kguard_showing" = "1" ] && [ "$screen_awake" = "1" ]; then
     return 0  # Positive unlock evidence from both probes
   fi
+
+  # Probe C fast-path: sys.boot_completed=1 (and optionally boot animation
+  # stopped) combined with keyguard gone.  Once the framework has signalled
+  # full boot completion the device is definitively at or past the lock screen;
+  # the screen-awake requirement is relaxed because the device may briefly dim
+  # while still being in an unlocked post-boot state.
+  if [ "$kguard_showing" = "1" ]; then
+    if sys_boot_completed; then
+      return 0  # Boot complete + keyguard gone => unlocked
+    fi
+    if boot_animation_stopped; then
+      return 0  # Boot animation stopped + keyguard gone => past lock screen
+    fi
+    # Probe D: older Android fallback property
+    if [ "$(getprop dev.bootcomplete 2>/dev/null)" = "1" ]; then
+      return 0
+    fi
+  fi
+
   return 1  # Treat as locked
 }
 

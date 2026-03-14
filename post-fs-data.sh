@@ -22,6 +22,12 @@ if should_install_block; then
   mark_blackout_active
   log "post-fs-data: blackout state persisted (radio_off_pending=1)"
 
+  # Write a dedicated current-boot timestamp marker used by
+  # afwall_secondary_evidence_present() to identify AFWall file activity
+  # that occurred after this boot's block installation.
+  mark_boot_marker
+  log "post-fs-data: boot marker written"
+
   # Early lower-layer phase: quiesce any already-present interfaces.
   # Framework radio commands are intentionally deferred to service.sh.
   lowlevel_prepare_environment_early

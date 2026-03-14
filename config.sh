@@ -254,6 +254,106 @@ UNLOCK_POLL_INTERVAL=5
 # FORWARD/INPUT chain rules it manages (tether, LAN, VPN, roaming controls).
 SETTLE_SECS=5
 
+# ── Poll interval ─────────────────────────────────────────────────────────────
+# How often (in seconds) the main handoff loop iterates while waiting for AFWall
+# takeover.  1 second allows the module to react to AFWall readiness within one
+# polling cycle rather than waiting up to 2 seconds.  The per-poll cost is one
+# iptables-save (or iptables -S) call per blocked family.
+# Set to 2 to restore the pre-v2.5 behaviour.
+#
+POLL_INTERVAL_SECS=1
+
+# ── Fast-path stable window ───────────────────────────────────────────────────
+# The AFWall full graph fingerprint must remain identical for at least this many
+# seconds before the fast-path accepts it.  The fast path fires when corroborating
+# evidence is present (AFWall process visible OR current-boot file evidence found).
+# Post-boot (sys.boot_completed=1) LIVENESS_SECS_POST_BOOT is used instead.
+#
+FAST_STABLE_SECS=2
+
+# ── Conservative-path stable window ──────────────────────────────────────────
+# The AFWall full graph fingerprint must remain identical for at least this many
+# seconds before the conservative path accepts it.  The conservative path fires
+# when corroborating evidence is absent.  No extra settle sleep is added.
+# Post-boot (sys.boot_completed=1) FALLBACK_SECS_POST_BOOT is used instead.
+#
+SLOW_STABLE_SECS=6
+
+# ── Transport-absence stable window ──────────────────────────────────────────
+# Once the main AFWall family graph has been confirmed stable, if no transport-
+# specific chains or references (afwall-wifi* / afwall-3g*) have been seen in
+# any snapshot for this many consecutive seconds, the module accepts
+# main-chain-only readiness for that transport.
+# This replaces the old blunt TRANSPORT_WAIT_SECS=30 as the primary path.
+# Post-boot (sys.boot_completed=1) TRANSPORT_WAIT_SECS_POST_BOOT is used.
+#
+TRANSPORT_ABSENCE_STABLE_SECS=3
+
+# ── Boot-completion acceleration ──────────────────────────────────────────────
+# When set to 1 (default), the module uses sys.boot_completed=1 and related
+# boot-completion signals to shorten the detection windows for liveness,
+# fallback stability, rule-graph settle, and transport-chain wait.  This
+# allows the safest and soonest possible handoff to AFWall.
+#
+# Shorter windows are safe post-boot because sys.boot_completed=1 indicates
+# the Android framework and all system services are fully initialised;
+# AFWall's FirewallService will have already completed its rule-application
+# cycle and will not continue adding rules after this point.
+#
+# Set to 0 to disable all boot-completion-based acceleration and keep every
+# detection window at its full configured value (legacy behaviour).
+#
+# Default: 1 (enabled)
+#
+BOOT_COMPLETE_ACCELERATE=1
+
+# ── AFWall rule-density threshold for the boot-complete fast path ─────────────
+# The boot-complete fast path (see BOOT_COMPLETE_ACCELERATE) fires when:
+#   sys.boot_completed=1 AND afwall chain rule count >= AFWALL_RULE_DENSITY_MIN
+# This guards against accepting a chain that was only partially populated.
+# Raise this value if your AFWall configuration applies many rules; lower it
+# (minimum 1) if you have a minimal configuration with very few app rules.
+#
+# Default: 3
+#
+AFWALL_RULE_DENSITY_MIN=3
+
+# ── Post-boot-complete timing parameters ──────────────────────────────────────
+# These shorter windows apply only when BOOT_COMPLETE_ACCELERATE=1 AND
+# sys.boot_completed=1 (or boot animation stopped) is detected.  Each value
+# overrides its base counterpart for that condition only; base values are used
+# in all other cases (including when boot has not yet completed).
+#
+# LIVENESS_SECS_POST_BOOT
+#   Liveness / stability window when the AFWall process is visible AND boot is
+#   complete, OR when the boot-complete fast path (dense chain) fires.
+#   Replaces LIVENESS_SECS (default 6 s) post-boot.
+#   Default: 2 s
+#
+# FALLBACK_SECS_POST_BOOT
+#   Stability-only fallback window when no AFWall process is detected but boot
+#   is complete.  Replaces FALLBACK_SECS (default 12 s) post-boot.
+#   Default: 4 s
+#
+# SETTLE_SECS_POST_BOOT
+#   Post-stable settle pause before removing the module block, used when boot
+#   is complete.  Replaces SETTLE_SECS (default 5 s) post-boot.  Safe to
+#   reduce because AFWall's rule population is finished at boot-complete.
+#   Default: 1 s
+#
+# TRANSPORT_WAIT_SECS_POST_BOOT
+#   Maximum wait for transport-specific AFWall chains (afwall-wifi / afwall-3g)
+#   after the main afwall chain is confirmed, when boot is complete.  Replaces
+#   TRANSPORT_WAIT_SECS (default 30 s) post-boot.  If AFWall uses transport
+#   chains they will be present by boot-complete; if not, fall back after this
+#   shorter window.
+#   Default: 5 s
+#
+LIVENESS_SECS_POST_BOOT=2
+FALLBACK_SECS_POST_BOOT=4
+SETTLE_SECS_POST_BOOT=1
+TRANSPORT_WAIT_SECS_POST_BOOT=5
+
 # ── Debug logging ─────────────────────────────────────────────────────────────
 # Set to 1 to enable verbose [DEBUG] entries in the boot log.
 # Log path: /data/adb/AFWall-Boot-AntiLeak/logs/boot.log

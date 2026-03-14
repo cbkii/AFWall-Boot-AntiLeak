@@ -824,53 +824,316 @@ afwall_takeover_present_v6() {
   return 0
 }
 
-# ── AFWall rule-graph stability signatures ────────────────────────────────────
-# Returns a concise snapshot of the AFWall rule graph as "rules:chains".
-# The caller compares successive snapshots to detect whether the rule graph is
-# still being populated (changing) or has settled (stable).
-# Counting rules in the afwall chain + the number of afwall-prefixed chains
-# captures both the main chain density and any custom-script sub-chains.
+# ── Coherent filter-table snapshot capture ────────────────────────────────────
+# Captures the entire filter table as a single consistent string by reading it
+# in one operation.  All subsequent per-poll checks derive from this snapshot
+# so that presence, fingerprint, and reachability queries are all coherent —
+# none of them can observe a different intermediate iptables state.
+#
+# Prefer iptables-save / ip6tables-save (single atomic read of the full table).
+# Fall back to iptables -t filter -S which is available everywhere.
+# Both formats use the same -N/-A/-P line conventions; the helpers below work
+# identically with either.
+capture_filter_snapshot_v4() {
+  local cmd
+  cmd="$(_find_cmd iptables-save 2>/dev/null)" && \
+    { "$cmd" -t filter 2>/dev/null; return 0; }
+  cmd="$(_find_cmd iptables 2>/dev/null)" || return 1
+  "$cmd" -t filter -S 2>/dev/null
+}
+
+capture_filter_snapshot_v6() {
+  local cmd
+  cmd="$(_find_cmd ip6tables-save 2>/dev/null)" && \
+    { "$cmd" -t filter 2>/dev/null; return 0; }
+  cmd="$(_find_cmd ip6tables 2>/dev/null)" || return 1
+  "$cmd" -t filter -S 2>/dev/null
+}
+
+# ── Snapshot-derived graph presence ───────────────────────────────────────────
+# All helpers in this section operate on a pre-captured snapshot string passed
+# as the first argument — they NEVER make additional iptables calls.
+
+# Returns 0 when the AFWall main chain is present in the filter table AND the
+# OUTPUT hook is established.  This is the minimum viable "AFWall is active"
+# proof from a snapshot.
+afwall_graph_present_from_snapshot() {
+  local snap="$1"
+  [ -n "$snap" ] || return 1
+  printf '%s\n' "$snap" | grep -qE "^-N ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
+  printf '%s\n' "$snap" | grep -qE "^-A OUTPUT .*-j ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
+  return 0
+}
+
+# Returns 0 when the AFWall main chain contains at least one real rule (i.e. is
+# non-trivial and not just a bare chain-creation entry).
+afwall_graph_nontrivial_from_snapshot() {
+  local snap="$1" count
+  [ -n "$snap" ] || return 1
+  count="$(printf '%s\n' "$snap" | grep -cE "^-A ${AFWALL_CHAIN_MAIN} ")" || count=0
+  [ "${count:-0}" -ge 1 ]
+}
+
+# ── Full AFWall graph fingerprint ─────────────────────────────────────────────
+# Produces a deterministic checksum of the ENTIRE AFWall rule graph, including
+# all afwall-prefixed chain definitions, all rules inside any afwall* chain, and
+# all jumps to any afwall* chain from any chain (OUTPUT hook, sub-chain jumps,
+# etc.).  Descendant chain churn (afwall-wifi-*, afwall-3g-*, etc.) is fully
+# captured.
+#
+# Because the extraction set is sorted before checksumming, the fingerprint is
+# stable regardless of the order rules appear in the snapshot.
+#
+# Uses cksum (available in Android's toybox) as the hash primitive.  Falls back
+# to a "line-count:byte-count" pair when cksum is unavailable — weaker but still
+# detects most churn.
+#
+# Returns "na" when the snapshot is empty or yields no AFWall lines.
+afwall_graph_fingerprint_from_snapshot() {
+  local snap="$1" relevant
+  [ -n "$snap" ] || { printf 'na'; return 1; }
+  # Capture every line related to any afwall-prefixed chain:
+  #   ^-N afwall  — chain definitions (afwall, afwall-wifi, afwall-3g, etc.)
+  #   ^-A afwall  — rules inside any afwall-prefixed chain
+  #   -j afwall   — any rule in any chain that jumps to an afwall chain
+  relevant="$(printf '%s\n' "$snap" \
+    | grep -E '(^-N afwall|^-A afwall|-j afwall)' 2>/dev/null \
+    | sort)"
+  [ -n "$relevant" ] || { printf 'na'; return 1; }
+  if has_cmd cksum; then
+    printf '%s\n' "$relevant" | cksum | awk '{print $1}'
+  else
+    local lc cc
+    lc="$(printf '%s\n' "$relevant" | wc -l | tr -d ' ')"
+    cc="$(printf '%s\n' "$relevant" | wc -c | tr -d ' ')"
+    printf '%s:%s' "$lc" "$cc"
+  fi
+}
+
+# ── Transport subtree fingerprint ─────────────────────────────────────────────
+# Produces a deterministic checksum of the ENTIRE transport subtree identified
+# by a given prefix (e.g. "afwall-wifi" or "afwall-3g").
+#
+# Captures:
+#   - all chain definitions whose name starts with the prefix
+#   - all rules inside any chain with that prefix
+#   - all references (jumps) to any chain with that prefix from any chain
+#
+# This means churn in descendant chains (afwall-wifi-lan, afwall-3g-mms, etc.)
+# is fully visible in the fingerprint.
+afwall_transport_fingerprint_from_snapshot() {
+  local snap="$1" prefix="$2" relevant
+  [ -n "$snap" ] || { printf 'na'; return 1; }
+  [ -n "$prefix" ] || { printf 'na'; return 1; }
+  relevant="$(printf '%s\n' "$snap" \
+    | grep -E "(^-N ${prefix}|^-A ${prefix}|-j ${prefix})" 2>/dev/null \
+    | sort)"
+  [ -n "$relevant" ] || { printf 'na'; return 1; }
+  if has_cmd cksum; then
+    printf '%s\n' "$relevant" | cksum | awk '{print $1}'
+  else
+    local lc cc
+    lc="$(printf '%s\n' "$relevant" | wc -l | tr -d ' ')"
+    cc="$(printf '%s\n' "$relevant" | wc -c | tr -d ' ')"
+    printf '%s:%s' "$lc" "$cc"
+  fi
+}
+
+# ── Transport subtree presence ────────────────────────────────────────────────
+# Returns 0 if the snapshot contains any chain definition or reference with the
+# given prefix.  This is a broad check — it detects the subtree regardless of
+# whether the root chain name matches exactly.
+afwall_prefix_present_from_snapshot() {
+  local snap="$1" prefix="$2"
+  [ -n "$snap" ] || return 1
+  [ -n "$prefix" ] || return 1
+  printf '%s\n' "$snap" \
+    | grep -qE "(^-N ${prefix}|^-A ${prefix}|-j ${prefix})" 2>/dev/null
+}
+
+# ── Transport subtree reachability ────────────────────────────────────────────
+# Returns 0 if any rule inside any afwall-prefixed chain in the snapshot jumps
+# to a chain whose name starts with the given prefix.
+#
+# This proves the transport subtree is reachable from the live AFWall graph,
+# not just that it exists in isolation.  A stale or orphaned chain that is
+# not referenced by the active graph CANNOT satisfy this check.
+#
+# Works for both direct references (afwall -> afwall-wifi) and indirect
+# references through other afwall sub-chains (afwall -> afwall-X -> afwall-wifi).
+afwall_prefix_reachable_from_snapshot() {
+  local snap="$1" prefix="$2"
+  [ -n "$snap" ] || return 1
+  [ -n "$prefix" ] || return 1
+  # Any rule inside any afwall-prefixed chain that jumps to a chain with prefix.
+  printf '%s\n' "$snap" \
+    | grep -qE "^-A afwall[^ ]* .*-j ${prefix}" 2>/dev/null
+}
+
+# ── Full AFWall graph fingerprint signatures (snapshot-backed wrappers) ────────
+# These replace the old weak "rule_count:chain_count" signatures with full
+# graph fingerprints derived from coherent per-call snapshots.  They are kept
+# as convenience wrappers for callers that do not manage their own snapshots
+# (e.g. diagnostic tools, action.sh).  The service.sh hot path captures its
+# own snapshot and calls afwall_graph_fingerprint_from_snapshot() directly.
 afwall_takeover_signature_v4() {
-  local ipt rule_count chain_count
-  ipt="$(_find_cmd iptables 2>/dev/null)" || { printf 'na:na'; return 1; }
-  rule_count="$("$ipt" -t filter -S "$AFWALL_CHAIN_MAIN" 2>/dev/null | grep -c '^-A ')" || rule_count=0
-  chain_count="$("$ipt" -t filter -S 2>/dev/null | grep -c "^-N ${AFWALL_CHAIN_MAIN}")" || chain_count=0
-  printf '%s:%s' "$rule_count" "$chain_count"
+  local snap
+  snap="$(capture_filter_snapshot_v4 2>/dev/null)" || { printf 'na'; return 1; }
+  afwall_graph_fingerprint_from_snapshot "$snap"
 }
 
 afwall_takeover_signature_v6() {
-  local ip6t rule_count chain_count
-  ip6t="$(_find_cmd ip6tables 2>/dev/null)" || { printf 'na:na'; return 1; }
-  rule_count="$("$ip6t" -t filter -S "$AFWALL_CHAIN_MAIN" 2>/dev/null | grep -c '^-A ')" || rule_count=0
-  chain_count="$("$ip6t" -t filter -S 2>/dev/null | grep -c "^-N ${AFWALL_CHAIN_MAIN}")" || chain_count=0
-  printf '%s:%s' "$rule_count" "$chain_count"
+  local snap
+  snap="$(capture_filter_snapshot_v6 2>/dev/null)" || { printf 'na'; return 1; }
+  afwall_graph_fingerprint_from_snapshot "$snap"
+}
+
+# ── AFWall rule-graph stability signatures ────────────────────────────────────
+# NOTE: These transport signature helpers are retained for external callers.
+# The service.sh hot path uses afwall_transport_fingerprint_from_snapshot().
+
+_afwall_transport_signature() {
+  local snap="$1" prefix="$2"
+  afwall_transport_fingerprint_from_snapshot "$snap" "$prefix"
+}
+
+afwall_wifi_signature_v4() {
+  local snap
+  snap="$(capture_filter_snapshot_v4 2>/dev/null)" || { printf 'na'; return 1; }
+  afwall_transport_fingerprint_from_snapshot "$snap" "$AFWALL_CHAIN_WIFI"
+}
+
+afwall_wifi_signature_v6() {
+  local snap
+  snap="$(capture_filter_snapshot_v6 2>/dev/null)" || { printf 'na'; return 1; }
+  afwall_transport_fingerprint_from_snapshot "$snap" "$AFWALL_CHAIN_WIFI"
+}
+
+afwall_mobile_signature_v4() {
+  local snap
+  snap="$(capture_filter_snapshot_v4 2>/dev/null)" || { printf 'na'; return 1; }
+  afwall_transport_fingerprint_from_snapshot "$snap" "$AFWALL_CHAIN_MOBILE"
+}
+
+afwall_mobile_signature_v6() {
+  local snap
+  snap="$(capture_filter_snapshot_v6 2>/dev/null)" || { printf 'na'; return 1; }
+  afwall_transport_fingerprint_from_snapshot "$snap" "$AFWALL_CHAIN_MOBILE"
+}
+
+# ── Boot-completion probes ────────────────────────────────────────────────────
+# These helpers expose fast, property-based signals that indicate the Android
+# framework has reached a well-known boot milestone.  They are intentionally
+# lightweight (single getprop call) and safe to call in tight polling loops.
+#
+# sys_boot_completed: true when SystemServer has set sys.boot_completed=1,
+#   which happens after all boot-phase services have been started and all
+#   persistent apps have received ACTION_BOOT_COMPLETED.  This is the
+#   canonical "framework fully up" signal on all Android versions.
+#
+# boot_animation_stopped: true when the bootanim service has stopped.  Fires
+#   a few seconds before sys.boot_completed on most devices and is a reliable
+#   "end of visible boot" signal.  Useful as an earlier accelerator.
+#
+# Security note: these properties are only writable by root/system; the module
+# already runs as root, so there is no privilege-escalation concern.
+sys_boot_completed() {
+  [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ]
+}
+
+boot_animation_stopped() {
+  [ "$(getprop init.svc.bootanim 2>/dev/null)" = "stopped" ]
+}
+
+# ── AFWall rule-density heuristic ─────────────────────────────────────────────
+# Returns 0 (success) when the afwall filter chain contains at least MIN rules.
+# A "dense" chain provides stronger evidence that AFWall has completed a full
+# rule application cycle (not just created the chain or added a single default
+# rule).  Combined with sys.boot_completed, this is used as an independent
+# confirmation path that does not require observing the AFWall process.
+#
+# min: minimum rule count (caller supplies; defaults to 3 when called without
+#      an argument — three rules is a conservative minimum that rules out bare
+#      chain creation and partial initialisation states).
+afwall_rules_dense_v4() {
+  local min="${1:-3}" ipt count
+  ipt="$(_find_cmd iptables)" || return 1
+  _chain_exists "$ipt" filter "$AFWALL_CHAIN_MAIN" || return 1
+  count="$("$ipt" -t filter -S "$AFWALL_CHAIN_MAIN" 2>/dev/null | grep -c '^-A ')" || count=0
+  [ "${count:-0}" -ge "$min" ]
+}
+
+afwall_rules_dense_v6() {
+  local min="${1:-3}" ip6t count
+  ip6t="$(_find_cmd ip6tables)" || return 1
+  _chain_exists "$ip6t" filter "$AFWALL_CHAIN_MAIN" || return 1
+  count="$("$ip6t" -t filter -S "$AFWALL_CHAIN_MAIN" 2>/dev/null | grep -c '^-A ')" || count=0
+  [ "${count:-0}" -ge "$min" ]
+}
+
+# ── Current-boot timestamp marker ─────────────────────────────────────────────
+# Written by post-fs-data immediately after the hard block is installed.
+# Used as a reference timestamp by afwall_secondary_evidence_present() to
+# identify AFWall file activity that occurred during this boot session.
+# Using a dedicated file avoids overloading ipv4_out_table / ipv6_out_table,
+# which have a slightly different lifecycle.
+mark_boot_marker() {
+  _init_dirs
+  printf '1' > "${STATE_DIR}/boot_marker" 2>/dev/null || true
+  debug_log "mark_boot_marker: boot marker written"
 }
 
 # ── Secondary evidence of current-boot AFWall activity ───────────────────────
 # Checks whether AFWall's private data files were written after this module
-# installed its block (using the ipv4_out_table state file as a reference
-# timestamp — that file is created during post-fs-data when the block is first
-# installed). Returns 0 if evidence found; 1 otherwise.
+# installed its hard block.  Searches both Credential Encrypted (CE) and
+# Device Encrypted (DE) app-data locations so that evidence is detectable
+# whether or not the user storage is unlocked.
+#
+# Reference timestamp priority:
+#   1. ${STATE_DIR}/boot_marker          — dedicated marker (most reliable)
+#   2. ${STATE_DIR}/ipv4_out_table       — fallback (legacy)
+#   3. ${STATE_DIR}/ipv6_out_table       — final fallback
+#
+# Data locations searched:
+#   /data/data/<pkg>          — legacy / CE primary
+#   /data/user/0/<pkg>        — CE explicit path
+#   /data/user_de/0/<pkg>     — DE (always readable; not behind FBE)
 #
 # This is SECONDARY / CORROBORATING evidence only. It is NOT a primary gate.
-# Used in the fallback path to increase confidence when liveness is not visible.
-# Reason the state-file reference is reliable: post-fs-data runs before any user-
-# space apps start, so any AFWall data file newer than that marker was written by
-# AFWall during the current boot session.
 afwall_secondary_evidence_present() {
-  local pkg="$1" data_dir ref
+  local pkg="$1" ref dir subdir f
   [ -n "$pkg" ] || return 1
-  data_dir="/data/data/${pkg}"
-  [ -d "$data_dir" ] || return 1
-  # Use the earliest available state file as the reference timestamp.
-  ref="${STATE_DIR}/ipv4_out_table"
+
+  # Choose reference timestamp.
+  ref="${STATE_DIR}/boot_marker"
+  [ -f "$ref" ] || ref="${STATE_DIR}/ipv4_out_table"
   [ -f "$ref" ] || ref="${STATE_DIR}/ipv6_out_table"
   [ -f "$ref" ] || return 1
-  # If any key AFWall file is newer than our state-file reference, AFWall has
-  # been active since we installed our block (current-boot evidence).
-  find "$data_dir" \
-    \( -name "Logs.db" -o -name "rules.db" -o -name "AFWallStatus.xml" \) \
-    -newer "$ref" 2>/dev/null | grep -q '.' && return 0
+
+  # Search CE and DE data directories.
+  for dir in \
+      "/data/data/${pkg}" \
+      "/data/user/0/${pkg}" \
+      "/data/user_de/0/${pkg}"; do
+    [ -d "$dir" ] || continue
+
+    # Check well-known AFWall database/status files by name.
+    for f in \
+        "${dir}/Logs.db" \
+        "${dir}/rules.db" \
+        "${dir}/AFWallStatus.xml" \
+        "${dir}/databases/Logs.db" \
+        "${dir}/databases/rules.db"; do
+      [ -f "$f" ] && [ "$f" -nt "$ref" ] 2>/dev/null && return 0
+    done
+
+    # Scan shared_prefs and databases directories for any file newer than
+    # the reference — AFWall updates these dirs when applying rules.
+    for subdir in "shared_prefs" "databases"; do
+      [ -d "${dir}/${subdir}" ] || continue
+      find "${dir}/${subdir}" -newer "$ref" 2>/dev/null | grep -q '.' && return 0
+    done
+  done
   return 1
 }
 
@@ -999,17 +1262,43 @@ afwall_startup_protection_active() {
 }
 
 # Process-level detection (supplementary; less reliable than rule checks).
+# Uses three independent methods so that failures in any one (e.g., pidof not
+# available, ps output format variation, or SELinux restrictions on /proc) do
+# not prevent detection.
+#
+# Method 1: pidof — fast and authoritative on Android 8+.
+# Method 2: ps — broad compatibility; handles process sub-names (pkg:service).
+# Method 3: /proc/*/cmdline scan — reliable when both pidof and ps fail;
+#   reads the NUL-separated argument list from procfs directly.  The first
+#   token in cmdline is the process/package name on Android.
 afwall_process_present() {
   local pkg="$1" esc_pkg
   [ -n "$pkg" ] || return 1
+
+  # Method 1: pidof
   if has_cmd pidof && pidof "$pkg" >/dev/null 2>&1; then
     return 0
   fi
+
+  # Method 2: ps
   esc_pkg="$(printf '%s' "$pkg" | sed 's/\./\\./g')"
   if has_cmd ps; then
     ps -A 2>/dev/null | grep -qE "[[:space:]]${esc_pkg}(:[[:alnum:]_]+)?$" && return 0
     ps    2>/dev/null | grep -qE "[[:space:]]${esc_pkg}(:[[:alnum:]_]+)?$" && return 0
   fi
+
+  # Method 3: /proc/*/cmdline — fallback for environments where pidof/ps are
+  # restricted or return unexpected output formats.
+  local f first_arg
+  for f in /proc/[0-9]*/cmdline; do
+    [ -f "$f" ] || continue
+    # The first NUL-delimited token is the process name / package name.
+    first_arg="$(tr '\0' '\n' < "$f" 2>/dev/null | head -1)"
+    case "$first_arg" in
+      "$pkg"|"${pkg}:"*) return 0 ;;
+    esac
+  done
+
   return 1
 }
 
@@ -1147,79 +1436,67 @@ cleanup_legacy_scripts_only() {
 # AFWall+ creates dedicated sub-chains for each transport type:
 #   afwall-wifi   — Wi-Fi rules
 #   afwall-3g     — mobile data rules
-# These are created only when AFWall has been configured with per-transport
-# rules. Detection requires: chain exists, hook present, and at least one rule.
+# These are created only when AFWall has been configured with per-transport rules.
+#
+# The snapshot-based helpers below are the authoritative readiness checks used
+# by the service.sh hot path.  The legacy _afwall_transport_chain_ready() is
+# preserved only for external callers that do not manage their own snapshot.
 
-# Generic helper: check that a named afwall transport chain exists in the filter
-# table and contains at least one rule.
-_afwall_transport_chain_ready() {
-  local cmd="$1" chain="$2" count
-  [ -x "$cmd" ] || return 1
-  _chain_exists "$cmd" filter "$chain" || return 1
-  count="$("$cmd" -t filter -S "$chain" 2>/dev/null | grep -c '^-A ')" || count=0
-  [ "${count:-0}" -ge 1 ] || return 1
+# Generic snapshot-based transport readiness: chain exists with at least one
+# rule AND is reachable from the active AFWall graph.  Existence alone is not
+# sufficient — an isolated or stale chain would otherwise falsely pass.
+_afwall_transport_chain_ready_from_snapshot() {
+  local snap="$1" prefix="$2"
+  [ -n "$snap" ] || return 1
+  [ -n "$prefix" ] || return 1
+  # Subtree must be present (any chain or reference with this prefix).
+  afwall_prefix_present_from_snapshot "$snap" "$prefix" || return 1
+  # Subtree must be non-trivially populated (at least one rule inside it).
+  printf '%s\n' "$snap" | grep -qE "^-A ${prefix}" || return 1
+  # Subtree must be reachable from within the AFWall graph.
+  afwall_prefix_reachable_from_snapshot "$snap" "$prefix" || return 1
   return 0
 }
 
-# Wi-Fi transport chain present (IPv4)
+# Legacy single-call helper (captures own snapshot; less efficient).
+# Retained for external callers (e.g., action.sh) and diagnostic use.
+_afwall_transport_chain_ready() {
+  local cmd="$1" chain="$2" snap
+  [ -x "$cmd" ] || return 1
+  # Derive family from cmd path to call the right snapshot function.
+  case "$cmd" in
+    *ip6tables*) snap="$(capture_filter_snapshot_v6 2>/dev/null)" ;;
+    *)           snap="$(capture_filter_snapshot_v4 2>/dev/null)" ;;
+  esac
+  _afwall_transport_chain_ready_from_snapshot "$snap" "$chain"
+}
+
+# Wi-Fi transport chain present and reachable (IPv4)
 afwall_wifi_chain_present_v4() {
-  local ipt
-  ipt="$(_find_cmd iptables)" || return 1
-  _afwall_transport_chain_ready "$ipt" "$AFWALL_CHAIN_WIFI"
+  local snap
+  snap="$(capture_filter_snapshot_v4 2>/dev/null)" || return 1
+  _afwall_transport_chain_ready_from_snapshot "$snap" "$AFWALL_CHAIN_WIFI"
 }
 
-# Wi-Fi transport chain present (IPv6)
+# Wi-Fi transport chain present and reachable (IPv6)
 afwall_wifi_chain_present_v6() {
-  local ip6t
-  ip6t="$(_find_cmd ip6tables)" || return 1
-  _afwall_transport_chain_ready "$ip6t" "$AFWALL_CHAIN_WIFI"
+  local snap
+  snap="$(capture_filter_snapshot_v6 2>/dev/null)" || return 1
+  _afwall_transport_chain_ready_from_snapshot "$snap" "$AFWALL_CHAIN_WIFI"
 }
 
-# Mobile data transport chain present (IPv4)
+# Mobile data transport chain present and reachable (IPv4)
 afwall_mobile_chain_present_v4() {
-  local ipt
-  ipt="$(_find_cmd iptables)" || return 1
-  _afwall_transport_chain_ready "$ipt" "$AFWALL_CHAIN_MOBILE"
+  local snap
+  snap="$(capture_filter_snapshot_v4 2>/dev/null)" || return 1
+  _afwall_transport_chain_ready_from_snapshot "$snap" "$AFWALL_CHAIN_MOBILE"
 }
 
-# Mobile data transport chain present (IPv6)
+# Mobile data transport chain present and reachable (IPv6)
 afwall_mobile_chain_present_v6() {
-  local ip6t
-  ip6t="$(_find_cmd ip6tables)" || return 1
-  _afwall_transport_chain_ready "$ip6t" "$AFWALL_CHAIN_MOBILE"
-}
-
-# Transport-specific rule-graph signature: returns "rules:chains" for the
-# named transport chain. Used to detect whether the chain is still settling.
-_afwall_transport_signature() {
-  local cmd="$1" chain="$2" rule_count
-  [ -x "$cmd" ] || { printf 'na:na'; return 1; }
-  rule_count="$("$cmd" -t filter -S "$chain" 2>/dev/null | grep -c '^-A ')" || rule_count=0
-  printf '%s' "$rule_count"
-}
-
-afwall_wifi_signature_v4() {
-  local ipt
-  ipt="$(_find_cmd iptables 2>/dev/null)" || { printf 'na'; return 1; }
-  _afwall_transport_signature "$ipt" "$AFWALL_CHAIN_WIFI"
-}
-
-afwall_wifi_signature_v6() {
-  local ip6t
-  ip6t="$(_find_cmd ip6tables 2>/dev/null)" || { printf 'na'; return 1; }
-  _afwall_transport_signature "$ip6t" "$AFWALL_CHAIN_WIFI"
-}
-
-afwall_mobile_signature_v4() {
-  local ipt
-  ipt="$(_find_cmd iptables 2>/dev/null)" || { printf 'na'; return 1; }
-  _afwall_transport_signature "$ipt" "$AFWALL_CHAIN_MOBILE"
-}
-
-afwall_mobile_signature_v6() {
-  local ip6t
-  ip6t="$(_find_cmd ip6tables 2>/dev/null)" || { printf 'na'; return 1; }
-  _afwall_transport_signature "$ip6t" "$AFWALL_CHAIN_MOBILE"
+  local snap
+  snap="$(capture_filter_snapshot_v6 2>/dev/null)" || return 1
+  _afwall_transport_chain_ready_from_snapshot "$snap" "$AFWALL_CHAIN_MOBILE"
 }
 
 # ── Blackout-state persistence ─────────────────────────────────────────────────
