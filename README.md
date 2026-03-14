@@ -1,4 +1,4 @@
-# AFWall Boot AntiLeak Fork — v2.2.22
+# AFWall Boot AntiLeak Fork — v2.4
 
 A Magisk module that enforces a **total-connectivity-blackout** from the moment
 Android's kernel initialises until AFWall+ has verifiably applied its rules for

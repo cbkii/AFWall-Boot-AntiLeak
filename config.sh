@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v2.2.22 - User Configuration
+# AFWall Boot AntiLeak v2.4 - User Configuration
 # This file is sourced during boot. Keep syntax POSIX/ash compatible.
 # Place a custom copy at /data/adb/AFWall-Boot-AntiLeak/config.sh to
 # override the module's built-in defaults without modifying the module itself.
@@ -225,6 +225,22 @@ MOBILE_AFWALL_GATE=1
 # interval in seconds between reassertion checks.
 #
 RADIO_REASSERT_INTERVAL=10
+
+# ── Blackout integrity reassertion interval ───────────────────────────────────
+# While the iptables OUTPUT blackout is active and AFWall handoff is incomplete,
+# the module periodically verifies that the OUTPUT blackout chains (chain +
+# DROP rule + OUTPUT jump) are still intact in raw and filter tables.  If any
+# layer is missing or degraded, it is immediately repaired.
+#
+# This is separate from RADIO_REASSERT_INTERVAL so that iptables integrity can
+# be checked more frequently than the radio-off reassertion.  A shorter interval
+# reduces the window during which blackout chains could be absent due to
+# external interference before the module repairs them.
+#
+# Default: 5 s (half the radio reassertion interval).
+# Increase only if you see excessive iptables call overhead on very slow devices.
+#
+BLACKOUT_REASSERT_INTERVAL=5
 
 # ── Unlock detection poll interval ───────────────────────────────────────────
 # How often (in seconds) to check whether the device has been unlocked,
