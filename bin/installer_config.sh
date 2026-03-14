@@ -21,7 +21,8 @@
 
 # ── Module paths ──────────────────────────────────────────────────────────────
 
-_IC_MODULE_DATA="/data/adb/AFWall-Boot-AntiLeak"
+_IC_MODULE_ID="AFWall-Boot-AntiLeak"
+_IC_MODULE_DATA="/data/adb/${_IC_MODULE_ID}"
 _IC_PERSISTENT_CFG="${_IC_MODULE_DATA}/config.sh"
 _IC_INSTALLER_CFG="${_IC_MODULE_DATA}/installer.cfg"
 _IC_KEY_TIMEOUT=10
@@ -59,6 +60,13 @@ ic_apply_defaults() {
     IC_LOWLEVEL_USE_BLUETOOTH_MANAGER="0"
     IC_LOWLEVEL_USE_TETHER_STOP="1"
     IC_TIMEOUT_SECS="120"
+    IC_TIMEOUT_POLICY="fail_closed"
+    IC_AUTO_TIMEOUT_UNBLOCK="0"
+    IC_TIMEOUT_UNLOCK_GATED="1"
+    IC_WIFI_AFWALL_GATE="1"
+    IC_MOBILE_AFWALL_GATE="1"
+    IC_RADIO_REASSERT_INTERVAL="10"
+    IC_UNLOCK_POLL_INTERVAL="5"
     IC_SETTLE_SECS="5"
     IC_DEBUG="0"
 }
@@ -83,6 +91,8 @@ ic_apply_profile() {
             IC_LOWLEVEL_MODE="strict"
             IC_ENABLE_INPUT_BLOCK="1"
             IC_LOWLEVEL_USE_BLUETOOTH_MANAGER="1"
+            IC_TIMEOUT_POLICY="fail_closed"
+            IC_AUTO_TIMEOUT_UNBLOCK="0"
             ;;
         standard) ;;
     esac
@@ -204,7 +214,7 @@ _ic_get_keycheck_path() {
     local _arch _kcdir _kc_bin _dir
     _arch="$(uname -m 2>/dev/null)"
 
-    for _dir in "${MODPATH:-}" "${MODDIR:-}" "/data/adb/modules/AFWall-Boot-AntiLeak"; do
+    for _dir in "${MODPATH:-}" "${MODDIR:-}" "/data/adb/modules/${_IC_MODULE_ID}"; do
         [ -z "$_dir" ] && continue
         _kcdir="${_dir}/bin/keycheck"
         [ -d "$_kcdir" ] || continue
@@ -643,6 +653,13 @@ ic_write_config() {
     printf 'LOWLEVEL_USE_BLUETOOTH_MANAGER=%s\n' "${IC_LOWLEVEL_USE_BLUETOOTH_MANAGER:-0}" >> "$dest"
     printf 'LOWLEVEL_USE_TETHER_STOP=%s\n'    "${IC_LOWLEVEL_USE_TETHER_STOP:-1}"       >> "$dest"
     printf 'TIMEOUT_SECS=%s\n'                "${IC_TIMEOUT_SECS:-120}"                >> "$dest"
+    printf 'TIMEOUT_POLICY=%s\n'             "${IC_TIMEOUT_POLICY:-fail_closed}"       >> "$dest"
+    printf 'AUTO_TIMEOUT_UNBLOCK=%s\n'       "${IC_AUTO_TIMEOUT_UNBLOCK:-0}"           >> "$dest"
+    printf 'TIMEOUT_UNLOCK_GATED=%s\n'       "${IC_TIMEOUT_UNLOCK_GATED:-1}"           >> "$dest"
+    printf 'WIFI_AFWALL_GATE=%s\n'           "${IC_WIFI_AFWALL_GATE:-1}"               >> "$dest"
+    printf 'MOBILE_AFWALL_GATE=%s\n'         "${IC_MOBILE_AFWALL_GATE:-1}"             >> "$dest"
+    printf 'RADIO_REASSERT_INTERVAL=%s\n'    "${IC_RADIO_REASSERT_INTERVAL:-10}"       >> "$dest"
+    printf 'UNLOCK_POLL_INTERVAL=%s\n'       "${IC_UNLOCK_POLL_INTERVAL:-5}"           >> "$dest"
     printf 'SETTLE_SECS=%s\n'                 "${IC_SETTLE_SECS:-5}"                   >> "$dest"
     printf 'DEBUG=%s\n'                       "${IC_DEBUG:-0}"                         >> "$dest"
 
@@ -659,6 +676,7 @@ ic_write_config() {
 
 ic_render_summary() {
     local fwd_str in_str quiesce_str wifi_str data_str bt_str teth_str dbg_str
+    local auto_unblock_str unlock_gate_str
 
     [ "${IC_ENABLE_FORWARD_BLOCK:-1}" = "1" ]       && fwd_str="enabled"    || fwd_str="disabled"
     [ "${IC_ENABLE_INPUT_BLOCK:-0}" = "1" ]          && in_str="enabled"     || in_str="disabled"
@@ -668,21 +686,28 @@ ic_render_summary() {
     [ "${IC_LOWLEVEL_USE_BLUETOOTH_MANAGER:-0}" = "1" ] && bt_str="managed"  || bt_str="unmanaged"
     [ "${IC_LOWLEVEL_USE_TETHER_STOP:-1}" = "1" ]   && teth_str="managed"   || teth_str="unmanaged"
     [ "${IC_DEBUG:-0}" = "1" ]                       && dbg_str="enabled"    || dbg_str="disabled"
+    [ "${IC_AUTO_TIMEOUT_UNBLOCK:-0}" = "1" ]        && auto_unblock_str="enabled"  || auto_unblock_str="DISABLED (safe default)"
+    [ "${IC_TIMEOUT_UNLOCK_GATED:-1}" = "1" ]        && unlock_gate_str="yes"       || unlock_gate_str="no"
 
     _ic_print ""
     _ic_print "  ── Configuration Summary ───────────────────────────"
-    _ic_print "  Integration mode:   ${IC_INTEGRATION_MODE:-auto}"
-    _ic_print "  FORWARD block:      $fwd_str"
-    _ic_print "  INPUT block:        $in_str"
-    _ic_print "  Lower-layer mode:   ${IC_LOWLEVEL_MODE:-safe}"
-    _ic_print "  Interface quiesce:  $quiesce_str"
-    _ic_print "  Wi-Fi management:   $wifi_str"
-    _ic_print "  Mobile data:        $data_str"
-    _ic_print "  Bluetooth:          $bt_str"
-    _ic_print "  Tethering:          $teth_str"
-    _ic_print "  AFWall timeout:     ${IC_TIMEOUT_SECS:-120}s"
-    _ic_print "  Settle delay:       ${IC_SETTLE_SECS:-5}s"
-    _ic_print "  Debug logging:      $dbg_str"
+    _ic_print "  Integration mode:      ${IC_INTEGRATION_MODE:-auto}"
+    _ic_print "  FORWARD block:         $fwd_str"
+    _ic_print "  INPUT block:           $in_str"
+    _ic_print "  Lower-layer mode:      ${IC_LOWLEVEL_MODE:-safe}"
+    _ic_print "  Interface quiesce:     $quiesce_str"
+    _ic_print "  Wi-Fi management:      $wifi_str"
+    _ic_print "  Mobile data:           $data_str"
+    _ic_print "  Bluetooth:             $bt_str"
+    _ic_print "  Tethering:             $teth_str"
+    _ic_print "  AFWall timeout:        ${IC_TIMEOUT_SECS:-120}s"
+    _ic_print "  Timeout policy:        ${IC_TIMEOUT_POLICY:-fail_closed}"
+    _ic_print "  Auto timeout unblock:  $auto_unblock_str"
+    _ic_print "  Unlock-gated timeout:  $unlock_gate_str"
+    _ic_print "  Wi-Fi AFWall gate:     ${IC_WIFI_AFWALL_GATE:-1}"
+    _ic_print "  Mobile AFWall gate:    ${IC_MOBILE_AFWALL_GATE:-1}"
+    _ic_print "  Settle delay:          ${IC_SETTLE_SECS:-5}s"
+    _ic_print "  Debug logging:         $dbg_str"
     _ic_print "  ───────────────────────────────────────────────────"
 }
 

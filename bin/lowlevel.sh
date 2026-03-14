@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v2.2.2 - Lower-layer suppression subsystem
+# AFWall Boot AntiLeak v2.2.22 - Lower-layer suppression subsystem
 # POSIX/ash compatible. No bashisms. Sourced by common.sh; do not execute directly.
 #
 # PURPOSE
@@ -209,22 +209,67 @@ lowlevel_disable_wifi() {
 
   local disabled=0
 
-  # Preferred: cmd wifi (Android 10+, works when Wi-Fi service is up).
-  # Falls back to svc wifi (older path; may silently fail if service not ready).
+  # Step 1: cmd wifi set-wifi-enabled disabled (preferred, Android 10+)
   if has_cmd cmd && cmd wifi set-wifi-enabled disabled >/dev/null 2>&1; then
     disabled=1
-    log "lowlevel: Wi-Fi disabled via cmd wifi"
+    log "lowlevel: Wi-Fi disable cmd sent via cmd wifi"
   fi
 
+  # Step 2: fallback via svc wifi
   if [ "$disabled" = "0" ] && has_cmd svc; then
     if svc wifi disable 2>/dev/null; then
       disabled=1
-      log "lowlevel: Wi-Fi disabled via svc wifi (fallback)"
+      log "lowlevel: Wi-Fi disable cmd sent via svc wifi (fallback)"
     fi
   fi
 
+  # Step 3: verify the off-state using multiple probes
   if [ "$disabled" = "1" ]; then
-    _ll_state_set "wifi_was_enabled" "1"
+    local verified=0 val wl_state
+    # Probe A: settings database
+    if has_cmd settings; then
+      val="$(settings get global wifi_on 2>/dev/null)"
+      case "$val" in
+        0) verified=$((verified + 1)) ;;
+      esac
+    fi
+    # Probe B: cmd wifi status (look for "disabled" or "Wifi is disabled")
+    if has_cmd cmd; then
+      if cmd wifi status 2>/dev/null | grep -qi 'disabled\|Wifi is off'; then
+        verified=$((verified + 1))
+      fi
+    fi
+    # Probe C: wlan interface operstate (link-down state)
+    local wl_iface
+    for wl_iface in wlan0 wlan1 swlan0 swlan1; do
+      [ -f "/sys/class/net/${wl_iface}/operstate" ] || continue
+      wl_state="$(cat "/sys/class/net/${wl_iface}/operstate" 2>/dev/null)"
+      case "$wl_state" in
+        down) verified=$((verified + 1)); break ;;
+      esac
+    done
+    if [ "$verified" -ge 1 ]; then
+      log "lowlevel: Wi-Fi off-state confirmed (probes_passed=$verified)"
+      _ll_state_set "wifi_was_enabled" "1"
+    else
+      log "lowlevel: Wi-Fi disable sent but off-state not yet confirmed; tracking anyway"
+      _ll_state_set "wifi_was_enabled" "1"
+    fi
+    # Step 4: reinforce by bringing wlan interfaces down if present
+    local ip_cmd
+    ip_cmd="$(_find_cmd ip 2>/dev/null)" || ip_cmd=""
+    if [ -n "$ip_cmd" ]; then
+      for wl_iface in wlan0 wlan1 swlan0 swlan1; do
+        [ -d "/sys/class/net/${wl_iface}" ] || continue
+        wl_state="$(cat "/sys/class/net/${wl_iface}/operstate" 2>/dev/null)"
+        case "$wl_state" in
+          up|unknown)
+            "$ip_cmd" link set "$wl_iface" down 2>/dev/null && \
+              debug_log "lowlevel: reinforced $wl_iface link-down" || true
+            ;;
+        esac
+      done
+    fi
   else
     log "lowlevel: WARN: could not disable Wi-Fi (best-effort)"
   fi
@@ -277,21 +322,61 @@ lowlevel_disable_mobile_data() {
 
   local disabled=0
 
-  # Preferred: cmd phone (Android 9+).
+  # Step 1: cmd phone data disable (preferred, Android 9+)
   if has_cmd cmd && cmd phone data disable >/dev/null 2>&1; then
     disabled=1
-    log "lowlevel: mobile data disabled via cmd phone"
+    log "lowlevel: mobile data disable cmd sent via cmd phone"
   fi
 
+  # Step 2: fallback via svc data
   if [ "$disabled" = "0" ] && has_cmd svc; then
     if svc data disable 2>/dev/null; then
       disabled=1
-      log "lowlevel: mobile data disabled via svc data (fallback)"
+      log "lowlevel: mobile data disable cmd sent via svc data (fallback)"
     fi
   fi
 
+  # Step 3: verify the off-state using multiple probes
   if [ "$disabled" = "1" ]; then
+    local verified=0 val
+    # Probe A: settings database
+    if has_cmd settings; then
+      val="$(settings get global mobile_data 2>/dev/null)"
+      case "$val" in
+        0) verified=$((verified + 1)) ;;
+      esac
+    fi
+    # Probe B: absence of active default route via cellular interfaces
+    local ip_cmd rt_out
+    ip_cmd="$(_find_cmd ip 2>/dev/null)" || ip_cmd=""
+    if [ -n "$ip_cmd" ]; then
+      rt_out="$("$ip_cmd" route show default 2>/dev/null)" || rt_out=""
+      # If no default route via rmnet*/ccmni*/pdp*/wwan*, data is off
+      if ! printf '%s' "$rt_out" | grep -qE 'rmnet|ccmni|pdp|wwan'; then
+        verified=$((verified + 1))
+      fi
+    fi
+    if [ "$verified" -ge 1 ]; then
+      log "lowlevel: mobile data off-state confirmed (probes_passed=$verified)"
+    else
+      log "lowlevel: mobile data disable sent but off-state not yet confirmed; tracking anyway"
+    fi
     _ll_state_set "data_was_enabled" "1"
+    # Step 4: reinforce by bringing cellular data interfaces down where safe
+    if [ -n "$ip_cmd" ]; then
+      local cell_iface cell_state
+      for cell_iface in /sys/class/net/rmnet* /sys/class/net/ccmni* /sys/class/net/wwan*; do
+        [ -d "$cell_iface" ] || continue
+        cell_iface="${cell_iface##*/}"
+        cell_state="$(cat "/sys/class/net/${cell_iface}/operstate" 2>/dev/null)"
+        case "$cell_state" in
+          up|unknown)
+            "$ip_cmd" link set "$cell_iface" down 2>/dev/null && \
+              debug_log "lowlevel: reinforced $cell_iface link-down" || true
+            ;;
+        esac
+      done
+    fi
   else
     log "lowlevel: WARN: could not disable mobile data (best-effort)"
   fi
@@ -440,9 +525,231 @@ lowlevel_restore_tethering_note() {
 
 # ── Top-level orchestration ────────────────────────────────────────────────────
 
-# Called from service.sh at the start of the background subshell.
-# Performs interface quiesce immediately, then waits briefly for framework
-# services and applies service-level suppression.
+# ── Early phase: post-fs-data safe operations only ─────────────────────────────
+# Called from post-fs-data.sh. Framework services are NOT available here.
+# Only kernel-space operations and /sys interactions are performed.
+# Persists blackout state so service.sh knows to enforce radio-off on startup.
+lowlevel_prepare_environment_early() {
+  local mode="${LOWLEVEL_MODE:-safe}"
+  case "$mode" in
+    off) return 0 ;;
+    safe|strict) ;;
+    *)
+      log "lowlevel_early: unknown LOWLEVEL_MODE='$mode'; treating as off"
+      return 0
+      ;;
+  esac
+
+  _ll_init_dirs
+  _ll_state_set "mode" "$mode"
+  log "lowlevel_early: start (mode=$mode)"
+
+  # Record that radios must be forced off in the late phase.
+  # This state persists across the post-fs-data → service boundary.
+  _ll_state_set "radio_off_pending_early" "1"
+
+  # Quiesce any interfaces that are already present (best-effort; many
+  # interfaces are not up yet at this stage — that is expected and normal).
+  # The main purpose is to catch any interface that appeared unusually early.
+  local ip_cmd
+  ip_cmd="$(_find_cmd ip 2>/dev/null)" || ip_cmd=""
+  if [ -n "$ip_cmd" ] && [ -d "/sys/class/net" ]; then
+    local iface operstate
+    for iface in /sys/class/net/*/; do
+      iface="${iface%/}"; iface="${iface##*/}"
+      [ -n "$iface" ] || continue
+      _ll_iface_is_exempt "$iface" && continue
+      operstate="$(cat "/sys/class/net/${iface}/operstate" 2>/dev/null)"
+      case "$operstate" in
+        up|unknown)
+          if "$ip_cmd" link set "$iface" down 2>/dev/null; then
+            _ll_state_append "ifaces_down_early" "$iface"
+            log "lowlevel_early: interface $iface brought DOWN"
+          fi
+          ;;
+      esac
+    done
+  else
+    log "lowlevel_early: ip command or /sys/class/net not available; interface quiesce skipped"
+  fi
+
+  # Framework radio commands are NOT used here; defer to late phase.
+  log "lowlevel_early: framework radio disable deferred to late phase (service.sh)"
+  log "lowlevel_early: done"
+}
+
+# ── Late phase: framework-aware service suppression ─────────────────────────────
+# Called from service.sh after framework services are available.
+# Verifies Wi-Fi and mobile data off-state, not just command exit status.
+lowlevel_prepare_environment_late() {
+  local mode
+  mode="${LOWLEVEL_MODE:-safe}"
+  case "$mode" in
+    off) return 0 ;;
+    safe|strict) ;;
+    *)
+      log "lowlevel_late: unknown LOWLEVEL_MODE='$mode'; treating as off"
+      return 0
+      ;;
+  esac
+
+  # Merge early-phase interface list into the main quiesce list.
+  if _ll_state_exists "ifaces_down_early"; then
+    while IFS= read -r _iface; do
+      [ -n "$_iface" ] || continue
+      _ll_state_append "ifaces_down" "$_iface"
+    done < "${LL_STATE_DIR}/ifaces_down_early"
+    _ll_state_rm "ifaces_down_early"
+  fi
+
+  log "lowlevel_late: start (mode=$mode)"
+
+  # Interface quiesce: bring down any remaining UP interfaces.
+  lowlevel_quiesce_interfaces
+
+  # Service-level suppression: retry until framework is ready.
+  local attempt=0 max_attempts=5
+  while [ "$attempt" -lt "$max_attempts" ]; do
+    if _ll_framework_ready; then
+      lowlevel_disable_wifi
+      lowlevel_disable_mobile_data
+      if [ "${LOWLEVEL_USE_BLUETOOTH_MANAGER:-0}" = "1" ]; then
+        lowlevel_disable_bluetooth
+      fi
+      if [ "${LOWLEVEL_USE_TETHER_STOP:-1}" = "1" ]; then
+        lowlevel_stop_tethering
+      fi
+      log "lowlevel_late: service suppression done"
+      break
+    fi
+    attempt=$((attempt + 1))
+    if [ "$attempt" -lt "$max_attempts" ]; then
+      debug_log "lowlevel: framework not ready (attempt $attempt/${max_attempts}); retrying in 3s"
+      sleep 3
+    fi
+  done
+
+  if [ "$attempt" -ge "$max_attempts" ]; then
+    log "lowlevel_late: WARN: framework not ready after ${max_attempts} attempts; service suppression skipped (iptables hard block remains)"
+  fi
+
+  _ll_state_rm "radio_off_pending_early"
+  log "lowlevel_late: done"
+}
+
+# ── Periodic reassertion: keep radios off while waiting ───────────────────────
+# Called from the service.sh poll loop. Lightweight and idempotent.
+# Re-verifies Wi-Fi and mobile data off-state; re-applies if needed.
+lowlevel_reassert_radios_off() {
+  local mode
+  mode="${LOWLEVEL_MODE:-safe}"
+  [ "$mode" = "off" ] && return 0
+
+  # Wi-Fi reassertion
+  if [ "${LOWLEVEL_USE_WIFI_SERVICE:-1}" = "1" ] && _ll_state_exists "wifi_was_enabled"; then
+    if _ll_wifi_is_enabled; then
+      log "lowlevel_reassert: Wi-Fi is back on; re-disabling"
+      if has_cmd cmd && cmd wifi set-wifi-enabled disabled >/dev/null 2>&1; then
+        debug_log "lowlevel_reassert: Wi-Fi re-disabled via cmd wifi"
+      elif has_cmd svc; then
+        svc wifi disable 2>/dev/null || true
+      fi
+    fi
+    # Re-reinforce wlan interface down-state
+    local ip_cmd wl_iface wl_state
+    ip_cmd="$(_find_cmd ip 2>/dev/null)" || ip_cmd=""
+    if [ -n "$ip_cmd" ]; then
+      for wl_iface in wlan0 wlan1 swlan0 swlan1; do
+        [ -d "/sys/class/net/${wl_iface}" ] || continue
+        wl_state="$(cat "/sys/class/net/${wl_iface}/operstate" 2>/dev/null)"
+        case "$wl_state" in
+          up|unknown)
+            "$ip_cmd" link set "$wl_iface" down 2>/dev/null || true
+            ;;
+        esac
+      done
+    fi
+  fi
+
+  # Mobile data reassertion
+  if [ "${LOWLEVEL_USE_PHONE_DATA_CMD:-1}" = "1" ] && _ll_state_exists "data_was_enabled"; then
+    if _ll_data_is_enabled; then
+      log "lowlevel_reassert: mobile data is back on; re-disabling"
+      if has_cmd cmd && cmd phone data disable >/dev/null 2>&1; then
+        debug_log "lowlevel_reassert: mobile data re-disabled via cmd phone"
+      elif has_cmd svc; then
+        svc data disable 2>/dev/null || true
+      fi
+    fi
+  fi
+}
+
+# ── Device unlock detection ────────────────────────────────────────────────────
+# Strict positive-detection model: only returns 0 (unlocked) when there is
+# positive evidence from at least one reliable probe. If parsing fails,
+# commands are unavailable, or signals conflict, treat as locked (return 1).
+#
+# Probes used:
+#   A. dumpsys window: look for mKeyguardShowing=false or mShowingLockscreen=false
+#   B. dumpsys power:  look for mWakefulness=Awake (screen is on = user interaction)
+# Both A AND B must confirm for a positive result, since either alone can be
+# unreliable (e.g., screen turns on briefly without unlock, or keyguard state
+# is stale in dumpsys output).
+lowlevel_device_is_unlocked() {
+  has_cmd dumpsys || return 1  # cannot determine; treat as locked
+
+  # Probe A: keyguard state
+  local wm_line kguard_showing=0
+  wm_line="$(dumpsys window 2>/dev/null | grep -iE 'mKeyguardShowing|mShowingLockscreen' | head -3)"
+  if [ -z "$wm_line" ]; then
+    # Alternative: check for isShowing() output style
+    wm_line="$(dumpsys window 2>/dev/null | grep -i 'KeyguardController' | head -3)"
+  fi
+  if printf '%s' "$wm_line" | grep -qi '=false\|Showing=false\|showing: false'; then
+    kguard_showing=1  # keyguard not showing: positive unlocked evidence
+  fi
+
+  # Probe B: screen awake
+  local pwr_line screen_awake=0
+  pwr_line="$(dumpsys power 2>/dev/null | grep -i 'mWakefulness' | head -2)"
+  if printf '%s' "$pwr_line" | grep -qi 'Awake'; then
+    screen_awake=1
+  fi
+
+  if [ "$kguard_showing" = "1" ] && [ "$screen_awake" = "1" ]; then
+    return 0  # Positive unlock evidence from both probes
+  fi
+  return 1  # Treat as locked
+}
+
+# ── Transport-specific restore helpers ────────────────────────────────────────
+# These helpers restore a single transport only when:
+#   - the module itself changed it (state file present)
+#   - the caller has confirmed AFWall transport readiness
+#   - no module-owned iptables blocks remain (caller responsibility)
+#
+# Callers must check those conditions before calling these functions.
+
+lowlevel_restore_wifi_if_allowed() {
+  _ll_state_exists "wifi_was_enabled" || {
+    debug_log "lowlevel_restore_wifi_if_allowed: wifi was not changed by module; skipping"
+    return 0
+  }
+  lowlevel_restore_wifi
+}
+
+lowlevel_restore_mobile_data_if_allowed() {
+  _ll_state_exists "data_was_enabled" || {
+    debug_log "lowlevel_restore_mobile_data_if_allowed: mobile data was not changed by module; skipping"
+    return 0
+  }
+  lowlevel_restore_mobile_data
+}
+
+# ── Legacy alias: lowlevel_prepare_environment ────────────────────────────────
+# Called from service.sh for backward compatibility.
+# Redirects to the late phase; early phase is now called from post-fs-data.sh.
+# Clears stale ll state from a previous unclean boot before starting.
 lowlevel_prepare_environment() {
   local mode="${LOWLEVEL_MODE:-safe}"
   case "$mode" in
@@ -456,10 +763,8 @@ lowlevel_prepare_environment() {
 
   _ll_init_dirs
 
-  # Clear any stale ll state from a previous unclean boot.
-  # If the device crashed or rebooted before Stage C restored services, marker
-  # files from the prior boot would persist and cause spurious restores on the
-  # next boot.  Clearing them here ensures this boot starts with a clean slate.
+  # Clear any stale ll state from a previous unclean boot, but preserve
+  # early-phase data written during this boot's post-fs-data stage.
   _ll_state_rm "wifi_was_enabled"
   _ll_state_rm "data_was_enabled"
   _ll_state_rm "bt_was_enabled"
@@ -469,41 +774,7 @@ lowlevel_prepare_environment() {
 
   _ll_state_set "mode" "$mode"
   log "lowlevel_prepare_environment: start (mode=$mode)"
-
-  # ── Phase 1: Interface quiesce ─────────────────────────────────────────────
-  # Uses only /sys/class/net and the `ip` tool; no framework services needed.
-  lowlevel_quiesce_interfaces
-
-  # ── Phase 2: Service-level suppression ────────────────────────────────────
-  # Requires Android framework services.  Retry briefly (services may not be
-  # ready immediately when service.sh starts).
-  local attempt=0 max_attempts=5
-  while [ "$attempt" -lt "$max_attempts" ]; do
-    if _ll_framework_ready; then
-      lowlevel_disable_wifi
-      lowlevel_disable_mobile_data
-      # Bluetooth: disabled by default even in strict mode (see config.sh).
-      if [ "${LOWLEVEL_USE_BLUETOOTH_MANAGER:-0}" = "1" ]; then
-        lowlevel_disable_bluetooth
-      fi
-      # Tethering suppression.
-      if [ "${LOWLEVEL_USE_TETHER_STOP:-1}" = "1" ]; then
-        lowlevel_stop_tethering
-      fi
-      log "lowlevel_prepare_environment: service suppression done"
-      break
-    fi
-    attempt=$((attempt + 1))
-    if [ "$attempt" -lt "$max_attempts" ]; then
-      debug_log "lowlevel: framework not ready (attempt $attempt/${max_attempts}); retrying in 3s"
-      sleep 3
-    fi
-  done
-
-  if [ "$attempt" -ge "$max_attempts" ]; then
-    log "lowlevel: WARN: framework not ready after ${max_attempts} attempts; service suppression skipped (iptables hard block remains)"
-  fi
-
+  lowlevel_prepare_environment_late
   log "lowlevel_prepare_environment: done"
 }
 

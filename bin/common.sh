@@ -1,10 +1,11 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v2.2.2 - Common library
+# AFWall Boot AntiLeak v2.2.22 - Common library
 # POSIX/ash compatible. No bashisms. Sourced by all module scripts; do not
 # execute directly.
 
 # ── Module identity ────────────────────────────────────────────────────────────
 MODULE_ID="AFWall-Boot-AntiLeak"
+MODULE_VERSION="v2.2.22"
 MODULE_DATA="/data/adb/${MODULE_ID}"
 LOG_DIR="${MODULE_DATA}/logs"
 LOG_FILE="${LOG_DIR}/boot.log"
@@ -546,6 +547,13 @@ input_block_present_v6() {
 }
 
 # ── AFWall detection ───────────────────────────────────────────────────────────
+# Chain name constants — AFWall+'s well-known iptables chain names.
+# Defined once here so all detection and signature functions share the same
+# string. If AFWall ever renames a chain only this section needs updating.
+AFWALL_CHAIN_MAIN="afwall"       # primary filter OUTPUT chain
+AFWALL_CHAIN_WIFI="afwall-wifi"  # Wi-Fi transport sub-chain
+AFWALL_CHAIN_MOBILE="afwall-3g"  # mobile data transport sub-chain
+
 # Prefer donate package; fall back to free package; then dumpsys scan.
 resolve_afwall_pkg() {
   local c found
@@ -576,15 +584,15 @@ resolve_afwall_pkg() {
 afwall_rules_present_v4() {
   local ipt
   ipt="$(_find_cmd iptables)" || return 1
-  "$ipt" -S 2>/dev/null | grep -qE '^-N afwall($| )' || return 1
-  "$ipt" -S OUTPUT 2>/dev/null | grep -qE '^-A OUTPUT .*-j afwall($| )'
+  "$ipt" -S 2>/dev/null | grep -qE "^-N ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
+  "$ipt" -S OUTPUT 2>/dev/null | grep -qE "^-A OUTPUT .*-j ${AFWALL_CHAIN_MAIN}"'($| )'
 }
 
 afwall_rules_present_v6() {
   local ip6t
   ip6t="$(_find_cmd ip6tables)" || return 1
-  "$ip6t" -S 2>/dev/null | grep -qE '^-N afwall($| )' || return 1
-  "$ip6t" -S OUTPUT 2>/dev/null | grep -qE '^-A OUTPUT .*-j afwall($| )'
+  "$ip6t" -S 2>/dev/null | grep -qE "^-N ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
+  "$ip6t" -S OUTPUT 2>/dev/null | grep -qE "^-A OUTPUT .*-j ${AFWALL_CHAIN_MAIN}"'($| )'
 }
 
 afwall_rules_present() {
@@ -608,11 +616,11 @@ afwall_takeover_present_v4() {
   local ipt count
   ipt="$(_find_cmd iptables)" || return 1
   # Chain must exist in filter table (AFWall's primary table for app rules).
-  _chain_exists "$ipt" filter afwall || return 1
-  # OUTPUT must hook into afwall in the filter table.
-  "$ipt" -t filter -S OUTPUT 2>/dev/null | grep -qE '^-A OUTPUT .*-j afwall($| )' || return 1
+  _chain_exists "$ipt" filter "$AFWALL_CHAIN_MAIN" || return 1
+  # OUTPUT must hook into the main chain in the filter table.
+  "$ipt" -t filter -S OUTPUT 2>/dev/null | grep -qE "^-A OUTPUT .*-j ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
   # Chain must contain at least one rule — guards against bare chain creation.
-  count="$("$ipt" -t filter -S afwall 2>/dev/null | grep -c '^-A ')" || count=0
+  count="$("$ipt" -t filter -S "$AFWALL_CHAIN_MAIN" 2>/dev/null | grep -c '^-A ')" || count=0
   [ "${count:-0}" -ge 1 ] || return 1
   return 0
 }
@@ -620,9 +628,9 @@ afwall_takeover_present_v4() {
 afwall_takeover_present_v6() {
   local ip6t count
   ip6t="$(_find_cmd ip6tables)" || return 1
-  _chain_exists "$ip6t" filter afwall || return 1
-  "$ip6t" -t filter -S OUTPUT 2>/dev/null | grep -qE '^-A OUTPUT .*-j afwall($| )' || return 1
-  count="$("$ip6t" -t filter -S afwall 2>/dev/null | grep -c '^-A ')" || count=0
+  _chain_exists "$ip6t" filter "$AFWALL_CHAIN_MAIN" || return 1
+  "$ip6t" -t filter -S OUTPUT 2>/dev/null | grep -qE "^-A OUTPUT .*-j ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
+  count="$("$ip6t" -t filter -S "$AFWALL_CHAIN_MAIN" 2>/dev/null | grep -c '^-A ')" || count=0
   [ "${count:-0}" -ge 1 ] || return 1
   return 0
 }
@@ -636,16 +644,16 @@ afwall_takeover_present_v6() {
 afwall_takeover_signature_v4() {
   local ipt rule_count chain_count
   ipt="$(_find_cmd iptables 2>/dev/null)" || { printf 'na:na'; return 1; }
-  rule_count="$("$ipt" -t filter -S afwall 2>/dev/null | grep -c '^-A ')" || rule_count=0
-  chain_count="$("$ipt" -t filter -S 2>/dev/null | grep -c '^-N afwall')" || chain_count=0
+  rule_count="$("$ipt" -t filter -S "$AFWALL_CHAIN_MAIN" 2>/dev/null | grep -c '^-A ')" || rule_count=0
+  chain_count="$("$ipt" -t filter -S 2>/dev/null | grep -c "^-N ${AFWALL_CHAIN_MAIN}")" || chain_count=0
   printf '%s:%s' "$rule_count" "$chain_count"
 }
 
 afwall_takeover_signature_v6() {
   local ip6t rule_count chain_count
   ip6t="$(_find_cmd ip6tables 2>/dev/null)" || { printf 'na:na'; return 1; }
-  rule_count="$("$ip6t" -t filter -S afwall 2>/dev/null | grep -c '^-A ')" || rule_count=0
-  chain_count="$("$ip6t" -t filter -S 2>/dev/null | grep -c '^-N afwall')" || chain_count=0
+  rule_count="$("$ip6t" -t filter -S "$AFWALL_CHAIN_MAIN" 2>/dev/null | grep -c '^-A ')" || rule_count=0
+  chain_count="$("$ip6t" -t filter -S 2>/dev/null | grep -c "^-N ${AFWALL_CHAIN_MAIN}")" || chain_count=0
   printf '%s:%s' "$rule_count" "$chain_count"
 }
 
@@ -718,11 +726,11 @@ log_transition_snapshot() {
 
   # AFWall chain state.
   afw_chain="absent"; afw_hook="absent"; afw_rules=0
-  if _chain_exists "$cmd" filter afwall; then
+  if _chain_exists "$cmd" filter "$AFWALL_CHAIN_MAIN"; then
     afw_chain="present"
-    afw_rules="$("$cmd" -t filter -S afwall 2>/dev/null | grep -c '^-A ')" || afw_rules=0
+    afw_rules="$("$cmd" -t filter -S "$AFWALL_CHAIN_MAIN" 2>/dev/null | grep -c '^-A ')" || afw_rules=0
     if "$cmd" -t filter -S OUTPUT 2>/dev/null | \
-        grep -qE '^-A OUTPUT .*-j afwall($| )'; then
+        grep -qE "^-A OUTPUT .*-j ${AFWALL_CHAIN_MAIN}"'($| )'; then
       afw_hook="present"
     fi
   fi
@@ -736,7 +744,7 @@ log_transition_snapshot() {
 afwall_forward_hook_present() {
   local ipt
   ipt="$(_find_cmd iptables)" || return 1
-  "$ipt" -t filter -S FORWARD 2>/dev/null | grep -qE '^-A FORWARD .*-j afwall($| )'
+  "$ipt" -t filter -S FORWARD 2>/dev/null | grep -qE "^-A FORWARD .*-j ${AFWALL_CHAIN_MAIN}"'($| )'
 }
 
 # Supplementary diagnostic: check whether AFWall has set up its INPUT hook.
@@ -745,7 +753,7 @@ afwall_forward_hook_present() {
 afwall_input_hook_present() {
   local ipt
   ipt="$(_find_cmd iptables)" || return 1
-  "$ipt" -t filter -S INPUT 2>/dev/null | grep -qE '^-A INPUT .*-j afwall($| )'
+  "$ipt" -t filter -S INPUT 2>/dev/null | grep -qE "^-A INPUT .*-j ${AFWALL_CHAIN_MAIN}"'($| )'
 }
 
 # Detect AFWall's built-in startup leak protection (the "Fix Startup Data Leak"
@@ -791,7 +799,7 @@ afwall_startup_protection_active() {
   for cmd in iptables ip6tables; do
     c="$(_find_cmd "$cmd" 2>/dev/null)" || continue
     if _table_available "$c" filter && \
-       "$c" -t filter -S 2>/dev/null | grep -qE '^-N afwall($| )'; then
+       "$c" -t filter -S 2>/dev/null | grep -qE "^-N ${AFWALL_CHAIN_MAIN}"'($| )'; then
       debug_log "afwall_startup_protection: found afwall filter chain ($cmd)"
       return 0
     fi
@@ -936,10 +944,114 @@ cleanup_legacy() {
   return 0
 }
 
+# ── Transport-specific AFWall chain detection ──────────────────────────────────
+# AFWall+ creates dedicated sub-chains for each transport type:
+#   afwall-wifi   — Wi-Fi rules
+#   afwall-3g     — mobile data rules
+# These are created only when AFWall has been configured with per-transport
+# rules. Detection requires: chain exists, hook present, and at least one rule.
+
+# Generic helper: check that a named afwall transport chain exists in the filter
+# table and contains at least one rule.
+_afwall_transport_chain_ready() {
+  local cmd="$1" chain="$2" count
+  [ -x "$cmd" ] || return 1
+  _chain_exists "$cmd" filter "$chain" || return 1
+  count="$("$cmd" -t filter -S "$chain" 2>/dev/null | grep -c '^-A ')" || count=0
+  [ "${count:-0}" -ge 1 ] || return 1
+  return 0
+}
+
+# Wi-Fi transport chain present (IPv4)
+afwall_wifi_chain_present_v4() {
+  local ipt
+  ipt="$(_find_cmd iptables)" || return 1
+  _afwall_transport_chain_ready "$ipt" "$AFWALL_CHAIN_WIFI"
+}
+
+# Wi-Fi transport chain present (IPv6)
+afwall_wifi_chain_present_v6() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables)" || return 1
+  _afwall_transport_chain_ready "$ip6t" "$AFWALL_CHAIN_WIFI"
+}
+
+# Mobile data transport chain present (IPv4)
+afwall_mobile_chain_present_v4() {
+  local ipt
+  ipt="$(_find_cmd iptables)" || return 1
+  _afwall_transport_chain_ready "$ipt" "$AFWALL_CHAIN_MOBILE"
+}
+
+# Mobile data transport chain present (IPv6)
+afwall_mobile_chain_present_v6() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables)" || return 1
+  _afwall_transport_chain_ready "$ip6t" "$AFWALL_CHAIN_MOBILE"
+}
+
+# Transport-specific rule-graph signature: returns "rules:chains" for the
+# named transport chain. Used to detect whether the chain is still settling.
+_afwall_transport_signature() {
+  local cmd="$1" chain="$2" rule_count
+  [ -x "$cmd" ] || { printf 'na:na'; return 1; }
+  rule_count="$("$cmd" -t filter -S "$chain" 2>/dev/null | grep -c '^-A ')" || rule_count=0
+  printf '%s' "$rule_count"
+}
+
+afwall_wifi_signature_v4() {
+  local ipt
+  ipt="$(_find_cmd iptables 2>/dev/null)" || { printf 'na'; return 1; }
+  _afwall_transport_signature "$ipt" "$AFWALL_CHAIN_WIFI"
+}
+
+afwall_wifi_signature_v6() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables 2>/dev/null)" || { printf 'na'; return 1; }
+  _afwall_transport_signature "$ip6t" "$AFWALL_CHAIN_WIFI"
+}
+
+afwall_mobile_signature_v4() {
+  local ipt
+  ipt="$(_find_cmd iptables 2>/dev/null)" || { printf 'na'; return 1; }
+  _afwall_transport_signature "$ipt" "$AFWALL_CHAIN_MOBILE"
+}
+
+afwall_mobile_signature_v6() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables 2>/dev/null)" || { printf 'na'; return 1; }
+  _afwall_transport_signature "$ip6t" "$AFWALL_CHAIN_MOBILE"
+}
+
+# ── Blackout-state persistence ─────────────────────────────────────────────────
+# State files used to communicate between post-fs-data and service phases.
+# ${STATE_DIR}/blackout_active    — written by post-fs-data; cleared after handoff
+# ${STATE_DIR}/radio_off_pending  — radios must remain off until transport handoff
+
+mark_blackout_active() {
+  _init_dirs
+  printf '1' > "${STATE_DIR}/blackout_active" 2>/dev/null || true
+  printf '1' > "${STATE_DIR}/radio_off_pending" 2>/dev/null || true
+  debug_log "mark_blackout_active: blackout state persisted"
+}
+
+clear_blackout_active() {
+  rm -f "${STATE_DIR}/blackout_active" "${STATE_DIR}/radio_off_pending" 2>/dev/null || true
+  debug_log "clear_blackout_active: blackout state cleared"
+}
+
+blackout_is_active() {
+  [ -f "${STATE_DIR}/blackout_active" ]
+}
+
+radio_off_pending() {
+  [ -f "${STATE_DIR}/radio_off_pending" ]
+}
+
 # ── Lower-layer suppression subsystem ─────────────────────────────────────────
 # Source the lower-layer suppression library if present.
-# This provides: lowlevel_prepare_environment, lowlevel_restore_changed_state,
-# lowlevel_emergency_restore, and supporting helpers.
+# This provides: lowlevel_prepare_environment_early, lowlevel_prepare_environment,
+# lowlevel_restore_changed_state, lowlevel_emergency_restore, and helpers.
 # MODDIR is set by the calling script before sourcing common.sh.
 if [ -f "${MODDIR:-}/bin/lowlevel.sh" ]; then
   . "${MODDIR}/bin/lowlevel.sh"

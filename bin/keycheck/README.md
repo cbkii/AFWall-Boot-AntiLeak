@@ -1,59 +1,61 @@
 # keycheck — Volume Key Reader Binaries
 
-This directory holds arch-appropriate `keycheck` pre-compiled binaries used as a
-fallback input method during installer configuration when raw `getevent` detection
-is unreliable (e.g., unusual recovery environments or delayed event delivery).
+This directory contains prebuilt `keycheck` binaries used as an installer
+fallback for volume-key input detection. They are used when the primary
+`getevent` method is unavailable or unreliable.
 
 ---
 
-## Expected filenames
+## Shipped binaries
 
-| Architecture  | Filename             |
-|---------------|----------------------|
-| arm64 / aarch64 | `keycheck-arm64`  |
-| arm (32-bit)  | `keycheck-arm`       |
-| x86_64        | `keycheck-x86_64`    |
-| x86 / i686    | `keycheck-x86`       |
+| Architecture    | Filename          | Status    |
+|-----------------|-------------------|-----------|
+| arm64 / aarch64 | `keycheck-arm64`  | Included  |
 
-Place the appropriate binary for each architecture in this directory.  All
-binaries must be marked executable (`chmod +x`).
+The `keycheck-arm64` binary targets AArch64 (ARM 64-bit), which covers:
+- Pixel 9a (primary target)
+- All other modern Android devices using a 64-bit ARM SoC
+
+The binary is statically linked and has no external dependencies.
 
 ---
 
 ## Exit codes
 
-| Exit code | Meaning   |
-|-----------|-----------|
-| 41        | VOL+ pressed |
-| 42        | VOL- pressed |
-| other     | Timeout or no key detected |
+| Exit code | Meaning                        |
+|-----------|--------------------------------|
+| 41        | VOL+ pressed                   |
+| 42        | VOL- pressed                   |
+| 1         | Timeout or no key detected     |
 
 ---
 
-## Source and build
+## How it works
 
-The canonical keycheck source is maintained by Zackptg5 as part of the
-MMT-Extended module toolkit:
+The binary opens all `/dev/input/event*` devices, then waits up to 10 seconds
+for a `EV_KEY` DOWN event with code `KEY_VOLUMEUP` (115) or `KEY_VOLUMEDOWN`
+(114). Returns 41 on VOL+, 42 on VOL-, 1 on timeout.
 
-  https://github.com/Zackptg5/MMT-Extended
+---
 
-To build for Android targets you need the Android NDK.  Example (arm64):
+## How the installer uses it
+
+1. Primary method: raw `getevent -lq` (streams events directly).
+2. Fallback: arch-appropriate `keycheck` binary if getevent is unavailable.
+3. If neither method works: non-interactive fallback
+   (installer.cfg → existing config → safe defaults).
+
+On Pixel 9a and modern Pixels, `getevent` is the primary method and works
+reliably. `keycheck` is the fallback for unusual recovery environments.
+
+---
+
+## Build
+
+Compiled from a minimal C source using the Android-compatible struct layout:
 
 ```sh
-$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang \
-    -O2 -static -o keycheck-arm64 keycheck.c
+aarch64-linux-gnu-gcc -O2 -static -o keycheck-arm64 keycheck.c
 ```
 
----
-
-## Fallback behaviour
-
-If no binary is present for the current architecture the installer falls back
-gracefully:
-
-1. Raw `getevent` is used exclusively (the primary method on modern Pixels).
-2. If `getevent` also fails, the non-interactive fallback chain is used:
-   installer.cfg → existing preserved config → safe defaults.
-
-No binary is required for correct installer operation on Pixel 9a or similar
-devices where `getevent` works reliably.
+Source code is included in the module repository at `tools/keycheck.c`.
