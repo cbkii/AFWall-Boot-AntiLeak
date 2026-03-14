@@ -24,7 +24,10 @@ Runs before any Android framework services start.
 Actions:
 - Load config.
 - Install iptables hard block (OUTPUT, FORWARD, optionally INPUT) for both
-  IPv4 and IPv6. Uses raw table (pre-conntrack) with filter fallback.
+  IPv4 and IPv6. Dual-layer blackout: installs OUTPUT block in both the raw
+  table (pre-conntrack, primary) and the filter table (shadow/failsafe) for
+  defence-in-depth. If the raw layer is disrupted externally, the filter layer
+  continues blocking OUTPUT traffic until the raw layer is repaired.
 - Quiesce any network interfaces already present in `/sys/class/net`.
 - Persist blackout state: `${STATE_DIR}/blackout_active` and
   `${STATE_DIR}/radio_off_pending`.
@@ -39,7 +42,12 @@ services are not running yet.
 Runs in a background subshell once Magisk's service phase completes.
 
 Actions:
-- Re-assert hard block (verify it is still installed; reinstall if absent).
+- **Startup integrity check**: verify that the dual-layer OUTPUT blackout
+  (raw + filter) installed in Stage A is still intact for each IP family.
+  If `block_installed=1` (written by Stage A) but any layer is missing or
+  degraded, immediately repair it by re-installing both layers.  If repair
+  fails, the family is still treated as blocked (fail-closed) so that the
+  full handoff wait proceeds.
 - Merge early-phase interface list with service-phase quiesce list.
 - Wait for Android framework services (retry up to 5 times with 3s delay).
 - Disable Wi-Fi via `cmd wifi set-wifi-enabled disabled`; fallback to `svc wifi disable`.
@@ -53,6 +61,12 @@ Actions:
 
 Radio-off reassertion runs every `RADIO_REASSERT_INTERVAL` seconds (default 10s)
 while waiting for AFWall+ readiness.
+
+Blackout integrity reassertion runs every `BLACKOUT_REASSERT_INTERVAL` seconds
+(default 5s, configurable) while the OUTPUT block is active and handoff is
+incomplete.  For each family, the module checks that the chain exists, the
+DROP rule is present, and the OUTPUT jump exists in both the raw and filter
+tables.  If any layer is missing, it is immediately repaired.
 
 ### Stage C — AFWall+ takeover detection
 
@@ -226,6 +240,7 @@ All config keys and their defaults. Override at:
 | `WIFI_AFWALL_GATE`      | `1`     | Gate Wi-Fi restore on afwall-wifi chain       |
 | `MOBILE_AFWALL_GATE`    | `1`     | Gate mobile restore on afwall-3g chain        |
 | `RADIO_REASSERT_INTERVAL` | `10`  | Radio-off reassertion interval in seconds     |
+| `BLACKOUT_REASSERT_INTERVAL` | `5` | iptables blackout integrity check/repair interval (s) |
 
 ### Handoff timing
 
@@ -274,8 +289,10 @@ Key log entries:
   radio_off_pending     — radios must remain off (deleted after handoff)
   block_installed       — iptables block is active (1 = yes)
   integration_mode      — chosen integration mode
-  ipv4_out_table        — table holding IPv4 OUTPUT block
-  ipv6_out_table        — table holding IPv6 OUTPUT block
+  ipv4_out_table        — primary table for IPv4 OUTPUT block (raw or filter);
+                          block is also installed in the other table as shadow
+  ipv6_out_table        — primary table for IPv6 OUTPUT block (raw or filter);
+                          block is also installed in the other table as shadow
   ipv4_fwd_active       — IPv4 FORWARD block active (1 = yes)
   ipv6_fwd_active       — IPv6 FORWARD block active (1 = yes)
   ipv4_in_active        — IPv4 INPUT block active (1 = yes, opt-in)
@@ -317,8 +334,12 @@ Or use the Magisk app → Modules → AFWall Boot AntiLeak → Action.
 iptables -t raw -S | grep MOD_PRE_AFW
 iptables -t filter -S | grep MOD_PRE_AFW
 ip6tables -t raw -S | grep MOD_PRE_AFW
+ip6tables -t filter -S | grep MOD_PRE_AFW
 ```
-If blocks are present, the module is still waiting for AFWall+.
+The module installs a dual-layer blackout (raw + filter) for defence-in-depth.
+You should see `MOD_PRE_AFW` chains in both `raw` and `filter` tables for each
+family while the blackout is active.  If blocks are present, the module is
+still waiting for AFWall+.
 
 **Step 5 — Check AFWall+ chain:**
 ```sh

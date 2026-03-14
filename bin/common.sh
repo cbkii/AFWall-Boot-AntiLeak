@@ -661,20 +661,20 @@ _output_block_intact_v6_filter() {
 # output_block_intact_v4: returns 0 only when at least one full layer (chain +
 # DROP + jump) is confirmed intact for IPv4 OUTPUT.  Logs detailed results.
 output_block_intact_v4() {
-  local raw_ok=1 filter_ok=1
-  _output_block_intact_v4_raw    && raw_ok=0
-  _output_block_intact_v4_filter && filter_ok=0
-  debug_log "output_block_intact_v4: raw=${raw_ok} filter=${filter_ok}"
-  [ "$raw_ok" = "0" ] || [ "$filter_ok" = "0" ]
+  local raw_intact=0 filter_intact=0
+  _output_block_intact_v4_raw    && raw_intact=1
+  _output_block_intact_v4_filter && filter_intact=1
+  debug_log "output_block_intact_v4: raw_intact=${raw_intact} filter_intact=${filter_intact}"
+  [ "$raw_intact" = "1" ] || [ "$filter_intact" = "1" ]
 }
 
 # output_block_intact_v6: same for IPv6 OUTPUT.
 output_block_intact_v6() {
-  local raw_ok=1 filter_ok=1
-  _output_block_intact_v6_raw    && raw_ok=0
-  _output_block_intact_v6_filter && filter_ok=0
-  debug_log "output_block_intact_v6: raw=${raw_ok} filter=${filter_ok}"
-  [ "$raw_ok" = "0" ] || [ "$filter_ok" = "0" ]
+  local raw_intact=0 filter_intact=0
+  _output_block_intact_v6_raw    && raw_intact=1
+  _output_block_intact_v6_filter && filter_intact=1
+  debug_log "output_block_intact_v6: raw_intact=${raw_intact} filter_intact=${filter_intact}"
+  [ "$raw_intact" = "1" ] || [ "$filter_intact" = "1" ]
 }
 
 # ── Blackout integrity log helper ─────────────────────────────────────────────

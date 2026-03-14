@@ -40,6 +40,7 @@
   WIFI_AFWALL_GATE="${WIFI_AFWALL_GATE:-1}"
   MOBILE_AFWALL_GATE="${MOBILE_AFWALL_GATE:-1}"
   RADIO_REASSERT_INTERVAL="${RADIO_REASSERT_INTERVAL:-10}"
+  BLACKOUT_REASSERT_INTERVAL="${BLACKOUT_REASSERT_INTERVAL:-5}"
   UNLOCK_POLL_INTERVAL="${UNLOCK_POLL_INTERVAL:-5}"
   # How long to wait for transport-specific chains before falling back to
   # main-chain-only readiness (AFWall may not emit afwall-wifi / afwall-3g).
@@ -49,7 +50,7 @@
   log "service: config: timeout=${TIMEOUT_SECS}s policy=${TIMEOUT_POLICY} auto_unblock=${AUTO_TIMEOUT_UNBLOCK} unlock_gated=${TIMEOUT_UNLOCK_GATED}"
   log "service: config: settle=${SETTLE_SECS}s liveness=${LIVENESS_SECS}s fallback=${FALLBACK_SECS}s transport_wait=${TRANSPORT_WAIT_SECS}s"
   log "service: config: fwd=${ENABLE_FORWARD_BLOCK:-1} in=${ENABLE_INPUT_BLOCK:-0} ll_mode=${LOWLEVEL_MODE:-safe}"
-  log "service: config: wifi_gate=${WIFI_AFWALL_GATE} mobile_gate=${MOBILE_AFWALL_GATE} reassert_interval=${RADIO_REASSERT_INTERVAL}s"
+  log "service: config: wifi_gate=${WIFI_AFWALL_GATE} mobile_gate=${MOBILE_AFWALL_GATE} reassert_interval=${RADIO_REASSERT_INTERVAL}s blackout_reassert=${BLACKOUT_REASSERT_INTERVAL}s"
 
   # Validate TIMEOUT_POLICY; default to fail_closed on unknown value.
   case "$TIMEOUT_POLICY" in
@@ -447,11 +448,13 @@
     # ── C/D) Periodic blackout integrity reassertion ─────────────────────────
     # While the blackout is active, verify that the OUTPUT block (chain + DROP
     # rule + OUTPUT jump) is still intact for each family.  Repair immediately
-    # if any layer is missing.  Runs on the same interval as radio reassertion.
+    # if any layer is missing.  Uses BLACKOUT_REASSERT_INTERVAL (default 5s),
+    # shorter than the radio reassertion interval, to minimise the unprotected
+    # window if chains are disrupted by external tooling.
     [ "$last_blackout_reassert_ts" = "0" ] && [ "$NOW" != "0" ] && last_blackout_reassert_ts="$NOW"
     if [ "$NOW" != "0" ] && [ "$last_blackout_reassert_ts" != "0" ]; then
       _blackout_reassert_elapsed=$((NOW - last_blackout_reassert_ts))
-      if [ "$_blackout_reassert_elapsed" -ge "$RADIO_REASSERT_INTERVAL" ]; then
+      if [ "$_blackout_reassert_elapsed" -ge "$BLACKOUT_REASSERT_INTERVAL" ]; then
         last_blackout_reassert_ts="$NOW"
         if [ "$v4_blocked" = "1" ] && [ "$v4_released" = "0" ]; then
           if ! output_block_intact_v4; then
