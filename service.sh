@@ -180,6 +180,7 @@
   device_unlocked=0
   unlock_ts=0
   timeout_start_ts=0  # timestamp when timeout countdown began (0 = not started)
+  last_unlock_poll_ts=0  # timestamp of last lowlevel_device_is_unlocked probe
 
   # ── Signature validity helper ───────────────────────────────────────────────
   _sig_is_valid() { [ -n "$1" ] && [ "$1" != "na:na" ]; }
@@ -335,6 +336,8 @@
 
     # ── Radio reassertion ───────────────────────────────────────────────────
     # Periodically re-assert Wi-Fi and mobile data off while blackout is active.
+    # Self-heal: if START_TS was 0 (date failure at startup), initialise from NOW.
+    [ "$last_reassert_ts" = "0" ] && [ "$NOW" != "0" ] && last_reassert_ts="$NOW"
     if [ "$NOW" != "0" ] && [ "$last_reassert_ts" != "0" ]; then
       _reassert_elapsed=$((NOW - last_reassert_ts))
       if [ "$_reassert_elapsed" -ge "$RADIO_REASSERT_INTERVAL" ]; then
@@ -347,16 +350,25 @@
 
     # ── Unlock detection ────────────────────────────────────────────────────
     # Determine if the device has been unlocked; used for timeout gating.
-    if [ "$device_unlocked" = "0" ]; then
-      if lowlevel_device_is_unlocked; then
-        device_unlocked=1
-        unlock_ts="$NOW"
-        _unlock_elapsed=0
-        [ "$NOW" != "0" ] && [ "$START_TS" != "0" ] && \
-          _unlock_elapsed=$((NOW - START_TS))
-        log "service: device unlock detected (elapsed=${_unlock_elapsed}s from start)"
-      else
-        debug_log "service: device not yet unlocked — timeout gate active"
+    # Probe only when the configured UNLOCK_POLL_INTERVAL has elapsed.
+    if [ "$device_unlocked" = "0" ] && [ "$NOW" != "0" ]; then
+      _do_unlock_probe=0
+      if [ "$last_unlock_poll_ts" = "0" ]; then
+        _do_unlock_probe=1
+      elif [ $((NOW - last_unlock_poll_ts)) -ge "$UNLOCK_POLL_INTERVAL" ]; then
+        _do_unlock_probe=1
+      fi
+      if [ "$_do_unlock_probe" = "1" ]; then
+        last_unlock_poll_ts="$NOW"
+        if lowlevel_device_is_unlocked; then
+          device_unlocked=1
+          unlock_ts="$NOW"
+          _unlock_elapsed=0
+          [ "$START_TS" != "0" ] && _unlock_elapsed=$((NOW - START_TS))
+          log "service: device unlock detected (elapsed=${_unlock_elapsed}s from start)"
+        else
+          debug_log "service: device not yet unlocked — timeout gate active"
+        fi
       fi
     fi
 
