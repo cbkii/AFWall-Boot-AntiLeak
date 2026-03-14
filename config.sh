@@ -254,6 +254,41 @@ UNLOCK_POLL_INTERVAL=5
 # FORWARD/INPUT chain rules it manages (tether, LAN, VPN, roaming controls).
 SETTLE_SECS=5
 
+# ── Poll interval ─────────────────────────────────────────────────────────────
+# How often (in seconds) the main handoff loop iterates while waiting for AFWall
+# takeover.  1 second allows the module to react to AFWall readiness within one
+# polling cycle rather than waiting up to 2 seconds.  The per-poll cost is one
+# iptables-save (or iptables -S) call per blocked family.
+# Set to 2 to restore the pre-v2.5 behaviour.
+#
+POLL_INTERVAL_SECS=1
+
+# ── Fast-path stable window ───────────────────────────────────────────────────
+# The AFWall full graph fingerprint must remain identical for at least this many
+# seconds before the fast-path accepts it.  The fast path fires when corroborating
+# evidence is present (AFWall process visible OR current-boot file evidence found).
+# Post-boot (sys.boot_completed=1) LIVENESS_SECS_POST_BOOT is used instead.
+#
+FAST_STABLE_SECS=2
+
+# ── Conservative-path stable window ──────────────────────────────────────────
+# The AFWall full graph fingerprint must remain identical for at least this many
+# seconds before the conservative path accepts it.  The conservative path fires
+# when corroborating evidence is absent.  No extra settle sleep is added.
+# Post-boot (sys.boot_completed=1) FALLBACK_SECS_POST_BOOT is used instead.
+#
+SLOW_STABLE_SECS=6
+
+# ── Transport-absence stable window ──────────────────────────────────────────
+# Once the main AFWall family graph has been confirmed stable, if no transport-
+# specific chains or references (afwall-wifi* / afwall-3g*) have been seen in
+# any snapshot for this many consecutive seconds, the module accepts
+# main-chain-only readiness for that transport.
+# This replaces the old blunt TRANSPORT_WAIT_SECS=30 as the primary path.
+# Post-boot (sys.boot_completed=1) TRANSPORT_WAIT_SECS_POST_BOOT is used.
+#
+TRANSPORT_ABSENCE_STABLE_SECS=3
+
 # ── Boot-completion acceleration ──────────────────────────────────────────────
 # When set to 1 (default), the module uses sys.boot_completed=1 and related
 # boot-completion signals to shorten the detection windows for liveness,
