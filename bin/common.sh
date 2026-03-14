@@ -1,11 +1,11 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v2.4 - Common library
+# AFWall Boot AntiLeak v2.5 - Common library
 # POSIX/ash compatible. No bashisms. Sourced by all module scripts; do not
 # execute directly.
 
 # ── Module identity ────────────────────────────────────────────────────────────
 MODULE_ID="AFWall-Boot-AntiLeak"
-MODULE_VERSION="v2.4"
+MODULE_VERSION="v2.5"
 MODULE_DATA="/data/adb/${MODULE_ID}"
 LOG_DIR="${MODULE_DATA}/logs"
 LOG_FILE="${LOG_DIR}/boot.log"
