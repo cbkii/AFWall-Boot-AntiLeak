@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v2.2.22 - User Configuration
+# AFWall Boot AntiLeak v2.4 - User Configuration
 # This file is sourced during boot. Keep syntax POSIX/ash compatible.
 # Place a custom copy at /data/adb/AFWall-Boot-AntiLeak/config.sh to
 # override the module's built-in defaults without modifying the module itself.

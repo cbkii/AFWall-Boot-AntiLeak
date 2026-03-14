@@ -1,4 +1,4 @@
-# AFWall Boot AntiLeak Fork — Advanced Documentation v2.2.22
+# AFWall Boot AntiLeak Fork — Advanced Documentation v2.4
 
 ---
 
