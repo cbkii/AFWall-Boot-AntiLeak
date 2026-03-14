@@ -846,6 +846,56 @@ afwall_takeover_signature_v6() {
   printf '%s:%s' "$rule_count" "$chain_count"
 }
 
+# ── Boot-completion probes ────────────────────────────────────────────────────
+# These helpers expose fast, property-based signals that indicate the Android
+# framework has reached a well-known boot milestone.  They are intentionally
+# lightweight (single getprop call) and safe to call in tight polling loops.
+#
+# sys_boot_completed: true when SystemServer has set sys.boot_completed=1,
+#   which happens after all boot-phase services have been started and all
+#   persistent apps have received ACTION_BOOT_COMPLETED.  This is the
+#   canonical "framework fully up" signal on all Android versions.
+#
+# boot_animation_stopped: true when the bootanim service has stopped.  Fires
+#   a few seconds before sys.boot_completed on most devices and is a reliable
+#   "end of visible boot" signal.  Useful as an earlier accelerator.
+#
+# Security note: these properties are only writable by root/system; the module
+# already runs as root, so there is no privilege-escalation concern.
+sys_boot_completed() {
+  [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ]
+}
+
+boot_animation_stopped() {
+  [ "$(getprop init.svc.bootanim 2>/dev/null)" = "stopped" ]
+}
+
+# ── AFWall rule-density heuristic ─────────────────────────────────────────────
+# Returns 0 (success) when the afwall filter chain contains at least MIN rules.
+# A "dense" chain provides stronger evidence that AFWall has completed a full
+# rule application cycle (not just created the chain or added a single default
+# rule).  Combined with sys.boot_completed, this is used as an independent
+# confirmation path that does not require observing the AFWall process.
+#
+# min: minimum rule count (caller supplies; defaults to 3 when called without
+#      an argument — three rules is a conservative minimum that rules out bare
+#      chain creation and partial initialisation states).
+afwall_rules_dense_v4() {
+  local min="${1:-3}" ipt count
+  ipt="$(_find_cmd iptables)" || return 1
+  _chain_exists "$ipt" filter "$AFWALL_CHAIN_MAIN" || return 1
+  count="$("$ipt" -t filter -S "$AFWALL_CHAIN_MAIN" 2>/dev/null | grep -c '^-A ')" || count=0
+  [ "${count:-0}" -ge "$min" ]
+}
+
+afwall_rules_dense_v6() {
+  local min="${1:-3}" ip6t count
+  ip6t="$(_find_cmd ip6tables)" || return 1
+  _chain_exists "$ip6t" filter "$AFWALL_CHAIN_MAIN" || return 1
+  count="$("$ip6t" -t filter -S "$AFWALL_CHAIN_MAIN" 2>/dev/null | grep -c '^-A ')" || count=0
+  [ "${count:-0}" -ge "$min" ]
+}
+
 # ── Secondary evidence of current-boot AFWall activity ───────────────────────
 # Checks whether AFWall's private data files were written after this module
 # installed its block (using the ipv4_out_table state file as a reference
@@ -999,17 +1049,43 @@ afwall_startup_protection_active() {
 }
 
 # Process-level detection (supplementary; less reliable than rule checks).
+# Uses three independent methods so that failures in any one (e.g., pidof not
+# available, ps output format variation, or SELinux restrictions on /proc) do
+# not prevent detection.
+#
+# Method 1: pidof — fast and authoritative on Android 8+.
+# Method 2: ps — broad compatibility; handles process sub-names (pkg:service).
+# Method 3: /proc/*/cmdline scan — reliable when both pidof and ps fail;
+#   reads the NUL-separated argument list from procfs directly.  The first
+#   token in cmdline is the process/package name on Android.
 afwall_process_present() {
   local pkg="$1" esc_pkg
   [ -n "$pkg" ] || return 1
+
+  # Method 1: pidof
   if has_cmd pidof && pidof "$pkg" >/dev/null 2>&1; then
     return 0
   fi
+
+  # Method 2: ps
   esc_pkg="$(printf '%s' "$pkg" | sed 's/\./\\./g')"
   if has_cmd ps; then
     ps -A 2>/dev/null | grep -qE "[[:space:]]${esc_pkg}(:[[:alnum:]_]+)?$" && return 0
     ps    2>/dev/null | grep -qE "[[:space:]]${esc_pkg}(:[[:alnum:]_]+)?$" && return 0
   fi
+
+  # Method 3: /proc/*/cmdline — fallback for environments where pidof/ps are
+  # restricted or return unexpected output formats.
+  local f first_arg
+  for f in /proc/[0-9]*/cmdline; do
+    [ -f "$f" ] || continue
+    # The first NUL-delimited token is the process name / package name.
+    first_arg="$(tr '\0' '\n' < "$f" 2>/dev/null | head -1)"
+    case "$first_arg" in
+      "$pkg"|"${pkg}:"*) return 0 ;;
+    esac
+  done
+
   return 1
 }
 

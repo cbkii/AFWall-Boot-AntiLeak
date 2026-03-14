@@ -46,11 +46,23 @@
   # main-chain-only readiness (AFWall may not emit afwall-wifi / afwall-3g).
   TRANSPORT_WAIT_SECS="${TRANSPORT_WAIT_SECS:-30}"
 
+  # ── Boot-completion acceleration (new) ───────────────────────────────────
+  # When BOOT_COMPLETE_ACCELERATE=1 and sys.boot_completed=1 is detected, the
+  # shorter *_POST_BOOT windows replace their base counterparts so that the
+  # module hands off to AFWall at the earliest safe moment.
+  BOOT_COMPLETE_ACCELERATE="${BOOT_COMPLETE_ACCELERATE:-1}"
+  AFWALL_RULE_DENSITY_MIN="${AFWALL_RULE_DENSITY_MIN:-3}"
+  LIVENESS_SECS_POST_BOOT="${LIVENESS_SECS_POST_BOOT:-2}"
+  FALLBACK_SECS_POST_BOOT="${FALLBACK_SECS_POST_BOOT:-4}"
+  SETTLE_SECS_POST_BOOT="${SETTLE_SECS_POST_BOOT:-1}"
+  TRANSPORT_WAIT_SECS_POST_BOOT="${TRANSPORT_WAIT_SECS_POST_BOOT:-5}"
+
   log "service: start ($MODULE_VERSION)"
   log "service: config: timeout=${TIMEOUT_SECS}s policy=${TIMEOUT_POLICY} auto_unblock=${AUTO_TIMEOUT_UNBLOCK} unlock_gated=${TIMEOUT_UNLOCK_GATED}"
   log "service: config: settle=${SETTLE_SECS}s liveness=${LIVENESS_SECS}s fallback=${FALLBACK_SECS}s transport_wait=${TRANSPORT_WAIT_SECS}s"
   log "service: config: fwd=${ENABLE_FORWARD_BLOCK:-1} in=${ENABLE_INPUT_BLOCK:-0} ll_mode=${LOWLEVEL_MODE:-safe}"
   log "service: config: wifi_gate=${WIFI_AFWALL_GATE} mobile_gate=${MOBILE_AFWALL_GATE} reassert_interval=${RADIO_REASSERT_INTERVAL}s blackout_reassert=${BLACKOUT_REASSERT_INTERVAL}s"
+  log "service: config: boot_accel=${BOOT_COMPLETE_ACCELERATE} density_min=${AFWALL_RULE_DENSITY_MIN} liveness_pb=${LIVENESS_SECS_POST_BOOT}s fallback_pb=${FALLBACK_SECS_POST_BOOT}s settle_pb=${SETTLE_SECS_POST_BOOT}s twait_pb=${TRANSPORT_WAIT_SECS_POST_BOOT}s"
 
   # Validate TIMEOUT_POLICY; default to fail_closed on unknown value.
   case "$TIMEOUT_POLICY" in
@@ -207,8 +219,8 @@
   [ "$v4_blocked" = "0" ] && v4_done=1 && v4_released=1
   [ "$v6_blocked" = "0" ] && v6_done=1 && v6_released=1
 
-  v4_takeover_ts=0; v4_sig=""; v4_alive_ts=0; v4_fallback_ts=0; v4_path=""
-  v6_takeover_ts=0; v6_sig=""; v6_alive_ts=0; v6_fallback_ts=0; v6_path=""
+  v4_takeover_ts=0; v4_sig=""; v4_alive_ts=0; v4_bc_ts=0; v4_fallback_ts=0; v4_path=""
+  v6_takeover_ts=0; v6_sig=""; v6_alive_ts=0; v6_bc_ts=0; v6_fallback_ts=0; v6_path=""
 
   # ── Transport readiness tracking ────────────────────────────────────────────
   # wifi_done/mobile_done: 1 when the corresponding transport's AFWall readiness
@@ -283,9 +295,17 @@
   }
 
   # ── Final-settle helpers ────────────────────────────────────────────────────
+  # When BOOT_COMPLETE_ACCELERATE=1 and sys.boot_completed=1 is detected,
+  # SETTLE_SECS_POST_BOOT is used instead of SETTLE_SECS.  Post-boot, AFWall
+  # has finished its rule-application cycle so a longer settle window adds no
+  # safety benefit and only delays restoration.
   _settle_confirm_v4() {
     local path_label="$1" pre_sig="$2" post_sig
-    sleep "$SETTLE_SECS"
+    local _settle_secs="$SETTLE_SECS"
+    if [ "$_boot_complete_now" = "1" ]; then
+      _settle_secs="$SETTLE_SECS_POST_BOOT"
+    fi
+    sleep "$_settle_secs"
     if ! afwall_takeover_present_v4; then
       log "service: v4 ${path_label}: takeover absent after settle — reset"
       return 1
@@ -299,13 +319,17 @@
       log "service: v4 ${path_label}: settle sig drift (pre=$pre_sig post=$post_sig) — reset"
       return 1
     fi
-    log "service: v4 ${path_label}: settle confirmed (sig=$pre_sig)"
+    log "service: v4 ${path_label}: settle confirmed (sig=$pre_sig settle=${_settle_secs}s)"
     return 0
   }
 
   _settle_confirm_v6() {
     local path_label="$1" pre_sig="$2" post_sig
-    sleep "$SETTLE_SECS"
+    local _settle_secs="$SETTLE_SECS"
+    if [ "$_boot_complete_now" = "1" ]; then
+      _settle_secs="$SETTLE_SECS_POST_BOOT"
+    fi
+    sleep "$_settle_secs"
     if ! afwall_takeover_present_v6; then
       log "service: v6 ${path_label}: takeover absent after settle — reset"
       return 1
@@ -319,7 +343,7 @@
       log "service: v6 ${path_label}: settle sig drift (pre=$pre_sig post=$post_sig) — reset"
       return 1
     fi
-    log "service: v6 ${path_label}: settle confirmed (sig=$pre_sig)"
+    log "service: v6 ${path_label}: settle confirmed (sig=$pre_sig settle=${_settle_secs}s)"
     return 0
   }
 
@@ -361,9 +385,13 @@
           wifi_check_ts="$now_ts"
           wifi_sig="$w_sig"
         else
-          local w_elapsed
+          local w_elapsed _w_settle_secs
           w_elapsed=$((now_ts - wifi_check_ts))
-          if [ "$w_elapsed" -ge "$SETTLE_SECS" ]; then
+          _w_settle_secs="$SETTLE_SECS"
+          if [ "$_boot_complete_now" = "1" ]; then
+            _w_settle_secs="$SETTLE_SECS_POST_BOOT"
+          fi
+          if [ "$w_elapsed" -ge "$_w_settle_secs" ]; then
             wifi_done=1
             log "service: wifi transport: ${AFWALL_CHAIN_WIFI} chain stable (sig=${w_sig} elapsed=${w_elapsed}s) — Wi-Fi ready"
             lowlevel_restore_wifi_if_allowed
@@ -374,13 +402,20 @@
         # If enough time has passed since main chain was first confirmed and
         # we have never seen the transport chain, fall back to main-chain-only
         # readiness (AFWall may not be using transport-specific chains).
+        # Post-boot: use the shorter TRANSPORT_WAIT_SECS_POST_BOOT threshold
+        # because if AFWall uses transport chains they will be present by the
+        # time sys.boot_completed fires.
         if [ "$wifi_chain_seen" = "0" ] && \
            [ "$now_ts" != "0" ] && [ "$_afwall_confirmed_ts" != "0" ]; then
-          local w_wait
+          local w_wait _w_tw_threshold
           w_wait=$((now_ts - _afwall_confirmed_ts))
-          if [ "$w_wait" -ge "$TRANSPORT_WAIT_SECS" ]; then
+          _w_tw_threshold="$TRANSPORT_WAIT_SECS"
+          if [ "$_boot_complete_now" = "1" ]; then
+            _w_tw_threshold="$TRANSPORT_WAIT_SECS_POST_BOOT"
+          fi
+          if [ "$w_wait" -ge "$_w_tw_threshold" ]; then
             wifi_done=1
-            log "service: wifi transport: no ${AFWALL_CHAIN_WIFI} chain after ${w_wait}s; accepting main chain readiness"
+            log "service: wifi transport: no ${AFWALL_CHAIN_WIFI} chain after ${w_wait}s (threshold=${_w_tw_threshold}s); accepting main chain readiness"
             lowlevel_restore_wifi_if_allowed
           fi
         fi
@@ -404,9 +439,13 @@
           mobile_check_ts="$now_ts"
           mobile_sig="$m_sig"
         else
-          local m_elapsed
+          local m_elapsed _m_settle_secs
           m_elapsed=$((now_ts - mobile_check_ts))
-          if [ "$m_elapsed" -ge "$SETTLE_SECS" ]; then
+          _m_settle_secs="$SETTLE_SECS"
+          if [ "$_boot_complete_now" = "1" ]; then
+            _m_settle_secs="$SETTLE_SECS_POST_BOOT"
+          fi
+          if [ "$m_elapsed" -ge "$_m_settle_secs" ]; then
             mobile_done=1
             log "service: mobile transport: ${AFWALL_CHAIN_MOBILE} chain stable (sig=${m_sig} elapsed=${m_elapsed}s) — mobile ready"
             lowlevel_restore_mobile_data_if_allowed
@@ -415,11 +454,15 @@
       else
         if [ "$mobile_chain_seen" = "0" ] && \
            [ "$now_ts" != "0" ] && [ "$_afwall_confirmed_ts" != "0" ]; then
-          local m_wait
+          local m_wait _m_tw_threshold
           m_wait=$((now_ts - _afwall_confirmed_ts))
-          if [ "$m_wait" -ge "$TRANSPORT_WAIT_SECS" ]; then
+          _m_tw_threshold="$TRANSPORT_WAIT_SECS"
+          if [ "$_boot_complete_now" = "1" ]; then
+            _m_tw_threshold="$TRANSPORT_WAIT_SECS_POST_BOOT"
+          fi
+          if [ "$m_wait" -ge "$_m_tw_threshold" ]; then
             mobile_done=1
-            log "service: mobile transport: no ${AFWALL_CHAIN_MOBILE} chain after ${m_wait}s; accepting main chain readiness"
+            log "service: mobile transport: no ${AFWALL_CHAIN_MOBILE} chain after ${m_wait}s (threshold=${_m_tw_threshold}s); accepting main chain readiness"
             lowlevel_restore_mobile_data_if_allowed
           fi
         fi
@@ -430,6 +473,13 @@
   # ── Main polling loop ───────────────────────────────────────────────────────
   while :; do
     NOW="$(date +%s 2>/dev/null)" || NOW=0
+
+    # Cache sys.boot_completed result once per iteration to avoid repeated
+    # getprop calls across all the boot-completion acceleration checks below.
+    _boot_complete_now=0
+    if [ "$BOOT_COMPLETE_ACCELERATE" = "1" ] && sys_boot_completed; then
+      _boot_complete_now=1
+    fi
 
     # ── Radio reassertion ───────────────────────────────────────────────────
     # Periodically re-assert Wi-Fi and mobile data off while blackout is active.
@@ -586,8 +636,8 @@
     fi
 
     # ── Boot-completion diagnostic ──────────────────────────────────────────
-    if [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ]; then
-      debug_log "service: sys.boot_completed=1 v4_done=$v4_done v6_done=$v6_done wifi_done=$wifi_done mobile_done=$mobile_done"
+    if [ "$_boot_complete_now" = "1" ]; then
+      debug_log "service: sys.boot_completed=1 boot_accel=${BOOT_COMPLETE_ACCELERATE} v4_done=$v4_done v6_done=$v6_done wifi_done=$wifi_done mobile_done=$mobile_done"
     fi
 
     # ── IPv4 family handoff ────────────────────────────────────────────────
@@ -609,6 +659,7 @@
           v4_sig="$new_sig"
           v4_takeover_ts="$NOW"
           v4_alive_ts=0
+          v4_bc_ts=0
           v4_fallback_ts="$NOW"
         fi
 
@@ -618,16 +669,47 @@
             debug_log "service: v4 liveness window started"
           fi
 
-          # Preferred path: liveness confirmed for >= LIVENESS_SECS
+          # Preferred path: AFWall process visible for >= LIVENESS_SECS.
+          # Post-boot (sys.boot_completed=1) the shorter LIVENESS_SECS_POST_BOOT
+          # threshold is used because rule population is complete by then.
           if [ "$NOW" != "0" ] && [ "$v4_alive_ts" != "0" ]; then
             alive_elapsed=$((NOW - v4_alive_ts))
-            if [ "$alive_elapsed" -ge "$LIVENESS_SECS" ]; then
-              log "service: v4 preferred-path: liveness ${alive_elapsed}s + takeover stable; settling ${SETTLE_SECS}s"
+            _v4_liveness_threshold="$LIVENESS_SECS"
+            if [ "$_boot_complete_now" = "1" ]; then
+              _v4_liveness_threshold="$LIVENESS_SECS_POST_BOOT"
+            fi
+            if [ "$alive_elapsed" -ge "$_v4_liveness_threshold" ]; then
+              log "service: v4 preferred-path: liveness ${alive_elapsed}s + takeover stable; settling"
               if _settle_confirm_v4 "preferred-path" "$v4_sig"; then
                 v4_done=1; v4_path="preferred"
                 log "service: v4 takeover confirmed (preferred path; liveness=${alive_elapsed}s sig=$v4_sig)"
               else
-                v4_takeover_ts=0; v4_sig=""; v4_alive_ts=0; v4_fallback_ts=0
+                v4_takeover_ts=0; v4_sig=""; v4_alive_ts=0; v4_bc_ts=0; v4_fallback_ts=0
+              fi
+            fi
+          fi
+
+        elif [ "$_boot_complete_now" = "1" ] && \
+             afwall_rules_dense_v4 "$AFWALL_RULE_DENSITY_MIN"; then
+          # Boot-complete fast path: sys.boot_completed=1 AND the afwall chain
+          # already has >= AFWALL_RULE_DENSITY_MIN rules.  The AFWall process may
+          # not be visible to pidof/ps (e.g., restricted by SELinux or already
+          # reaped after one-shot apply), but a dense chain combined with a
+          # completed-boot signal is strong evidence that all rules are in place.
+          # Uses a dedicated stability window (v4_bc_ts) and LIVENESS_SECS_POST_BOOT.
+          if [ "$v4_bc_ts" = "0" ]; then
+            v4_bc_ts="$NOW"
+            log "service: v4 boot-complete path: dense chain (>=${AFWALL_RULE_DENSITY_MIN} rules) + sys.boot_completed (sig=$v4_sig)"
+          fi
+          if [ "$NOW" != "0" ] && [ "$v4_bc_ts" != "0" ]; then
+            alive_elapsed=$((NOW - v4_bc_ts))
+            if [ "$alive_elapsed" -ge "$LIVENESS_SECS_POST_BOOT" ]; then
+              log "service: v4 boot-complete path: stable ${alive_elapsed}s; settling"
+              if _settle_confirm_v4 "boot-complete-path" "$v4_sig"; then
+                v4_done=1; v4_path="boot-complete"
+                log "service: v4 takeover confirmed (boot-complete path; stable=${alive_elapsed}s sig=$v4_sig)"
+              else
+                v4_takeover_ts=0; v4_sig=""; v4_alive_ts=0; v4_bc_ts=0; v4_fallback_ts=0
               fi
             fi
           fi
@@ -638,20 +720,26 @@
           fi
           v4_alive_ts=0
 
-          # Fallback path: stability window without liveness
+          # Fallback path: stability window without liveness.
+          # Accelerated post-boot: FALLBACK_SECS_POST_BOOT replaces FALLBACK_SECS
+          # when sys.boot_completed=1 (AFWall has finished its rule cycle).
           if [ "$v4_fallback_ts" != "0" ] && [ "$NOW" != "0" ]; then
             fallback_elapsed=$((NOW - v4_fallback_ts))
-            if [ "$fallback_elapsed" -ge "$FALLBACK_SECS" ]; then
+            _v4_fallback_threshold="$FALLBACK_SECS"
+            if [ "$_boot_complete_now" = "1" ]; then
+              _v4_fallback_threshold="$FALLBACK_SECS_POST_BOOT"
+            fi
+            if [ "$fallback_elapsed" -ge "$_v4_fallback_threshold" ]; then
               if afwall_secondary_evidence_present "$AFW_PKG"; then
-                log "service: v4 fallback-path: stable ${fallback_elapsed}s + secondary-evidence; settling ${SETTLE_SECS}s"
+                log "service: v4 fallback-path: stable ${fallback_elapsed}s + secondary-evidence; settling"
               else
-                log "service: v4 fallback-path: stable ${fallback_elapsed}s; settling ${SETTLE_SECS}s"
+                log "service: v4 fallback-path: stable ${fallback_elapsed}s; settling"
               fi
               if _settle_confirm_v4 "fallback-path" "$v4_sig"; then
                 v4_done=1; v4_path="fallback"
                 log "service: v4 takeover confirmed (fallback path; stable=${fallback_elapsed}s sig=$v4_sig)"
               else
-                v4_takeover_ts=0; v4_sig=""; v4_alive_ts=0; v4_fallback_ts=0
+                v4_takeover_ts=0; v4_sig=""; v4_alive_ts=0; v4_bc_ts=0; v4_fallback_ts=0
               fi
             fi
           fi
@@ -662,7 +750,7 @@
           log "service: v4 takeover was present but is now absent — reset"
           log_transition_snapshot "v4" "takeover_lost"
         fi
-        v4_takeover_ts=0; v4_sig=""; v4_alive_ts=0; v4_fallback_ts=0
+        v4_takeover_ts=0; v4_sig=""; v4_alive_ts=0; v4_bc_ts=0; v4_fallback_ts=0
       fi
 
     fi # end v4 family handoff
@@ -686,6 +774,7 @@
           v6_sig="$new_sig"
           v6_takeover_ts="$NOW"
           v6_alive_ts=0
+          v6_bc_ts=0
           v6_fallback_ts="$NOW"
         fi
 
@@ -695,15 +784,42 @@
             debug_log "service: v6 liveness window started"
           fi
 
+          # Preferred path: AFWall process visible for >= LIVENESS_SECS.
+          # Post-boot the shorter LIVENESS_SECS_POST_BOOT threshold is used.
           if [ "$NOW" != "0" ] && [ "$v6_alive_ts" != "0" ]; then
             alive_elapsed=$((NOW - v6_alive_ts))
-            if [ "$alive_elapsed" -ge "$LIVENESS_SECS" ]; then
-              log "service: v6 preferred-path: liveness ${alive_elapsed}s + takeover stable; settling ${SETTLE_SECS}s"
+            _v6_liveness_threshold="$LIVENESS_SECS"
+            if [ "$_boot_complete_now" = "1" ]; then
+              _v6_liveness_threshold="$LIVENESS_SECS_POST_BOOT"
+            fi
+            if [ "$alive_elapsed" -ge "$_v6_liveness_threshold" ]; then
+              log "service: v6 preferred-path: liveness ${alive_elapsed}s + takeover stable; settling"
               if _settle_confirm_v6 "preferred-path" "$v6_sig"; then
                 v6_done=1; v6_path="preferred"
                 log "service: v6 takeover confirmed (preferred path; liveness=${alive_elapsed}s sig=$v6_sig)"
               else
-                v6_takeover_ts=0; v6_sig=""; v6_alive_ts=0; v6_fallback_ts=0
+                v6_takeover_ts=0; v6_sig=""; v6_alive_ts=0; v6_bc_ts=0; v6_fallback_ts=0
+              fi
+            fi
+          fi
+
+        elif [ "$_boot_complete_now" = "1" ] && \
+             afwall_rules_dense_v6 "$AFWALL_RULE_DENSITY_MIN"; then
+          # Boot-complete fast path for IPv6: same rationale as v4.
+          # Uses dedicated v6_bc_ts stability window.
+          if [ "$v6_bc_ts" = "0" ]; then
+            v6_bc_ts="$NOW"
+            log "service: v6 boot-complete path: dense chain (>=${AFWALL_RULE_DENSITY_MIN} rules) + sys.boot_completed (sig=$v6_sig)"
+          fi
+          if [ "$NOW" != "0" ] && [ "$v6_bc_ts" != "0" ]; then
+            alive_elapsed=$((NOW - v6_bc_ts))
+            if [ "$alive_elapsed" -ge "$LIVENESS_SECS_POST_BOOT" ]; then
+              log "service: v6 boot-complete path: stable ${alive_elapsed}s; settling"
+              if _settle_confirm_v6 "boot-complete-path" "$v6_sig"; then
+                v6_done=1; v6_path="boot-complete"
+                log "service: v6 takeover confirmed (boot-complete path; stable=${alive_elapsed}s sig=$v6_sig)"
+              else
+                v6_takeover_ts=0; v6_sig=""; v6_alive_ts=0; v6_bc_ts=0; v6_fallback_ts=0
               fi
             fi
           fi
@@ -714,19 +830,25 @@
           fi
           v6_alive_ts=0
 
+          # Fallback path: stability window without liveness.
+          # Accelerated post-boot: FALLBACK_SECS_POST_BOOT replaces FALLBACK_SECS.
           if [ "$v6_fallback_ts" != "0" ] && [ "$NOW" != "0" ]; then
             fallback_elapsed=$((NOW - v6_fallback_ts))
-            if [ "$fallback_elapsed" -ge "$FALLBACK_SECS" ]; then
+            _v6_fallback_threshold="$FALLBACK_SECS"
+            if [ "$_boot_complete_now" = "1" ]; then
+              _v6_fallback_threshold="$FALLBACK_SECS_POST_BOOT"
+            fi
+            if [ "$fallback_elapsed" -ge "$_v6_fallback_threshold" ]; then
               if afwall_secondary_evidence_present "$AFW_PKG"; then
-                log "service: v6 fallback-path: stable ${fallback_elapsed}s + secondary-evidence; settling ${SETTLE_SECS}s"
+                log "service: v6 fallback-path: stable ${fallback_elapsed}s + secondary-evidence; settling"
               else
-                log "service: v6 fallback-path: stable ${fallback_elapsed}s; settling ${SETTLE_SECS}s"
+                log "service: v6 fallback-path: stable ${fallback_elapsed}s; settling"
               fi
               if _settle_confirm_v6 "fallback-path" "$v6_sig"; then
                 v6_done=1; v6_path="fallback"
                 log "service: v6 takeover confirmed (fallback path; stable=${fallback_elapsed}s sig=$v6_sig)"
               else
-                v6_takeover_ts=0; v6_sig=""; v6_alive_ts=0; v6_fallback_ts=0
+                v6_takeover_ts=0; v6_sig=""; v6_alive_ts=0; v6_bc_ts=0; v6_fallback_ts=0
               fi
             fi
           fi
@@ -737,7 +859,7 @@
           log "service: v6 takeover was present but is now absent — reset"
           log_transition_snapshot "v6" "takeover_lost"
         fi
-        v6_takeover_ts=0; v6_sig=""; v6_alive_ts=0; v6_fallback_ts=0
+        v6_takeover_ts=0; v6_sig=""; v6_alive_ts=0; v6_bc_ts=0; v6_fallback_ts=0
       fi
 
     fi # end v6 family handoff
