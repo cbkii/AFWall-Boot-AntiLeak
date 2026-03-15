@@ -1,48 +1,112 @@
-# AFWall Boot AntiLeak Fork — Advanced Documentation v2.6
+# AFWall Boot AntiLeak: Advanced Documentation
 
----
+This document provides a technical deep-dive into the module's inner workings, configuration, and troubleshooting.
 
-## Table of contents
+## Table of Contents
 
-1. [Boot stage design](#1-boot-stage-design)
-2. [Composite readiness model](#2-composite-readiness-model)
-3. [Transport-aware handoff](#3-transport-aware-handoff)
-4. [Timeout and unlock semantics](#4-timeout-and-unlock-semantics)
-5. [Full config reference](#5-full-config-reference)
-6. [Logging and state files](#6-logging-and-state-files)
-7. [Troubleshooting](#7-troubleshooting)
-8. [Migration from v2.4](#8-migration-from-v24)
-9. [Installer input and keycheck](#9-installer-input-and-keycheck)
+- [Boot Process Deep-Dive](#boot-process-deep-dive)
+- [AFWall+ Readiness Detection](#afwall-readiness-detection)
+- [Configuration Reference](#configuration-reference)
+- [State Files & Logging](#state-files--logging)
+- [Troubleshooting](#troubleshooting)
+- [Manual Interaction](#manual-interaction)
 
----
+## Boot Process Deep-Dive
 
-## 1. Boot stage design
+The module's operation is split into two main stages to align with the Magisk boot process.
 
-### Stage A — `post-fs-data` (before framework)
+### Stage 1: `post-fs-data.sh` (Early Boot)
 
-Runs before any Android framework services start.
+This script runs before the main Android system (Zygote) is initialized. At this point, no regular apps are running.
 
-Actions:
-- Load config.
-- Install iptables hard block (OUTPUT, FORWARD, optionally INPUT) for both
-  IPv4 and IPv6. Dual-layer blackout: installs OUTPUT block in both the raw
-  table (pre-conntrack, primary) and the filter table (shadow/failsafe) for
-  defence-in-depth. If the raw layer is disrupted externally, the filter layer
-  continues blocking OUTPUT traffic until the raw layer is repaired.
-- Quiesce any network interfaces already present in `/sys/class/net`.
-- Persist blackout state: `${STATE_DIR}/blackout_active` and
-  `${STATE_DIR}/radio_off_pending`.
-- Write a dedicated current-boot timestamp marker (`${STATE_DIR}/boot_marker`)
-  used by secondary evidence checks to identify AFWall file activity from this
-  boot.
-- Write early-phase interface list to state.
+-   **Action:** Installs a robust, dual-layer `iptables` block in the kernel's `raw` and `filter` tables for both IPv4 and IPv6. This creates a "total-connectivity-blackout."
+-   **Purpose:** To block all network packets at the earliest possible moment. The dual-layer approach provides redundancy in case another process flushes the `filter` table.
+-   **Limitations:** Framework services like Wi-Fi and mobile data are not yet running, so they cannot be disabled here.
 
-Framework radio commands (Wi-Fi off, mobile data off) are **deferred** to
-Stage B. They are not valid in `post-fs-data` because the Wi-Fi and telephony
-services are not running yet.
+### Stage 2: `service.sh` (Late Boot)
 
-### Stage B — `service.sh` late phase (framework available)
+This script runs in the background after the Android system has started and services become available.
 
+-   **Phase 1: Integrity Check & Suppression**
+    -   Verifies that the `iptables` block from Stage 1 is still active and reinstalls it if necessary.
+    -   Disables the Wi-Fi and mobile data services using framework commands (`cmd wifi` and `cmd phone`). This prevents them from attempting to connect.
+
+-   **Phase 2: Monitoring & Handoff**
+    -   Enters a monitoring loop, checking every second for AFWall+ to become active.
+    -   Once AFWall+ readiness is confirmed (see next section), it removes its own `iptables` block.
+    -   Restores the Wi-Fi and mobile data services to their previous states.
+
+## AFWall+ Readiness Detection
+
+To ensure a secure handoff, the module uses a sophisticated "composite readiness model" to verify that AFWall+ is truly in control. It doesn't just check if the AFWall+ process is running.
+
+Each second, the module:
+
+1.  **Captures a Snapshot:** It takes a complete snapshot of the kernel's `iptables` filter table.
+2.  **Calculates a Fingerprint:** It generates a checksum (`cksum`) of all firewall chains and rules that belong to AFWall+ (i.e., those prefixed with `afwall`).
+3.  **Tracks Stability:** It waits for this fingerprint to remain unchanged for a specific duration. A stable fingerprint indicates that AFWall+ has finished modifying its rules.
+
+The module confirms readiness through one of two paths:
+-   **Fast Path (2 seconds stable):** If the fingerprint is stable for 2 seconds *and* there is secondary evidence (like the AFWall+ process being visible or recent file activity), the handoff proceeds.
+-   **Conservative Path (6 seconds stable):** If no secondary evidence is found, the module waits for 6 seconds of stability. This longer duration provides confidence that AFWall+ is ready even if other signals are unavailable.
+
+This model is designed to be both fast and highly reliable, preventing a premature handoff that could compromise the firewall's integrity.
+
+## Configuration Reference
+
+To customize the module's behavior, create a file at `/data/adb/AFWall-Boot-AntiLeak/config.sh` and add any of the following variables.
+
+| Variable | Default | Description |
+|---|---|---|
+| `INTEGRATION_MODE` | `auto` | Controls coordination with AFWall+'s built-in "Fix Startup Leak" feature. `auto` is recommended. |
+| `ENABLE_FORWARD_BLOCK`| `1` | `1`: Blocks the `FORWARD` chain to prevent tethered clients from leaking traffic. `0`: Disables this block. |
+| `ENABLE_INPUT_BLOCK` | `0` | `1`: Blocks the `INPUT` chain for inbound traffic hardening. `0`: Disables this block. |
+| `TIMEOUT_SECS` | `120` | Seconds to wait for AFWall+ before a timeout occurs. |
+| `AUTO_TIMEOUT_UNBLOCK`| `0` | `1`: Automatically unblocks traffic on timeout. `0`: Keeps the device offline (fail-closed). **Warning: Setting to `1` may defeat the purpose of the module.** |
+| `TIMEOUT_UNLOCK_GATED`| `1` | `1`: The timeout countdown only begins after the device is first unlocked. `0`: Countdown starts as soon as the module's service starts. |
+| `LOG_LEVEL` | `2` | `0`: Errors only. `1`: Warnings. `2`: Info (Default). `3`: Debug. `4`: Verbose. |
+
+## State Files & Logging
+
+-   **Logs:** The module's logs can be found at `/data/adb/AFWall-Boot-AntiLeak/logs/`. A new log file is created for each boot.
+-   **State Files:** The module uses a state directory at `/data/adb/AFWall-Boot-AntiLeak/state/` to manage its operations. These files are transient and should not be manually edited.
+-   **Configuration:** Custom user configuration is loaded from `/data/adb/AFWall-Boot-AntiLeak/config.sh`.
+
+## Troubleshooting
+
+If you lose connectivity after booting, it likely means the module is working as intended because AFWall+ did not become ready.
+
+1.  **Check AFWall+:**
+    -   Is AFWall+ enabled?
+    -   Go to AFWall+ settings and ensure "Enable Firewall" is checked.
+    -   Are rules enabled? Go to AFWall+ settings -> "Rules" -> ensure "Active Rules" is enabled.
+
+2.  **Review Module Logs:**
+    -   Check the latest log file in `/data/adb/AFWall-Boot-AntiLeak/logs/` for errors or clues. You can do this via `adb shell` or a root file manager.
+
+3.  **Check for Conflicts:**
+    -   Another module or startup script might be interfering with `iptables`.
+    -   Ensure AFWall+'s own "Fix Startup Data Leak" option is disabled.
+
+4.  **Manual Override:**
+    -   If you are stuck without connectivity and need to bypass the module's block, run the manual override command.
+
+## Manual Interaction
+
+You can interact with the module's service using the `action.sh` script. This must be run as root.
+
+**Path:** `/data/adb/modules/afwall-boot-antileak/action.sh`
+
+**Commands:**
+
+-   `action.sh override`
+    -   Immediately removes the `iptables` block and restores network services. This is the primary command for recovering connectivity if the module gets stuck.
+
+-   `action.sh stop`
+    -   Requests a graceful shutdown of the monitoring service.
+
+-   `action.sh status`
+    -   Prints the current status of the monitoring service (e.g., `waiting`, `done`, `timeout`).
 Runs in a background subshell once Magisk's service phase completes.
 
 Actions:
