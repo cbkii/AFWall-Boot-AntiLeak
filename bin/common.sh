@@ -1,11 +1,11 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v2.5 - Common library
+# AFWall Boot AntiLeak v2.6 - Common library
 # POSIX/ash compatible. No bashisms. Sourced by all module scripts; do not
 # execute directly.
 
 # ── Module identity ────────────────────────────────────────────────────────────
 MODULE_ID="AFWall-Boot-AntiLeak"
-MODULE_VERSION="v2.5"
+MODULE_VERSION="v2.6"
 MODULE_DATA="/data/adb/${MODULE_ID}"
 LOG_DIR="${MODULE_DATA}/logs"
 LOG_FILE="${LOG_DIR}/boot.log"
@@ -830,22 +830,20 @@ afwall_takeover_present_v6() {
 # so that presence, fingerprint, and reachability queries are all coherent —
 # none of them can observe a different intermediate iptables state.
 #
-# Prefer iptables-save / ip6tables-save (single atomic read of the full table).
-# Fall back to iptables -t filter -S which is available everywhere.
-# Both formats use the same -N/-A/-P line conventions; the helpers below work
-# identically with either.
+# Uses "iptables -t filter -S" exclusively.  All downstream parsers expect the
+# "-N chain" / "-A chain ..." rule-spec syntax that this command produces.
+# "iptables-save" outputs restore-file format (":chain - [packets:bytes]" and
+# commit markers) which is NOT compatible with the parsers below.  Do not
+# switch to iptables-save here unless the parser layer is first normalised to
+# handle both formats.
 capture_filter_snapshot_v4() {
   local cmd
-  cmd="$(_find_cmd iptables-save 2>/dev/null)" && \
-    { "$cmd" -t filter 2>/dev/null; return 0; }
   cmd="$(_find_cmd iptables 2>/dev/null)" || return 1
   "$cmd" -t filter -S 2>/dev/null
 }
 
 capture_filter_snapshot_v6() {
   local cmd
-  cmd="$(_find_cmd ip6tables-save 2>/dev/null)" && \
-    { "$cmd" -t filter 2>/dev/null; return 0; }
   cmd="$(_find_cmd ip6tables 2>/dev/null)" || return 1
   "$cmd" -t filter -S 2>/dev/null
 }
@@ -1068,6 +1066,18 @@ afwall_rules_dense_v6() {
   ip6t="$(_find_cmd ip6tables)" || return 1
   _chain_exists "$ip6t" filter "$AFWALL_CHAIN_MAIN" || return 1
   count="$("$ip6t" -t filter -S "$AFWALL_CHAIN_MAIN" 2>/dev/null | grep -c '^-A ')" || count=0
+  [ "${count:-0}" -ge "$min" ]
+}
+
+# ── Snapshot-based rule density check ────────────────────────────────────────
+# Returns 0 if the AFWall main chain in the given snapshot contains at least
+# `min` rules.  Uses the pre-captured snapshot for coherence — no fresh
+# iptables call is made.  This is the preferred form for the service.sh hot
+# path where all checks must derive from one consistent per-poll snapshot.
+afwall_rules_dense_from_snapshot() {
+  local snap="$1" min="${2:-3}" count
+  [ -n "$snap" ] || return 1
+  count="$(printf '%s\n' "$snap" | grep -cE "^-A ${AFWALL_CHAIN_MAIN} ")" || count=0
   [ "${count:-0}" -ge "$min" ]
 }
 
@@ -1522,6 +1532,55 @@ blackout_is_active() {
 
 radio_off_pending() {
   [ -f "${STATE_DIR}/radio_off_pending" ]
+}
+
+# ── Manual override / service stop state ──────────────────────────────────────
+# manual_override: written by action.sh before removing blocks.  Persists until
+#   the next reboot (cleared by post-fs-data.sh).  Tells service.sh to stop the
+#   main loop and not repair blackout state.
+# stop_requested: written alongside manual_override; service.sh stops on either.
+# service.pid:    written by service.sh at startup; cleared on clean exit or by
+#   action.sh after signalling the process.
+
+write_manual_override() {
+  _init_dirs
+  printf '1' > "${STATE_DIR}/manual_override" 2>/dev/null || true
+  debug_log "write_manual_override: manual_override written"
+}
+
+write_stop_requested() {
+  _init_dirs
+  printf '1' > "${STATE_DIR}/stop_requested" 2>/dev/null || true
+  debug_log "write_stop_requested: stop_requested written"
+}
+
+write_service_pid() {
+  local pid="${1:-$$}"
+  _init_dirs
+  printf '%s' "$pid" > "${STATE_DIR}/service.pid" 2>/dev/null || true
+  debug_log "write_service_pid: pid=$pid written"
+}
+
+remove_service_pid() {
+  rm -f "${STATE_DIR}/service.pid" 2>/dev/null || true
+  debug_log "remove_service_pid: service.pid removed"
+}
+
+manual_override_active() {
+  [ -f "${STATE_DIR}/manual_override" ]
+}
+
+stop_requested_active() {
+  [ -f "${STATE_DIR}/stop_requested" ]
+}
+
+# Remove manual_override and stop_requested markers (not service.pid).
+# Called by post-fs-data.sh on boot start to clear stale state from a previous
+# boot where the user may have triggered manual recovery.
+clear_override_markers() {
+  rm -f "${STATE_DIR}/manual_override" "${STATE_DIR}/stop_requested" \
+    2>/dev/null || true
+  debug_log "clear_override_markers: manual_override and stop_requested cleared"
 }
 
 # ── Lower-layer suppression subsystem ─────────────────────────────────────────

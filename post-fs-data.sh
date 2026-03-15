@@ -9,6 +9,13 @@ load_config
 
 log "post-fs-data: start (module=$MODULE_ID $MODULE_VERSION)"
 
+# Clear stale override/stop/PID markers left from a previous boot session.
+# These are per-boot transient state; a fresh boot always starts clean.
+rm -f "${STATE_DIR}/manual_override" \
+      "${STATE_DIR}/stop_requested" \
+      "${STATE_DIR}/service.pid" 2>/dev/null || true
+log "post-fs-data: cleared stale override/stop/PID markers"
+
 # Remove legacy artifacts from older module versions (v1.x).
 cleanup_legacy "post-fs-data"
 
