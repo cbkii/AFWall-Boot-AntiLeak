@@ -7,10 +7,13 @@
 #            periodically while waiting.
 #   Stage C: Wait for per-family AFWall takeover (fast / conservative / boot-complete
 #            path). Full AFWall graph fingerprints derived from coherent per-poll
-#            snapshots. Non-blocking stability tracking (no inline sleep settle).
-#   Stage D: Only remove global hard block when ALL required transports are ready.
-#            Transport readiness requires reachability + subtree fingerprint stability.
-#            Transport absence is accepted after TRANSPORT_ABSENCE_STABLE_SECS.
+#            snapshots. Non-blocking stability tracking (no blocking sleep).
+#   Stage D: Remove per-family OUTPUT blackout as soon as AFWall graph takeover is
+#            confirmed for that family — independent of transport readiness.
+#            Transport readiness (afwall-wifi / afwall-3g subtrees) controls only
+#            lower-layer radio/service restoration, not the iptables family block.
+#            Transport absence and unreachable-subtree cases both accept after
+#            TRANSPORT_ABSENCE_STABLE_SECS to avoid permanent deadlock.
 #   Stage E: Restore lower-layer state (only what the module changed).
 #
 # Timeout rules:
@@ -20,9 +23,11 @@
 #     to have any effect; also subject to TIMEOUT_UNLOCK_GATED.
 #
 # Transport tracking:
-#   wifi_done  = 1 when Wi-Fi release criteria are met (or not gating Wi-Fi).
-#   mobile_done = 1 when mobile data release criteria are met (or not gating).
-#   Global block is kept until BOTH wifi_done AND mobile_done.
+#   wifi_done  = 1 when Wi-Fi radio-restore criteria are met (or not gating Wi-Fi).
+#   mobile_done = 1 when mobile data restore criteria are met (or not gating).
+#   Family iptables blocks are released independently per-family as soon as
+#   AFWall graph readiness is confirmed; transport done flags only control
+#   lower-layer (radio/service) restoration.
 #
 # Runs in a background subshell so Magisk's service phase is not held up.
 (
@@ -44,8 +49,9 @@
   RADIO_REASSERT_INTERVAL="${RADIO_REASSERT_INTERVAL:-10}"
   BLACKOUT_REASSERT_INTERVAL="${BLACKOUT_REASSERT_INTERVAL:-5}"
   UNLOCK_POLL_INTERVAL="${UNLOCK_POLL_INTERVAL:-5}"
-  # Retained as a last-resort safety net; primary transport-absence path is now
-  # TRANSPORT_ABSENCE_STABLE_SECS.
+  # Retained as a compatibility alias only; not used in any active transport
+  # logic.  The active fallback path uses TRANSPORT_ABSENCE_STABLE_SECS and
+  # TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT.
   TRANSPORT_WAIT_SECS="${TRANSPORT_WAIT_SECS:-30}"
 
   # ── Composite-readiness timing ─────────────────────────────────────────────
@@ -229,6 +235,7 @@
       log "service: no OUTPUT blocks detected and block_installed not set — skipping handoff; restoring lower-layer"
       clear_blackout_active
       lowlevel_restore_changed_state
+      remove_service_pid
       exit 0
     fi
   fi
@@ -329,62 +336,72 @@
   # Called once per poll iteration after at least one IP family is confirmed.
   # Uses the per-poll coherent snapshots (v4_snap, v6_snap) for all checks.
   # Stability is tracked via timestamps, not blocking sleep.
+  #
+  # IMPORTANT — orphan/stale transport chain handling:
+  #   An afwall-wifi* or afwall-3g* chain that exists in the snapshot but is
+  #   NOT reachable from the live AFWall graph (no -j reference from any
+  #   afwall-prefixed chain) is treated as "not usable" — equivalent to absent
+  #   for the purposes of the absence-stable fallback.  This prevents a stale
+  #   chain from deadlocking transport restore indefinitely.
+  #   The absence-stable timer (wifi_absent_since / mobile_absent_since) is only
+  #   reset to 0 when the transport subtree is both present AND reachable.
   _check_transport_readiness() {
     local now_ts="$NOW"
 
     # ── Wi-Fi transport ─────────────────────────────────────────────────────
     if [ "$wifi_done" = "0" ]; then
       # Check both v4 and v6 snapshots for any afwall-wifi-prefixed subtree.
-      local _wifi_in_snap=0
+      local _wifi_in_snap=0 _wifi_reachable=0
       afwall_prefix_present_from_snapshot "$v4_snap" "$AFWALL_CHAIN_WIFI" && _wifi_in_snap=1
       afwall_prefix_present_from_snapshot "$v6_snap" "$AFWALL_CHAIN_WIFI" && _wifi_in_snap=1
 
       if [ "$_wifi_in_snap" = "1" ]; then
-        # Transport subtree is present — reset absence counter.
-        wifi_absent_since=0
-
-        # Check reachability from within the AFWall graph.
-        local _wifi_reachable=0
         afwall_prefix_reachable_from_snapshot "$v4_snap" "$AFWALL_CHAIN_WIFI" && _wifi_reachable=1
         afwall_prefix_reachable_from_snapshot "$v6_snap" "$AFWALL_CHAIN_WIFI" && _wifi_reachable=1
+      fi
 
-        if [ "$_wifi_reachable" = "0" ]; then
-          debug_log "service: wifi subtree exists but is unreachable from AFWall graph — not accepting"
-        else
-          # Compute combined transport subtree fingerprint from both families.
-          local _w_fp_v4 _w_fp_v6 _new_wifi_fp
-          _w_fp_v4="$(afwall_transport_fingerprint_from_snapshot "$v4_snap" "$AFWALL_CHAIN_WIFI")"
-          _w_fp_v6="$(afwall_transport_fingerprint_from_snapshot "$v6_snap" "$AFWALL_CHAIN_WIFI")"
-          _new_wifi_fp="${_w_fp_v4}:${_w_fp_v6}"
+      if [ "$_wifi_in_snap" = "1" ] && [ "$_wifi_reachable" = "1" ]; then
+        # Transport subtree is present AND reachable — reset "not-usable" timer.
+        wifi_absent_since=0
 
-          if [ -z "$wifi_last_fp" ]; then
-            wifi_last_fp="$_new_wifi_fp"
-            wifi_fp_stable_since="$now_ts"
-            log "service: wifi subtree first seen fp=$_new_wifi_fp reachable=1"
-          elif [ "$_new_wifi_fp" != "$wifi_last_fp" ]; then
-            log "service: wifi subtree drift old=$wifi_last_fp new=$_new_wifi_fp reset"
-            wifi_last_fp="$_new_wifi_fp"
-            wifi_fp_stable_since="$now_ts"
-          fi
+        # Compute combined transport subtree fingerprint from both families.
+        local _w_fp_v4 _w_fp_v6 _new_wifi_fp
+        _w_fp_v4="$(afwall_transport_fingerprint_from_snapshot "$v4_snap" "$AFWALL_CHAIN_WIFI")"
+        _w_fp_v6="$(afwall_transport_fingerprint_from_snapshot "$v6_snap" "$AFWALL_CHAIN_WIFI")"
+        _new_wifi_fp="${_w_fp_v4}:${_w_fp_v6}"
 
-          local _wifi_stable=0
-          [ "$now_ts" != "0" ] && [ "$wifi_fp_stable_since" != "0" ] && \
-            _wifi_stable=$((now_ts - wifi_fp_stable_since))
-          local _wifi_settle="$SETTLE_SECS"
-          [ "$_boot_complete_now" = "1" ] && _wifi_settle="$SETTLE_SECS_POST_BOOT"
-          if [ "$_wifi_stable" -ge "$_wifi_settle" ]; then
-            wifi_done=1
-            log "service: wifi transport: subtree stable=${_wifi_stable}s fp=$wifi_last_fp — Wi-Fi ready"
-            lowlevel_restore_wifi_if_allowed
-          fi
+        if [ -z "$wifi_last_fp" ]; then
+          wifi_last_fp="$_new_wifi_fp"
+          wifi_fp_stable_since="$now_ts"
+          log "service: wifi subtree first seen fp=$_new_wifi_fp reachable=1"
+        elif [ "$_new_wifi_fp" != "$wifi_last_fp" ]; then
+          log "service: wifi subtree drift old=$wifi_last_fp new=$_new_wifi_fp reset"
+          wifi_last_fp="$_new_wifi_fp"
+          wifi_fp_stable_since="$now_ts"
         fi
+
+        local _wifi_stable=0
+        [ "$now_ts" != "0" ] && [ "$wifi_fp_stable_since" != "0" ] && \
+          _wifi_stable=$((now_ts - wifi_fp_stable_since))
+        local _wifi_settle="$SETTLE_SECS"
+        [ "$_boot_complete_now" = "1" ] && _wifi_settle="$SETTLE_SECS_POST_BOOT"
+        if [ "$_wifi_stable" -ge "$_wifi_settle" ]; then
+          wifi_done=1
+          log "service: wifi transport: subtree stable=${_wifi_stable}s fp=$wifi_last_fp — Wi-Fi ready"
+          lowlevel_restore_wifi_if_allowed
+        fi
+
       else
-        # No wifi prefix in either snapshot — track absence stability.
-        # Reset fingerprint state since there is nothing to track.
+        # Transport either absent OR present-but-unreachable (orphan/stale chain).
+        # In both cases treat as "not usable" and apply absence-stable fallback to
+        # prevent permanent deadlock when AFWall no longer references the chain.
         wifi_last_fp=""; wifi_fp_stable_since=0
+        if [ "$_wifi_in_snap" = "1" ]; then
+          debug_log "service: wifi subtree exists but is unreachable from AFWall graph — treating as absent for fallback"
+        fi
         if [ "$wifi_absent_since" = "0" ] && [ "$now_ts" != "0" ]; then
           wifi_absent_since="$now_ts"
-          debug_log "service: wifi: no ${AFWALL_CHAIN_WIFI}-prefix subtree seen in snapshot"
+          debug_log "service: wifi: transport not usable (in_snap=${_wifi_in_snap} reachable=${_wifi_reachable})"
         fi
         if [ "$wifi_absent_since" != "0" ] && [ "$now_ts" != "0" ]; then
           local _w_absent_elapsed _w_absent_threshold
@@ -393,7 +410,11 @@
           [ "$_boot_complete_now" = "1" ] && _w_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT"
           if [ "$_w_absent_elapsed" -ge "$_w_absent_threshold" ]; then
             wifi_done=1
-            log "service: wifi transport accepted via absence-stable fallback after ${_w_absent_elapsed}s (no wifi-prefixed subtree detected in snapshot)"
+            if [ "$_wifi_in_snap" = "1" ]; then
+              log "service: wifi transport accepted via unreachable-stable fallback after ${_w_absent_elapsed}s (subtree present but unreachable from AFWall graph)"
+            else
+              log "service: wifi transport accepted via absence-stable fallback after ${_w_absent_elapsed}s (no wifi-prefixed subtree detected in snapshot)"
+            fi
             lowlevel_restore_wifi_if_allowed
           fi
         fi
@@ -402,51 +423,54 @@
 
     # ── Mobile data transport ───────────────────────────────────────────────
     if [ "$mobile_done" = "0" ]; then
-      local _mobile_in_snap=0
+      local _mobile_in_snap=0 _mobile_reachable=0
       afwall_prefix_present_from_snapshot "$v4_snap" "$AFWALL_CHAIN_MOBILE" && _mobile_in_snap=1
       afwall_prefix_present_from_snapshot "$v6_snap" "$AFWALL_CHAIN_MOBILE" && _mobile_in_snap=1
 
       if [ "$_mobile_in_snap" = "1" ]; then
-        mobile_absent_since=0
-
-        local _mobile_reachable=0
         afwall_prefix_reachable_from_snapshot "$v4_snap" "$AFWALL_CHAIN_MOBILE" && _mobile_reachable=1
         afwall_prefix_reachable_from_snapshot "$v6_snap" "$AFWALL_CHAIN_MOBILE" && _mobile_reachable=1
+      fi
 
-        if [ "$_mobile_reachable" = "0" ]; then
-          debug_log "service: mobile subtree exists but is unreachable from AFWall graph — not accepting"
-        else
-          local _m_fp_v4 _m_fp_v6 _new_mobile_fp
-          _m_fp_v4="$(afwall_transport_fingerprint_from_snapshot "$v4_snap" "$AFWALL_CHAIN_MOBILE")"
-          _m_fp_v6="$(afwall_transport_fingerprint_from_snapshot "$v6_snap" "$AFWALL_CHAIN_MOBILE")"
-          _new_mobile_fp="${_m_fp_v4}:${_m_fp_v6}"
+      if [ "$_mobile_in_snap" = "1" ] && [ "$_mobile_reachable" = "1" ]; then
+        # Transport subtree is present AND reachable — reset "not-usable" timer.
+        mobile_absent_since=0
 
-          if [ -z "$mobile_last_fp" ]; then
-            mobile_last_fp="$_new_mobile_fp"
-            mobile_fp_stable_since="$now_ts"
-            log "service: mobile subtree first seen fp=$_new_mobile_fp reachable=1"
-          elif [ "$_new_mobile_fp" != "$mobile_last_fp" ]; then
-            log "service: mobile subtree drift old=$mobile_last_fp new=$_new_mobile_fp reset"
-            mobile_last_fp="$_new_mobile_fp"
-            mobile_fp_stable_since="$now_ts"
-          fi
+        local _m_fp_v4 _m_fp_v6 _new_mobile_fp
+        _m_fp_v4="$(afwall_transport_fingerprint_from_snapshot "$v4_snap" "$AFWALL_CHAIN_MOBILE")"
+        _m_fp_v6="$(afwall_transport_fingerprint_from_snapshot "$v6_snap" "$AFWALL_CHAIN_MOBILE")"
+        _new_mobile_fp="${_m_fp_v4}:${_m_fp_v6}"
 
-          local _mobile_stable=0
-          [ "$now_ts" != "0" ] && [ "$mobile_fp_stable_since" != "0" ] && \
-            _mobile_stable=$((now_ts - mobile_fp_stable_since))
-          local _mobile_settle="$SETTLE_SECS"
-          [ "$_boot_complete_now" = "1" ] && _mobile_settle="$SETTLE_SECS_POST_BOOT"
-          if [ "$_mobile_stable" -ge "$_mobile_settle" ]; then
-            mobile_done=1
-            log "service: mobile transport: subtree stable=${_mobile_stable}s fp=$mobile_last_fp — mobile ready"
-            lowlevel_restore_mobile_data_if_allowed
-          fi
+        if [ -z "$mobile_last_fp" ]; then
+          mobile_last_fp="$_new_mobile_fp"
+          mobile_fp_stable_since="$now_ts"
+          log "service: mobile subtree first seen fp=$_new_mobile_fp reachable=1"
+        elif [ "$_new_mobile_fp" != "$mobile_last_fp" ]; then
+          log "service: mobile subtree drift old=$mobile_last_fp new=$_new_mobile_fp reset"
+          mobile_last_fp="$_new_mobile_fp"
+          mobile_fp_stable_since="$now_ts"
         fi
+
+        local _mobile_stable=0
+        [ "$now_ts" != "0" ] && [ "$mobile_fp_stable_since" != "0" ] && \
+          _mobile_stable=$((now_ts - mobile_fp_stable_since))
+        local _mobile_settle="$SETTLE_SECS"
+        [ "$_boot_complete_now" = "1" ] && _mobile_settle="$SETTLE_SECS_POST_BOOT"
+        if [ "$_mobile_stable" -ge "$_mobile_settle" ]; then
+          mobile_done=1
+          log "service: mobile transport: subtree stable=${_mobile_stable}s fp=$mobile_last_fp — mobile ready"
+          lowlevel_restore_mobile_data_if_allowed
+        fi
+
       else
+        # Transport either absent OR present-but-unreachable (orphan/stale chain).
         mobile_last_fp=""; mobile_fp_stable_since=0
+        if [ "$_mobile_in_snap" = "1" ]; then
+          debug_log "service: mobile subtree exists but is unreachable from AFWall graph — treating as absent for fallback"
+        fi
         if [ "$mobile_absent_since" = "0" ] && [ "$now_ts" != "0" ]; then
           mobile_absent_since="$now_ts"
-          debug_log "service: mobile: no ${AFWALL_CHAIN_MOBILE}-prefix subtree seen in snapshot"
+          debug_log "service: mobile: transport not usable (in_snap=${_mobile_in_snap} reachable=${_mobile_reachable})"
         fi
         if [ "$mobile_absent_since" != "0" ] && [ "$now_ts" != "0" ]; then
           local _m_absent_elapsed _m_absent_threshold
@@ -455,7 +479,11 @@
           [ "$_boot_complete_now" = "1" ] && _m_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT"
           if [ "$_m_absent_elapsed" -ge "$_m_absent_threshold" ]; then
             mobile_done=1
-            log "service: mobile transport accepted via absence-stable fallback after ${_m_absent_elapsed}s (no mobile-prefixed subtree detected in snapshot)"
+            if [ "$_mobile_in_snap" = "1" ]; then
+              log "service: mobile transport accepted via unreachable-stable fallback after ${_m_absent_elapsed}s (subtree present but unreachable from AFWall graph)"
+            else
+              log "service: mobile transport accepted via absence-stable fallback after ${_m_absent_elapsed}s (no mobile-prefixed subtree detected in snapshot)"
+            fi
             lowlevel_restore_mobile_data_if_allowed
           fi
         fi
@@ -638,8 +666,8 @@
           rm -f "${STATE_DIR}/block_installed" 2>/dev/null || true
           clear_blackout_active
           lowlevel_restore_changed_state
-          log "service: TIMEOUT: timeout unblock triggered — stop flag set, loop exiting"
           log "service: TIMEOUT: networking restored (unblock policy after unlock)"
+          log "service: TIMEOUT: timeout unblock triggered — stop flag set, loop exiting"
         else
           # ── Timeout: fail_closed or auto_unblock disabled or not unlocked ──
           _reason=""
@@ -708,7 +736,7 @@
           _v4_corroborator="file_mtime"
         fi
         [ "$_boot_complete_now" = "1" ] && \
-          afwall_rules_dense_v4 "$AFWALL_RULE_DENSITY_MIN" && \
+          afwall_rules_dense_from_snapshot "$v4_snap" "$AFWALL_RULE_DENSITY_MIN" && \
           [ "$_v4_corroborator" = "none" ] && _v4_corroborator="boot_complete_dense"
 
         # Select effective stability thresholds.
@@ -793,7 +821,7 @@
           _v6_corroborator="file_mtime"
         fi
         [ "$_boot_complete_now" = "1" ] && \
-          afwall_rules_dense_v6 "$AFWALL_RULE_DENSITY_MIN" && \
+          afwall_rules_dense_from_snapshot "$v6_snap" "$AFWALL_RULE_DENSITY_MIN" && \
           [ "$_v6_corroborator" = "none" ] && _v6_corroborator="boot_complete_dense"
 
         _v6_fast_secs="$FAST_STABLE_SECS"
@@ -870,8 +898,8 @@
         remove_input_block_v4
       fi
       v4_released=1
+      log "service: v4 handoff confirmed — family block removed (OUTPUT/FORWARD/INPUT)"
       log "service: v4 block removed (intentional handoff)"
-      log "service: v4 handoff confirmed — removing family block immediately"
       [ "$wifi_done" = "0" ] && log "service: block removed; wifi restore deferred"
       [ "$mobile_done" = "0" ] && log "service: block removed; mobile restore deferred"
     fi
@@ -888,8 +916,8 @@
         remove_input_block_v6
       fi
       v6_released=1
+      log "service: v6 handoff confirmed — family block removed (OUTPUT/FORWARD/INPUT)"
       log "service: v6 block removed (intentional handoff)"
-      log "service: v6 handoff confirmed — removing family block immediately"
       [ "$wifi_done" = "0" ] && log "service: block removed; wifi restore deferred"
       [ "$mobile_done" = "0" ] && log "service: block removed; mobile restore deferred"
     fi

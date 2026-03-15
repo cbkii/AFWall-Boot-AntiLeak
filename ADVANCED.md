@@ -1,4 +1,4 @@
-# AFWall Boot AntiLeak Fork — Advanced Documentation v2.5
+# AFWall Boot AntiLeak Fork — Advanced Documentation v2.6
 
 ---
 
@@ -245,22 +245,27 @@ service: wifi subtree drift old=... new=... reset
 service: wifi transport: subtree stable=3s fp=... — Wi-Fi ready
 ```
 
-### Transport-absence fallback
+### Transport-absence and unreachable-stable fallback
 
 If no chains or references with the transport prefix appear in any snapshot,
-the module uses an absence-stability fallback:
+or if a transport chain is present but not reachable from the live AFWall graph
+(orphan/stale chain), the module uses a "not-usable" stability fallback:
 
-- Track how long the transport prefix has been absent since the main family
-  was confirmed.
-- Once absence is stable for `TRANSPORT_ABSENCE_STABLE_SECS` (default 3s),
+- Track how long the transport has been "not usable" (absent OR present-but-unreachable).
+  The timer only resets to 0 when the transport subtree is both present AND reachable.
+- Once stability is held for `TRANSPORT_ABSENCE_STABLE_SECS` (default 3s),
   or `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT` (default 2s) post-boot,
-  accept main-chain-only readiness for that transport.
+  accept and restore that radio.
 - **Important:** this does NOT delay family block removal.  It only controls
   when the radio (Wi-Fi / mobile) is restored.
 
-This replaces the old 30-second `TRANSPORT_WAIT_SECS` blunt fallback.
-`TRANSPORT_WAIT_SECS_POST_BOOT` is a separate (legacy) value; it is NOT
-used for absence-stable logic.
+This covers both cases:
+1. AFWall doesn't use transport-specific chains at all (absent).
+2. AFWall has a stale/orphan transport chain that it no longer references (present+unreachable).
+   An orphan chain can NEVER permanently block transport restore.
+
+`TRANSPORT_WAIT_SECS_POST_BOOT` is a retained compatibility alias; it is NOT
+used for any active logic path. The active threshold is `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT`.
 
 Log entry example:
 ```
@@ -397,22 +402,28 @@ All config keys and their defaults. Override at:
 /data/adb/AFWall-Boot-AntiLeak/logs/boot.log
 ```
 
-Key log entries (v2.5+):
+Key log entries (v2.6+):
 - `post-fs-data: hard block installed` — earliest block in place
 - `post-fs-data: boot marker written` — reference timestamp for evidence checks
+- `service: snapshot backend v4=iptables-S` — confirms correct snapshot backend
 - `service: v4 graph first seen fp=...` — first non-trivial AFWall graph seen
 - `service: v4 graph drift old=... new=... reset` — fingerprint changed; waiting
 - `service: v4 fast-path confirmed stable=Xs corroboration=... fp=...` — fast release
 - `service: v4 conservative-path confirmed stable=Xs fp=...` — conservative release
 - `service: v4 AFWall graph gone/trivial — resetting stability` — graph disappeared
+- `service: v4 handoff confirmed — removing family block immediately` — block removed
+- `service: block removed; wifi restore deferred` — block gone, transport still pending
 - `service: wifi subtree first seen fp=... reachable=1` — transport chain found
 - `service: wifi subtree drift old=... new=... reset` — transport still settling
-- `service: wifi subtree exists but is unreachable from AFWall graph` — not accepted
 - `service: wifi transport: subtree stable=Xs fp=... — Wi-Fi ready` — transport done
 - `service: wifi transport accepted via absence-stable fallback after Xs` — no wifi chain
+- `service: wifi transport accepted via unreachable-stable fallback after Xs` — orphan chain dismissed
+- `service: family handoff complete but transport restore still pending (wifi=... mobile=...)` — service continues for radios
 - `service: v4 release preconditions satisfied ...` — block about to be removed
 - `service: handoff complete` — module handed off to AFWall+
 - `service: TIMEOUT v4: block RETAINED` — timeout, blocks kept (fail-closed)
+- `service: manual_override detected — stopping loop` — action.sh override active
+- `service: stop_requested detected — stopping loop` — action.sh stop signal received
 
 ### State files
 
@@ -488,15 +499,16 @@ iptables -t filter -S | grep afwall
 ip6tables -t filter -S | grep afwall
 ```
 If `afwall` is missing, AFWall+ has not applied rules. Check AFWall+ settings.
-If `afwall-wifi` is present but not referenced by `afwall`, that is an unreachable
-subtree (v2.5 will not accept it; check AFWall+ transport rule configuration).
+If `afwall-wifi` is present but not referenced by `afwall`, that is an orphan/
+unreachable chain — v2.6 detects this and still restores Wi-Fi via the
+unreachable-stable fallback after `TRANSPORT_ABSENCE_STABLE_SECS` seconds.
 
 ### Wi-Fi not coming back after AFWall+ loads
 
 1. Check log for `wifi subtree` messages.
 2. Verify `afwall-wifi` is reachable: `iptables -t filter -S | grep "afwall.*afwall-wifi"`
 3. If AFWall+ doesn't use `afwall-wifi`, set `WIFI_AFWALL_GATE=0` in config.
-4. With `WIFI_AFWALL_GATE=1`, absence-stable fallback fires after
+4. With `WIFI_AFWALL_GATE=1`, absence/unreachable-stable fallback fires after
    `TRANSPORT_ABSENCE_STABLE_SECS` (default 3s) once the main graph is confirmed.
 
 ### Mobile data not coming back
@@ -524,11 +536,11 @@ TIMEOUT_POLICY=unblock
 
 ---
 
-## 8. Migration from v2.4 / v2.5 fix release
+## 8. Migration from v2.4 / v2.6
 
-### New in v2.5 (original)
+### New in v2.6 (vs v2.4)
 
-| Feature                      | v2.4                             | v2.5                                   |
+| Feature                      | v2.4                             | v2.6                                   |
 |------------------------------|----------------------------------|----------------------------------------|
 | Graph fingerprint            | Rule count + chain count (weak)  | Full graph cksum (all afwall* content) |
 | Transport fingerprint        | Root-chain rule count only       | Full subtree cksum (incl. descendants) |
@@ -540,18 +552,21 @@ TIMEOUT_POLICY=unblock
 | Boot marker                  | Reuses ipv4_out_table timestamp  | Dedicated `boot_marker` file           |
 | Per-poll snapshots           | Each helper calls iptables       | One coherent snapshot per family/poll  |
 
-### Fixes applied in v2.5 fix release
+### Fixes applied in v2.6
 
-| Fault                       | Before fix                                    | After fix                                            |
-|-----------------------------|-----------------------------------------------|------------------------------------------------------|
-| Snapshot backend mismatch   | `iptables-save` used (wrong format for parsers)| `iptables -t filter -S` only (matches all parsers)   |
-| Block release gated on transport | `v4_done && wifi_done && mobile_done`    | `v4_done` alone removes v4 block; transport is separate |
-| Manual override not sticky  | action.sh unblocks; service re-blocks on next cycle | `manual_override` + `stop_requested` latch; service exits cleanly |
-| Post-boot absence threshold | Used `TRANSPORT_WAIT_SECS_POST_BOOT` (5s)    | Uses `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT` (2s)  |
+| Fault                                | Before fix                                         | After fix                                                    |
+|--------------------------------------|----------------------------------------------------|--------------------------------------------------------------|
+| Snapshot backend mismatch            | `iptables-save` used (incompatible format)         | `iptables -t filter -S` only (matches all parsers)           |
+| Block release gated on transport     | `v4_done && wifi_done && mobile_done`              | `v4_done` alone removes v4 block; transport is separate      |
+| Manual override not sticky           | `action.sh` unblocks; service re-blocks next cycle | `manual_override` + `stop_requested` latch; service exits    |
+| Post-boot absence threshold wrong    | Used `TRANSPORT_WAIT_SECS_POST_BOOT` (5s)          | Uses `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT` (2s)          |
+| Orphan transport chain deadlock      | Present-but-unreachable resets absence timer → permanent deadlock | Treated as "not usable"; absence-stable fallback still fires |
+| Snapshot coherence (density check)   | `afwall_rules_dense_v4/v6` made fresh iptables calls | `afwall_rules_dense_from_snapshot()` uses per-poll snapshot  |
+| Early no-block exit missing PID cleanup | `service.pid` left stale on early exit          | `remove_service_pid` called on all clean exits               |
 
 ### Breaking changes
 
-None. All v2.4 and v2.5 config keys continue to work. New keys have safe defaults.
+None. All v2.4 and v2.6 config keys continue to work. New keys have safe defaults.
 
 ### New config keys (all have safe defaults)
 

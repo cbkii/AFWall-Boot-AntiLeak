@@ -1,11 +1,11 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v2.5 - Common library
+# AFWall Boot AntiLeak v2.6 - Common library
 # POSIX/ash compatible. No bashisms. Sourced by all module scripts; do not
 # execute directly.
 
 # ── Module identity ────────────────────────────────────────────────────────────
 MODULE_ID="AFWall-Boot-AntiLeak"
-MODULE_VERSION="v2.5"
+MODULE_VERSION="v2.6"
 MODULE_DATA="/data/adb/${MODULE_ID}"
 LOG_DIR="${MODULE_DATA}/logs"
 LOG_FILE="${LOG_DIR}/boot.log"
@@ -1066,6 +1066,18 @@ afwall_rules_dense_v6() {
   ip6t="$(_find_cmd ip6tables)" || return 1
   _chain_exists "$ip6t" filter "$AFWALL_CHAIN_MAIN" || return 1
   count="$("$ip6t" -t filter -S "$AFWALL_CHAIN_MAIN" 2>/dev/null | grep -c '^-A ')" || count=0
+  [ "${count:-0}" -ge "$min" ]
+}
+
+# ── Snapshot-based rule density check ────────────────────────────────────────
+# Returns 0 if the AFWall main chain in the given snapshot contains at least
+# `min` rules.  Uses the pre-captured snapshot for coherence — no fresh
+# iptables call is made.  This is the preferred form for the service.sh hot
+# path where all checks must derive from one consistent per-poll snapshot.
+afwall_rules_dense_from_snapshot() {
+  local snap="$1" min="${2:-3}" count
+  [ -n "$snap" ] || return 1
+  count="$(printf '%s\n' "$snap" | grep -cE "^-A ${AFWALL_CHAIN_MAIN} ")" || count=0
   [ "${count:-0}" -ge "$min" ]
 }
 

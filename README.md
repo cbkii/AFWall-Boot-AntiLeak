@@ -1,4 +1,4 @@
-# AFWall Boot AntiLeak Fork — v2.5
+# AFWall Boot AntiLeak Fork — v2.6
 
 A Magisk module that enforces a **total-connectivity-blackout** from the moment
 Android's kernel initialises until AFWall+ has verifiably applied its rules for
@@ -46,7 +46,7 @@ This module closes that window.
 
 ---
 
-## How AFWall+ takeover is detected (v2.5 composite model)
+## How AFWall+ takeover is detected (v2.6 composite model)
 
 Each poll iteration (1-second interval) the module:
 
@@ -191,6 +191,7 @@ Key log entries to look for:
 - `family handoff complete but transport restore still pending` — service continues for radios
 - `wifi subtree drift old=... new=... reset` — transport still being populated
 - `wifi transport accepted via absence-stable fallback` — no afwall-wifi chain (normal)
+- `wifi transport accepted via unreachable-stable fallback` — orphan chain dismissed; Wi-Fi restored
 - `service: manual_override detected — stopping loop` — action.sh override active
 
 ---
