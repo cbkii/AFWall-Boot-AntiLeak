@@ -1,42 +1,81 @@
-# AFWall Boot AntiLeak Fork
+# AFWall Boot AntiLeak
 
-A Magisk module that enforces a **total-connectivity-blackout** from the moment
-Android's kernel initialises until AFWall+ has verifiably applied its rules for
-each transport (Wi-Fi and mobile data).
+A Magisk module that prevents apps from accessing the internet before your firewall is ready.
 
----
+## Table of Contents
 
-## What does it do?
+- [What is This?](#what-is-this)
+- [The Problem It Solves](#the-problem-it-solves)
+- [How It Works](#how-it-works)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Troubleshooting](#troubleshooting)
+- [Disclaimer](#disclaimer)
 
-On every boot, the module installs a kernel-level iptables block in the very first stage (`post-fs-data`), before any network interface becomes active.
-No traffic can leave or enter the device until AFWall+ is confirmed ready.
+## What is This?
 
-Once AFWall+ rules are detected and stable, the module releases the block and restores any services it suppressed. From that point on, AFWall+ is the sole active firewall.
+This module enforces a **total network blackout** from the moment your Android device starts until the [AFWall+ firewall](https://github.com/ukanth/afwall) has fully loaded and applied its rules. This ensures no application can "leak" data during the boot process.
 
----
+## The Problem It Solves
 
-## What problem does it solve?
+When your Android device boots up, its network connections (like Wi-Fi and mobile data) can become active before AFWall+ has a chance to load and enforce your firewall rules. This creates a small window of time where any app can access the internet without restriction.
 
-Android boots in stages. Network interfaces come up before AFWall+ loads its rules. Without this module, there is a window of seconds (sometimes longer) where your device has internet access but no firewall rules are enforced.
-Apps running in the background can leak traffic during this window.
+This module closes that security gap.
 
-This module closes that window.
+## How It Works
 
----
+The module operates in a few simple stages during boot:
 
-## Default behaviour
+1.  **Block:** As soon as the Android kernel starts, the module immediately installs a low-level `iptables` block. This stops all internet traffic from entering or leaving your device.
+2.  **Suppress:** As the system continues to boot, the module keeps Wi-Fi and mobile data services turned off.
+3.  **Monitor:** The module continuously watches for AFWall+ to load and apply its firewall rules.
+4.  **Release:** Once it verifies that your AFWall+ rules are active and stable, the module removes its own block and allows Wi-Fi and mobile data services to turn back on. From this point, AFWall+ is in full control of your device's network access.
 
-- **Hard block** (iptables OUTPUT/FORWARD) installed in `post-fs-data`, this runs before any interface is active.
-- **Wi-Fi and mobile data** disabled at the service level once the Android framework starts.
-- **Wi-Fi stays off** until AFWall+'s Wi-Fi rule subtree is confirmed active and reachable from the main AFWall graph.
-- **Mobile data stays off** until AFWall+'s mobile rule subtree is confirmed.
-- **Timeout auto-unblocking is disabled by default.** If AFWall+ never responds, the device stays offline rather than exposing traffic. Use the Magisk action button to manually recover if needed.
-- **Timeout countdown only begins after device unlock.** The device will not automatically unblock at boot before you have unlocked it.
+For a more detailed technical explanation of the boot process and detection logic, see the [Advanced Documentation](ADVANCED.md#boot-process-deep-dive).
 
----
+## Requirements
 
-## How AFWall+ takeover is detected (v2.6 composite model)
+-   Android 8.0+
+-   Magisk v24+
+-   AFWall+ (with "Active Rules" enabled)
 
+## Installation
+
+1.  Download the latest release from the [releases page](https://github.com/cbkii/AFWall-Boot-AntiLeak/releases).
+2.  Install the module via the Magisk app.
+3.  Reboot your device.
+
+**Recommended AFWall+ Settings:**
+For best results, please configure AFWall+ as follows:
+-   **Fix Startup Data Leak:** `Disabled` (this module replaces that functionality).
+-   **Startup Delay:** `0` (this module makes the delay unnecessary).
+
+## Configuration
+
+The module works out-of-the-box with sensible defaults and requires no initial configuration.
+
+If you need to adjust settings, you can create a custom configuration file at `/data/adb/AFWall-Boot-AntiLeak/config.sh`. This allows you to override the defaults without modifying the module itself.
+
+For a full list of available options and their descriptions, please see the [Configuration Reference](ADVANCED.md#configuration-reference) in the advanced documentation.
+
+## Troubleshooting
+
+**My device has no internet connection after booting.**
+
+This is the intended behavior if AFWall+ fails to start or apply its rules. The module prioritizes security over connectivity.
+
+-   **Manual Override:** You can manually disable the network block by running the following command in a root shell (e.g., via ADB):
+    ```sh
+    /data/adb/modules/afwall-boot-antileak/action.sh override
+    ```
+-   **Check AFWall+:** Ensure AFWall+ is not disabled and that its rules are active.
+
+For more detailed troubleshooting steps, see the [Troubleshooting Guide](ADVANCED.md#troubleshooting).
+
+## Disclaimer
+
+This is a powerful tool that modifies low-level network behavior. While it is designed to be safe, you use it at your own risk.
 Each poll iteration (1-second interval) the module:
 
 1. Captures a **coherent filter-table snapshot** using `iptables -t filter -S` (one call per family per poll — all parsers consume this `-N`/`-A` rule-spec format; `iptables-save` restore-file format is not used).
