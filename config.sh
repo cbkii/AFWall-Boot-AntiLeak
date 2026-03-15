@@ -289,6 +289,19 @@ SLOW_STABLE_SECS=6
 #
 TRANSPORT_ABSENCE_STABLE_SECS=3
 
+# ── Transport-absence stable window (post-boot) ───────────────────────────────
+# Shorter absence-stable window applied after sys.boot_completed=1 when
+# BOOT_COMPLETE_ACCELERATE=1.  If no transport-specific subtree has been seen
+# in snapshots for this many seconds after boot-complete, the module accepts
+# absence-stable fallback for that transport more quickly.
+#
+# Must NOT be confused with TRANSPORT_WAIT_SECS_POST_BOOT, which governs a
+# different (legacy) wait path.  Keep these values independent.
+#
+# Default: 2 s  (shorter than the base 3 s for faster post-boot restore)
+#
+TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT=2
+
 # ── Boot-completion acceleration ──────────────────────────────────────────────
 # When set to 1 (default), the module uses sys.boot_completed=1 and related
 # boot-completion signals to shorten the detection windows for liveness,
@@ -353,6 +366,18 @@ LIVENESS_SECS_POST_BOOT=2
 FALLBACK_SECS_POST_BOOT=4
 SETTLE_SECS_POST_BOOT=1
 TRANSPORT_WAIT_SECS_POST_BOOT=5
+
+# ── Manual override persistence ───────────────────────────────────────────────
+# When the Magisk action button (action.sh) is used to manually recover
+# connectivity, the module writes a manual_override state marker that prevents
+# the background service loop from re-blocking or reasserting radios off for
+# the remainder of the current boot session.  The marker is cleared automatically
+# by post-fs-data.sh on the next reboot so it never carries over across boots.
+#
+# This setting is informational / documentary.  The behaviour is always enabled
+# when action.sh runs; it cannot be disabled from config.sh.
+#
+MANUAL_OVERRIDE_PERSISTS_THIS_BOOT=1
 
 # ── Debug logging ─────────────────────────────────────────────────────────────
 # Set to 1 to enable verbose [DEBUG] entries in the boot log.

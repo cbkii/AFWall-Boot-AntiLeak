@@ -50,7 +50,9 @@ This module closes that window.
 
 Each poll iteration (1-second interval) the module:
 
-1. Captures a **coherent filter-table snapshot** (one iptables-save call).
+1. Captures a **coherent filter-table snapshot** using `iptables -t filter -S`
+   (one call per family per poll — all parsers consume this `-N`/`-A` rule-spec
+   format; `iptables-save` restore-file format is not used).
 2. Computes a **full AFWall graph fingerprint** (`cksum` of all afwall-prefixed
    chains and rules, including descendants).
 3. Tracks **fingerprint stability** using timestamps (no blocking sleep).
@@ -60,7 +62,15 @@ Each poll iteration (1-second interval) the module:
    - **Conservative path**: fingerprint stable for 6s (no corroboration needed).
 5. Transport chains (`afwall-wifi`, `afwall-3g`) must be **reachable from the
    main AFWall graph** to count — isolated chains are ignored.
-6. Transport absence is accepted after **3 seconds** of stable absence (not 30s).
+6. Transport absence is accepted after **3 seconds** of stable absence (not 30s);
+   **2 seconds** post-boot-complete.
+
+**Family handoff vs transport restore (split):**
+- The module-owned OUTPUT block for each family is removed as soon as the main
+  `afwall` graph is confirmed stable for that family (`v4_done` / `v6_done`).
+- Wi-Fi and mobile radio restoration (`WIFI_AFWALL_GATE`, `MOBILE_AFWALL_GATE`)
+  are separate decisions that happen in parallel — they do NOT block family block
+  removal.  If transport subtrees appear later, they are accepted then.
 
 This means release happens **much sooner** when AFWall+ is genuinely ready,
 while remaining fail-closed when it is not.
@@ -122,19 +132,20 @@ for an interactive reconfiguration.
 
 ## Important config knobs
 
-| Key                             | Default       | Description                                          |
-|---------------------------------|---------------|------------------------------------------------------|
-| `TIMEOUT_SECS`                  | `120`         | Max seconds to wait for AFWall+ per IP family        |
-| `TIMEOUT_POLICY`                | `fail_closed` | `fail_closed` = stay blocked; `unblock` = allow      |
-| `AUTO_TIMEOUT_UNBLOCK`          | `0`           | Set to `1` to enable timeout-based unblocking        |
-| `TIMEOUT_UNLOCK_GATED`          | `1`           | Timeout only starts after device unlock              |
-| `WIFI_AFWALL_GATE`              | `1`           | Gate Wi-Fi restore on AFWall Wi-Fi chain ready       |
-| `MOBILE_AFWALL_GATE`            | `1`           | Gate mobile restore on AFWall mobile chain ready     |
-| `LOWLEVEL_MODE`                 | `safe`        | `off` = firewall-only; `safe`/`strict` = full        |
-| `POLL_INTERVAL_SECS`            | `1`           | Detection loop interval (1s for fastest response)    |
-| `FAST_STABLE_SECS`              | `2`           | Fast-path stability window (with corroboration)      |
-| `SLOW_STABLE_SECS`              | `6`           | Conservative-path stability window (no corroboration)|
-| `TRANSPORT_ABSENCE_STABLE_SECS` | `3`           | Accept no-transport-chain after 3s of stable absence |
+| Key                                        | Default       | Description                                          |
+|--------------------------------------------|---------------|------------------------------------------------------|
+| `TIMEOUT_SECS`                             | `120`         | Max seconds to wait for AFWall+ per IP family        |
+| `TIMEOUT_POLICY`                           | `fail_closed` | `fail_closed` = stay blocked; `unblock` = allow      |
+| `AUTO_TIMEOUT_UNBLOCK`                     | `0`           | Set to `1` to enable timeout-based unblocking        |
+| `TIMEOUT_UNLOCK_GATED`                     | `1`           | Timeout only starts after device unlock              |
+| `WIFI_AFWALL_GATE`                         | `1`           | Gate Wi-Fi radio restore on AFWall Wi-Fi chain ready |
+| `MOBILE_AFWALL_GATE`                       | `1`           | Gate mobile radio restore on AFWall mobile chain     |
+| `LOWLEVEL_MODE`                            | `safe`        | `off` = firewall-only; `safe`/`strict` = full        |
+| `POLL_INTERVAL_SECS`                       | `1`           | Detection loop interval (1s for fastest response)    |
+| `FAST_STABLE_SECS`                         | `2`           | Fast-path stability window (with corroboration)      |
+| `SLOW_STABLE_SECS`                         | `6`           | Conservative-path stability window (no corroboration)|
+| `TRANSPORT_ABSENCE_STABLE_SECS`            | `3`           | Accept no-transport-chain after 3s of stable absence |
+| `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT`  | `2`           | Post-boot absence-stable threshold (shorter)         |
 
 ---
 
@@ -144,12 +155,18 @@ If your device is stuck with no connectivity:
 
 **Option 1 — Magisk action button:**
 Open the Magisk app → Modules → AFWall Boot AntiLeak → Action button.
-This removes all module-owned blocks and restores radio state.
+This removes all module-owned blocks, restores radio state, and **latches a
+manual override** that prevents the background service loop from re-blocking
+for the remainder of the current boot session.
 
 **Option 2 — ADB:**
 ```sh
 adb shell sh /data/adb/modules/AFWall-Boot-AntiLeak/action.sh
 ```
+
+The manual override persists until the next reboot (cleared by `post-fs-data.sh`
+on next boot). Once triggered, the service loop cannot reinstall the block or
+reassert radios-off during this boot.
 
 **Option 3 — Force restart AFWall+:**
 Ensure AFWall+ has "Active Rules" enabled and the firewall on. Then reboot.
@@ -165,11 +182,16 @@ Ensure AFWall+ has "Active Rules" enabled and the firewall on. Then reboot.
 Enable `DEBUG=1` in config.sh for verbose output.
 
 Key log entries to look for:
+- `service: snapshot backend v4=iptables-S` — confirms correct snapshot backend
 - `v4 graph first seen fp=...` — AFWall graph first detected
 - `v4 fast-path confirmed stable=Xs corroboration=...` — released early with corroboration
 - `v4 conservative-path confirmed stable=Xs` — released after stable window
+- `v4 handoff confirmed — removing family block immediately` — block removed
+- `block removed; wifi restore deferred` — block gone, transport restore still pending
+- `family handoff complete but transport restore still pending` — service continues for radios
 - `wifi subtree drift old=... new=... reset` — transport still being populated
 - `wifi transport accepted via absence-stable fallback` — no afwall-wifi chain (normal)
+- `service: manual_override detected — stopping loop` — action.sh override active
 
 ---
 

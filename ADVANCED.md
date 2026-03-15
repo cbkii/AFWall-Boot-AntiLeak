@@ -77,19 +77,28 @@ each IP family using a **composite readiness model**:
 
 See [Section 2](#2-composite-readiness-model) for full details.
 
-### Stage D — Transport readiness check
+### Stage D — Family block release (decoupled from transport)
 
-After the main AFWall chain is confirmed for at least one IP family, the
-module checks transport-specific chain readiness using the same per-poll
-snapshots.
+As soon as the main AFWall graph takeover is confirmed for a given IP family
+(`v4_done=1` or `v6_done=1`), the module removes its own OUTPUT block for that
+family **immediately**.  Wi-Fi and mobile transport readiness do **not** gate
+the family block removal.
+
+Log entries:
+```
+service: v4 handoff confirmed — removing family block immediately
+service: block removed; wifi restore deferred
+service: block removed; mobile restore deferred
+service: family handoff complete but transport restore still pending (wifi=0 mobile=0)
+```
+
+### Stage E — Transport restore (parallel, advisory)
+
+After the family block is released, the service loop continues to check
+transport-specific chains (`afwall-wifi`, `afwall-3g`) for Wi-Fi and mobile
+radio restoration.  This is independent of the block release decision.
 
 See [Section 3](#3-transport-aware-handoff) for full details.
-
-### Stage E — Block release and restore
-
-The module-owned iptables blocks are removed **only when**:
-- The corresponding IP family takeover is confirmed (via composite model), AND
-- ALL required transports (Wi-Fi and mobile) are confirmed ready.
 
 ---
 
@@ -99,16 +108,28 @@ The module-owned iptables blocks are removed **only when**:
 
 At the start of each 1-second poll iteration, the module captures one
 consistent snapshot of the filter table for each IP family using
-`iptables-save -t filter` (or `iptables -t filter -S` as fallback):
+`iptables -t filter -S` (producing `-N chain` / `-A chain rule` lines that
+all downstream parsers expect):
 
 ```
-v4_snap = capture_filter_snapshot_v4()
-v6_snap = capture_filter_snapshot_v6()
+v4_snap = capture_filter_snapshot_v4()   # iptables  -t filter -S
+v6_snap = capture_filter_snapshot_v6()   # ip6tables -t filter -S
 ```
 
 All subsequent checks in that iteration (graph presence, fingerprint
 computation, transport reachability) read from these variables.  No separate
 iptables calls are made for individual sub-checks.
+
+**Important:** `iptables-save` is NOT used for the snapshot.  Its restore-file
+format (`:chain - [packets:bytes]`, `*filter`, `COMMIT` markers) is incompatible
+with all downstream parsers, which look for `-N chain` / `-A chain rule` lines.
+Until a normalisation layer is added, only `iptables -t filter -S` is used.
+
+The chosen backend is logged at startup:
+```
+service: snapshot backend v4=iptables-S
+service: snapshot backend v6=ip6tables-S
+```
 
 This guarantees that presence, fingerprint, and reachability tests see the
 same consistent iptables state within each poll.
@@ -232,10 +253,14 @@ the module uses an absence-stability fallback:
 - Track how long the transport prefix has been absent since the main family
   was confirmed.
 - Once absence is stable for `TRANSPORT_ABSENCE_STABLE_SECS` (default 3s),
-  or `TRANSPORT_WAIT_SECS_POST_BOOT` (default 5s) post-boot, accept
-  main-chain-only readiness.
+  or `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT` (default 2s) post-boot,
+  accept main-chain-only readiness for that transport.
+- **Important:** this does NOT delay family block removal.  It only controls
+  when the radio (Wi-Fi / mobile) is restored.
 
 This replaces the old 30-second `TRANSPORT_WAIT_SECS` blunt fallback.
+`TRANSPORT_WAIT_SECS_POST_BOOT` is a separate (legacy) value; it is NOT
+used for absence-stable logic.
 
 Log entry example:
 ```
@@ -336,13 +361,14 @@ All config keys and their defaults. Override at:
 
 ### Composite-readiness timing
 
-| Key                             | Default | Description                                        |
-|---------------------------------|---------|----------------------------------------------------|
-| `POLL_INTERVAL_SECS`            | `1`     | Main loop poll interval (s); lower = faster detect |
-| `FAST_STABLE_SECS`              | `2`     | Fast-path stability window (corroboration required)|
-| `SLOW_STABLE_SECS`              | `6`     | Conservative-path stability window (no corroboration needed) |
-| `TRANSPORT_ABSENCE_STABLE_SECS` | `3`     | Absence-stable fallback for transport chains (s)   |
-| `SETTLE_SECS`                   | `5`     | Legacy: not used as blocking sleep; kept for compat|
+| Key                                       | Default | Description                                        |
+|-------------------------------------------|---------|----------------------------------------------------|
+| `POLL_INTERVAL_SECS`                      | `1`     | Main loop poll interval (s); lower = faster detect |
+| `FAST_STABLE_SECS`                        | `2`     | Fast-path stability window (corroboration required)|
+| `SLOW_STABLE_SECS`                        | `6`     | Conservative-path stability window (no corroboration needed) |
+| `TRANSPORT_ABSENCE_STABLE_SECS`           | `3`     | Absence-stable fallback for transport chains (s)   |
+| `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT` | `2`     | Post-boot absence-stable threshold (shorter, s)    |
+| `SETTLE_SECS`                             | `5`     | Legacy: not used as blocking sleep; kept for compat|
 
 ### Boot-completion acceleration
 
@@ -397,6 +423,9 @@ Key log entries (v2.5+):
   block_installed       — iptables block is active (1 = yes)
   boot_marker           — current-boot timestamp marker (used for evidence checks)
   integration_mode      — chosen integration mode
+  manual_override       — written by action.sh; prevents service re-block this boot
+  stop_requested        — written by action.sh; signals service loop to exit
+  service.pid           — PID of background service.sh loop (deleted on clean exit)
   ipv4_out_table        — primary table for IPv4 OUTPUT block
   ipv6_out_table        — primary table for IPv6 OUTPUT block
   ipv4_fwd_active       — IPv4 FORWARD block active (1 = yes)
@@ -411,6 +440,13 @@ Key log entries (v2.5+):
     ifaces_down         — interfaces brought down by module (one per line)
     tether_was_active   — tethering was stopped (present = yes)
 ```
+
+Manual override lifecycle:
+- Written by `action.sh` (before block removal).
+- Persists for the current boot only.
+- Cleared by `post-fs-data.sh` at the start of every subsequent reboot.
+- While present: service loop exits without repairing blocks or reasserting
+  radios off.
 
 ---
 
@@ -448,7 +484,8 @@ ip6tables -t filter -S | grep MOD_PRE_AFW
 
 **Step 5 — Check AFWall+ chain:**
 ```sh
-iptables-save -t filter | grep afwall
+iptables -t filter -S | grep afwall
+ip6tables -t filter -S | grep afwall
 ```
 If `afwall` is missing, AFWall+ has not applied rules. Check AFWall+ settings.
 If `afwall-wifi` is present but not referenced by `afwall`, that is an unreachable
@@ -487,9 +524,9 @@ TIMEOUT_POLICY=unblock
 
 ---
 
-## 8. Migration from v2.4
+## 8. Migration from v2.4 / v2.5 fix release
 
-### New in v2.5
+### New in v2.5 (original)
 
 | Feature                      | v2.4                             | v2.5                                   |
 |------------------------------|----------------------------------|----------------------------------------|
@@ -503,18 +540,29 @@ TIMEOUT_POLICY=unblock
 | Boot marker                  | Reuses ipv4_out_table timestamp  | Dedicated `boot_marker` file           |
 | Per-poll snapshots           | Each helper calls iptables       | One coherent snapshot per family/poll  |
 
+### Fixes applied in v2.5 fix release
+
+| Fault                       | Before fix                                    | After fix                                            |
+|-----------------------------|-----------------------------------------------|------------------------------------------------------|
+| Snapshot backend mismatch   | `iptables-save` used (wrong format for parsers)| `iptables -t filter -S` only (matches all parsers)   |
+| Block release gated on transport | `v4_done && wifi_done && mobile_done`    | `v4_done` alone removes v4 block; transport is separate |
+| Manual override not sticky  | action.sh unblocks; service re-blocks on next cycle | `manual_override` + `stop_requested` latch; service exits cleanly |
+| Post-boot absence threshold | Used `TRANSPORT_WAIT_SECS_POST_BOOT` (5s)    | Uses `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT` (2s)  |
+
 ### Breaking changes
 
-None. All v2.4 config keys continue to work. New keys have safe defaults.
+None. All v2.4 and v2.5 config keys continue to work. New keys have safe defaults.
 
 ### New config keys (all have safe defaults)
 
-| Key                             | Default | Description                              |
-|---------------------------------|---------|------------------------------------------|
-| `POLL_INTERVAL_SECS`            | `1`     | Poll loop interval                       |
-| `FAST_STABLE_SECS`              | `2`     | Fast-path stability window               |
-| `SLOW_STABLE_SECS`              | `6`     | Conservative-path stability window       |
-| `TRANSPORT_ABSENCE_STABLE_SECS` | `3`     | Transport absence stable window          |
+| Key                                       | Default | Description                              |
+|-------------------------------------------|---------|------------------------------------------|
+| `POLL_INTERVAL_SECS`                      | `1`     | Poll loop interval                       |
+| `FAST_STABLE_SECS`                        | `2`     | Fast-path stability window               |
+| `SLOW_STABLE_SECS`                        | `6`     | Conservative-path stability window       |
+| `TRANSPORT_ABSENCE_STABLE_SECS`           | `3`     | Transport absence stable window          |
+| `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT` | `2`     | Post-boot transport absence threshold    |
+| `MANUAL_OVERRIDE_PERSISTS_THIS_BOOT`      | `1`     | Informational: manual override is per-boot|
 
 ### Removed internal state
 

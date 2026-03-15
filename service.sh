@@ -66,13 +66,25 @@
   FALLBACK_SECS_POST_BOOT="${FALLBACK_SECS_POST_BOOT:-4}"
   SETTLE_SECS_POST_BOOT="${SETTLE_SECS_POST_BOOT:-1}"
   TRANSPORT_WAIT_SECS_POST_BOOT="${TRANSPORT_WAIT_SECS_POST_BOOT:-5}"
+  # Absence-stable threshold post-boot: how many consecutive seconds with no
+  # transport-specific chains (afwall-wifi* / afwall-3g*) in snapshots before
+  # accepting that transport as absent and proceeding with radio restoration.
+  # Must NOT be confused with TRANSPORT_WAIT_SECS_POST_BOOT (which gates a
+  # different legacy detection wait path).
+  TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT="${TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT:-2}"
 
   log "service: start ($MODULE_VERSION)"
   log "service: config: timeout=${TIMEOUT_SECS}s policy=${TIMEOUT_POLICY} auto_unblock=${AUTO_TIMEOUT_UNBLOCK} unlock_gated=${TIMEOUT_UNLOCK_GATED}"
-  log "service: config: poll=${POLL_INTERVAL_SECS}s fast=${FAST_STABLE_SECS}s slow=${SLOW_STABLE_SECS}s transport_absence=${TRANSPORT_ABSENCE_STABLE_SECS}s"
+  log "service: config: poll=${POLL_INTERVAL_SECS}s fast=${FAST_STABLE_SECS}s slow=${SLOW_STABLE_SECS}s transport_absence=${TRANSPORT_ABSENCE_STABLE_SECS}s absence_pb=${TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT}s"
   log "service: config: fwd=${ENABLE_FORWARD_BLOCK:-1} in=${ENABLE_INPUT_BLOCK:-0} ll_mode=${LOWLEVEL_MODE:-safe}"
   log "service: config: wifi_gate=${WIFI_AFWALL_GATE} mobile_gate=${MOBILE_AFWALL_GATE} reassert=${RADIO_REASSERT_INTERVAL}s blackout_reassert=${BLACKOUT_REASSERT_INTERVAL}s"
   log "service: config: boot_accel=${BOOT_COMPLETE_ACCELERATE} density_min=${AFWALL_RULE_DENSITY_MIN} liveness_pb=${LIVENESS_SECS_POST_BOOT}s fallback_pb=${FALLBACK_SECS_POST_BOOT}s settle_pb=${SETTLE_SECS_POST_BOOT}s twait_pb=${TRANSPORT_WAIT_SECS_POST_BOOT}s"
+  log "service: snapshot backend v4=iptables-S"
+  log "service: snapshot backend v6=ip6tables-S"
+
+  # Write service PID so action.sh can signal this background loop if needed.
+  write_service_pid "$$"
+  log "service: pid=$$ started"
 
   # Validate TIMEOUT_POLICY; default to fail_closed on unknown value.
   case "$TIMEOUT_POLICY" in
@@ -276,6 +288,10 @@
   wifi_last_fp="";   wifi_fp_stable_since=0;   wifi_absent_since=0
   mobile_last_fp=""; mobile_fp_stable_since=0; mobile_absent_since=0
 
+  # One-time diagnostic flag: set when all family blocks are released but
+  # transport restore is still pending, to avoid logging this every poll.
+  _family_handoff_logged=0
+
   # ── Unlock state for timeout gating ────────────────────────────────────────
   device_unlocked=0
   unlock_ts=0
@@ -374,7 +390,7 @@
           local _w_absent_elapsed _w_absent_threshold
           _w_absent_elapsed=$((now_ts - wifi_absent_since))
           _w_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS"
-          [ "$_boot_complete_now" = "1" ] && _w_absent_threshold="$TRANSPORT_WAIT_SECS_POST_BOOT"
+          [ "$_boot_complete_now" = "1" ] && _w_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT"
           if [ "$_w_absent_elapsed" -ge "$_w_absent_threshold" ]; then
             wifi_done=1
             log "service: wifi transport accepted via absence-stable fallback after ${_w_absent_elapsed}s (no wifi-prefixed subtree detected in snapshot)"
@@ -436,7 +452,7 @@
           local _m_absent_elapsed _m_absent_threshold
           _m_absent_elapsed=$((now_ts - mobile_absent_since))
           _m_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS"
-          [ "$_boot_complete_now" = "1" ] && _m_absent_threshold="$TRANSPORT_WAIT_SECS_POST_BOOT"
+          [ "$_boot_complete_now" = "1" ] && _m_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT"
           if [ "$_m_absent_elapsed" -ge "$_m_absent_threshold" ]; then
             mobile_done=1
             log "service: mobile transport accepted via absence-stable fallback after ${_m_absent_elapsed}s (no mobile-prefixed subtree detected in snapshot)"
@@ -451,6 +467,25 @@
   # ── Main polling loop ───────────────────────────────────────────────────────
   while :; do
     NOW="$(date +%s 2>/dev/null)" || NOW=0
+
+    # ── Override / stop check ────────────────────────────────────────────────
+    # Check before any state-modifying operation.  Manual action (action.sh)
+    # writes manual_override + stop_requested and removes blocks; once either
+    # marker is present the service must not repair or reassert blocks.
+    if manual_override_active; then
+      log "service: manual_override detected — stopping loop"
+      clear_blackout_active
+      rm -f "${STATE_DIR}/block_installed" 2>/dev/null || true
+      remove_service_pid
+      exit 0
+    fi
+    if stop_requested_active; then
+      log "service: stop_requested detected — stopping loop"
+      clear_blackout_active
+      rm -f "${STATE_DIR}/block_installed" 2>/dev/null || true
+      remove_service_pid
+      exit 0
+    fi
 
     # Cache sys.boot_completed result once per iteration to avoid repeated
     # getprop calls across all the boot-completion acceleration checks below.
@@ -603,6 +638,7 @@
           rm -f "${STATE_DIR}/block_installed" 2>/dev/null || true
           clear_blackout_active
           lowlevel_restore_changed_state
+          log "service: TIMEOUT: timeout unblock triggered — stop flag set, loop exiting"
           log "service: TIMEOUT: networking restored (unblock policy after unlock)"
         else
           # ── Timeout: fail_closed or auto_unblock disabled or not unlocked ──
@@ -626,6 +662,7 @@
           log "service: TIMEOUT: lower-layer restored; iptables blocks retained (${_reason})"
         fi
 
+        remove_service_pid
         exit 0
       fi
     fi
@@ -815,14 +852,14 @@
       fi
     fi
 
-    # ── Block release: remove blocks when transports are ready ────────────
-    # Safety rule: do not remove a family's block until ALL required transports
-    # are ready, to prevent unprotected windows on any transport.
+    # ── Block release: remove blocks as soon as AFWall family handoff confirmed ─
+    # The family OUTPUT blackout is removed as soon as AFWall's main graph is
+    # confirmed (v4_done / v6_done).  Transport readiness (wifi_done / mobile_done)
+    # controls only lower-layer radio restoration, NOT family block removal.
     # F) Integrity check immediately before removal: if block is already missing
     # at this point, log as an error condition (not a silent "success").
-    if [ "$v4_done" = "1" ] && [ "$wifi_done" = "1" ] && [ "$mobile_done" = "1" ] && \
-       [ "$v4_released" = "0" ]; then
-      log "service: v4 release preconditions satisfied: afwall_takeover=1 wifi_done=1 mobile_done=1 path=${v4_path:-confirmed}"
+    if [ "$v4_done" = "1" ] && [ "$v4_released" = "0" ]; then
+      log "service: v4 release preconditions satisfied: afwall_takeover=1 path=${v4_path:-confirmed}"
       _log_pre_remove_integrity_v4 "handoff"
       log_transition_snapshot "v4" "pre_remove"
       remove_output_block_v4
@@ -834,11 +871,13 @@
       fi
       v4_released=1
       log "service: v4 block removed (intentional handoff)"
+      log "service: v4 handoff confirmed — removing family block immediately"
+      [ "$wifi_done" = "0" ] && log "service: block removed; wifi restore deferred"
+      [ "$mobile_done" = "0" ] && log "service: block removed; mobile restore deferred"
     fi
 
-    if [ "$v6_done" = "1" ] && [ "$wifi_done" = "1" ] && [ "$mobile_done" = "1" ] && \
-       [ "$v6_released" = "0" ]; then
-      log "service: v6 release preconditions satisfied: afwall_takeover=1 wifi_done=1 mobile_done=1 path=${v6_path:-confirmed}"
+    if [ "$v6_done" = "1" ] && [ "$v6_released" = "0" ]; then
+      log "service: v6 release preconditions satisfied: afwall_takeover=1 path=${v6_path:-confirmed}"
       _log_pre_remove_integrity_v6 "handoff"
       log_transition_snapshot "v6" "pre_remove"
       remove_output_block_v6
@@ -850,14 +889,26 @@
       fi
       v6_released=1
       log "service: v6 block removed (intentional handoff)"
+      log "service: v6 handoff confirmed — removing family block immediately"
+      [ "$wifi_done" = "0" ] && log "service: block removed; wifi restore deferred"
+      [ "$mobile_done" = "0" ] && log "service: block removed; mobile restore deferred"
     fi
 
     # ── All done? ──────────────────────────────────────────────────────────
-    # Only declare handoff complete when all blocked families are released AND
-    # all transport gates are satisfied.
+    # Family blocks are released as soon as AFWall takeover is confirmed.
+    # The service continues until transport restore is also complete so that
+    # lower-layer state (radios) is properly restored.
     _v4_complete=1; _v6_complete=1
     [ "$v4_blocked" = "1" ] && [ "$v4_released" = "0" ] && _v4_complete=0
     [ "$v6_blocked" = "1" ] && [ "$v6_released" = "0" ] && _v6_complete=0
+
+    # Log once if family blocks are released but transport restore is still pending.
+    if [ "$_v4_complete" = "1" ] && [ "$_v6_complete" = "1" ] && \
+       { [ "$wifi_done" = "0" ] || [ "$mobile_done" = "0" ]; } && \
+       [ "$_family_handoff_logged" = "0" ]; then
+      log "service: family handoff complete but transport restore still pending (wifi=${wifi_done} mobile=${mobile_done})"
+      _family_handoff_logged=1
+    fi
 
     if [ "$_v4_complete" = "1" ] && [ "$_v6_complete" = "1" ] && \
        [ "$wifi_done" = "1" ] && [ "$mobile_done" = "1" ]; then
@@ -879,6 +930,7 @@
       lowlevel_restore_bluetooth 2>/dev/null || true
       lowlevel_restore_tethering_note 2>/dev/null || true
       _ll_state_rm "mode" 2>/dev/null || true
+      remove_service_pid
       log "service: handoff complete — AFWall is now sole active protection"
       exit 0
     fi
