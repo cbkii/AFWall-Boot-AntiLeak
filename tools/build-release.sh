@@ -110,13 +110,10 @@ echo "All required source files present."
 # Magisk executes these directly; package them with executable mode bits.
 chmod 755   "$REPO_ROOT/action.sh"   "$REPO_ROOT/customize.sh"   "$REPO_ROOT/post-fs-data.sh"   "$REPO_ROOT/reconfigure.sh"   "$REPO_ROOT/service.sh"   "$REPO_ROOT/uninstall.sh"
 
-# Ensure bundled helper binary keeps execute permissions.
-# shellcheck disable=SC2066
-# split for future TODO additions
-for kc_bin in "$REPO_ROOT/bin/keycheck/keycheck-arm64"; do
+# Ensure all bundled keycheck binaries keep execute permissions.
+for kc_bin in "$REPO_ROOT/bin/keycheck"/keycheck*; do
   [ -f "$kc_bin" ] && chmod 755 "$kc_bin"
 done
-# TODO: when keycheck-x86_64 binary is committed, include it in chmod list above.
 
 # ── Create output directory (already exists — created during path resolution) ─
 # Remove any existing output for this ZIP name (idempotent rebuild)
