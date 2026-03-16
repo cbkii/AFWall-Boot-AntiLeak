@@ -39,7 +39,10 @@ jobs:
       (
         github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
-        contains(github.event.comment.body, '/release')
+        (
+          github.event.comment.body == '/release' ||
+          startsWith(github.event.comment.body, '/release ')
+        )
       )
 
     steps:
@@ -71,7 +74,10 @@ jobs:
             fi
           else
             PR_NUMBER="${{ github.event.issue.number }}"
-            REF="$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.head.sha')"
+            # Resolve to the PR's BASE branch (a trusted, protected ref owned by this
+            # repo), NOT the contributor's head SHA.  Checking out untrusted fork code
+            # while this job holds contents:write is a pwn-request attack vector.
+            REF="$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.base.ref')"
             TAG_INPUT="$(printf '%s' "${{ github.event.comment.body }}" | sed -nE 's#^/release[[:space:]]+([^[:space:]]+).*$#\1#p' | head -1)"
           fi
 
