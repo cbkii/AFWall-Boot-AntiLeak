@@ -119,23 +119,94 @@ jobs:
             RELEASE_TAG="${{ steps.meta.outputs.version_code }}"
           fi
 
-          if [ "$RELEASE_TAG" != "${{ steps.meta.outputs.version_code }}" ]; then
-            echo "::error::Release tag ($RELEASE_TAG) must match module.prop versionCode (${{ steps.meta.outputs.version_code }})."
+          if ! [[ "$RELEASE_TAG" =~ ^[0-9]+$ ]]; then
+            echo "::error::Release tag must be a numeric versionCode (got: $RELEASE_TAG)."
             exit 1
           fi
 
+          if [ "$RELEASE_TAG" != "${{ steps.meta.outputs.version_code }}" ]; then
+            NEEDS_BUMP=true
+          else
+            NEEDS_BUMP=false
+          fi
+
+          RELEASE_VERSION="$(awk -v c="$RELEASE_TAG" 'BEGIN { printf "v%.1f", c / 1000 }')"
+
+          echo "needs_bump=$NEEDS_BUMP" >> "$GITHUB_OUTPUT"
+          echo "release_version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Bump module metadata when releasing a new versionCode
+        id: bump
+        if: steps.tag.outputs.needs_bump == 'true'
+        run: |
+          BRANCH="$(git symbolic-ref --short -q HEAD || true)"
+          if [ -z "$BRANCH" ]; then
+            echo "::error::Cannot auto-bump metadata when checkout is detached. Use a branch ref or update module.prop first."
+            exit 1
+          fi
+
+          RELEASE_TAG="${{ steps.tag.outputs.release_tag }}"
+          RELEASE_VERSION="${{ steps.tag.outputs.release_version }}"
+
+          sed -E -i "s/^version=.*/version=${RELEASE_VERSION}/" module.prop
+          sed -E -i "s/^versionCode=.*/versionCode=${RELEASE_TAG}/" module.prop
+
+          RELEASE_TAG="$RELEASE_TAG" RELEASE_VERSION="$RELEASE_VERSION" python3 - <<'PY'
+          import json
+          import os
+
+          release_version = os.environ["RELEASE_VERSION"]
+          release_code = int(os.environ["RELEASE_TAG"])
+
+          with open("update.json", "r", encoding="utf-8") as f:
+              data = json.load(f)
+
+          data["version"] = release_version
+          data["versionCode"] = release_code
+
+          with open("update.json", "w", encoding="utf-8") as f:
+              json.dump(data, f, indent=2)
+              f.write("\n")
+          PY
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add module.prop update.json
+          git commit -m "chore(release): bump module version to ${RELEASE_VERSION} (${RELEASE_TAG})"
+          git push origin HEAD:"$BRANCH"
+
+      - name: Read final version metadata
+        id: meta_final
+        run: |
+          VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
+          VERSION_CODE="$(grep '^versionCode=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
+          MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
+
+          if [ -z "$VERSION" ] || [ -z "$VERSION_CODE" ] || [ -z "$MODULE_ID" ]; then
+            echo "::error::Could not parse id/version/versionCode from module.prop after release tag processing"
+            exit 1
+          fi
+
+          if [ "$VERSION_CODE" != "${{ steps.tag.outputs.release_tag }}" ]; then
+            echo "::error::Final module.prop versionCode ($VERSION_CODE) does not match release tag (${{ steps.tag.outputs.release_tag }})."
+            exit 1
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "module_id=$MODULE_ID" >> "$GITHUB_OUTPUT"
 
       - name: Build release ZIP
         run: |
           chmod +x tools/build-release.sh
-          ZIP_NAME="${{ steps.meta.outputs.module_id }}-${{ steps.meta.outputs.version }}.zip"
+          ZIP_NAME="${{ steps.meta_final.outputs.module_id }}-${{ steps.meta_final.outputs.version }}.zip"
           tools/build-release.sh dist/ "$ZIP_NAME"
 
       - name: Validate ZIP structure
         run: |
           chmod +x tools/validate-zip.sh
-          tools/validate-zip.sh "dist/${{ steps.meta.outputs.module_id }}-${{ steps.meta.outputs.version }}.zip"
+          tools/validate-zip.sh "dist/${{ steps.meta_final.outputs.module_id }}-${{ steps.meta_final.outputs.version }}.zip"
 
       - name: Create tag if missing
         env:
@@ -152,7 +223,7 @@ jobs:
             fi
             echo "Tag $RELEASE_TAG already exists and points to the correct commit ($TAG_COMMIT)."
           else
-            git tag -a "$RELEASE_TAG" "$TARGET_COMMIT" -m "Release ${{ steps.meta.outputs.version }} ($RELEASE_TAG)"
+            git tag -a "$RELEASE_TAG" "$TARGET_COMMIT" -m "Release ${{ steps.meta_final.outputs.version }} ($RELEASE_TAG)"
             git push origin "$RELEASE_TAG"
             echo "Created and pushed tag $RELEASE_TAG -> $TARGET_COMMIT"
           fi
@@ -162,9 +233,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RELEASE_TAG="${{ steps.tag.outputs.release_tag }}"
-          VERSION="${{ steps.meta.outputs.version }}"
-          VERSION_CODE="${{ steps.meta.outputs.version_code }}"
-          MODULE_ID="${{ steps.meta.outputs.module_id }}"
+          VERSION="${{ steps.meta_final.outputs.version }}"
+          VERSION_CODE="${{ steps.meta_final.outputs.version_code }}"
+          MODULE_ID="${{ steps.meta_final.outputs.module_id }}"
           ZIP_PATH="dist/${MODULE_ID}-${VERSION}.zip"
           DRAFT_FLAG=""
           if [ "${{ inputs.draft }}" = "true" ]; then
