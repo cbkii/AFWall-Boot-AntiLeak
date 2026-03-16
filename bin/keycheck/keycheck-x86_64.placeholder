@@ -1,0 +1,10 @@
+# TODO: add real keycheck-x86_64 binary
+
+Binary artifacts are intentionally excluded from this patch context.
+
+When binary support is available, build and add:
+  x86_64-linux-gnu-gcc -O2 -static -o bin/keycheck/keycheck-x86_64 tools/keycheck.c
+  chmod 755 bin/keycheck/keycheck-x86_64
+
+Installer compatibility for x86_64 is already implemented in
+bin/installer_config.sh via name/path probing and getevent fallback.
