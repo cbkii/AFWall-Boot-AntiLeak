@@ -211,23 +211,62 @@ ic_render_input_diagnostics() {
 # Prints the path if found and executable, or nothing if not.
 
 _ic_get_keycheck_path() {
-    local _arch _kcdir _kc_bin _dir
+    local _arch _kcdir _kc_bin _dir _sub _name
     _arch="$(uname -m 2>/dev/null)"
+
+    # Candidate names grouped by runtime arch alias. This supports our bundled
+    # keycheck binaries and common MMT/module-installer layouts used by many
+    # modules (e.g. META-INF/com/google/android/<arch>/keycheck).
+    local _names=""
+    case "$_arch" in
+        aarch64|arm64)
+            _names="keycheck-arm64 keycheck-aarch64 keycheck-arm keycheck"
+            ;;
+        arm*)
+            _names="keycheck-arm keycheck-armeabi-v7a keycheck"
+            ;;
+        x86_64)
+            _names="keycheck-x86_64 keycheck-x64 keycheck-x86 keycheck"
+            ;;
+        x86|i686)
+            _names="keycheck-x86 keycheck-i686 keycheck"
+            ;;
+        *)
+            _names="keycheck"
+            ;;
+    esac
 
     for _dir in "${MODPATH:-}" "${MODDIR:-}" "/data/adb/modules/${_IC_MODULE_ID}"; do
         [ -z "$_dir" ] && continue
+
+        # 1) Native module layout used by this project.
         _kcdir="${_dir}/bin/keycheck"
-        [ -d "$_kcdir" ] || continue
+        if [ -d "$_kcdir" ]; then
+            for _name in $_names; do
+                _kc_bin="${_kcdir}/${_name}"
+                [ -x "$_kc_bin" ] && printf '%s' "$_kc_bin" && return 0
+            done
+        fi
 
-        case "$_arch" in
-            aarch64|arm64) _kc_bin="${_kcdir}/keycheck-arm64"  ;;
-            arm*)          _kc_bin="${_kcdir}/keycheck-arm"    ;;
-            x86_64)        _kc_bin="${_kcdir}/keycheck-x86_64" ;;
-            x86|i686)      _kc_bin="${_kcdir}/keycheck-x86"    ;;
-            *)             return 0 ;;
-        esac
+        # 2) MMT-style extracted installer paths.
+        for _sub in \
+            "${_dir}/META-INF/com/google/android/arm64" \
+            "${_dir}/META-INF/com/google/android/arm" \
+            "${_dir}/META-INF/com/google/android/x64" \
+            "${_dir}/META-INF/com/google/android/x86"; do
+            [ -d "$_sub" ] || continue
+            for _name in $_names keycheck; do
+                _kc_bin="${_sub}/${_name}"
+                [ -x "$_kc_bin" ] && printf '%s' "$_kc_bin" && return 0
+            done
+        done
 
-        [ -x "$_kc_bin" ] && printf '%s' "$_kc_bin" && return 0
+        # 3) Flat fallback path (some installers drop helper into root/)
+        for _name in $_names; do
+            _kc_bin="${_dir}/${_name}"
+            [ -x "$_kc_bin" ] && printf '%s' "$_kc_bin" && return 0
+        done
+
     done
 }
 
@@ -338,11 +377,11 @@ ic_volkey_raw() {
 
     local _kraw
     _kraw=$(timeout "$secs" "$_IC_GETEVENT_PATH" -lq 2>/dev/null \
-        | grep -m1 'KEY_VOLUME.*DOWN') || true
+        | grep -m1 -E 'EV_KEY.*(KEY_VOLUMEUP|KEY_VOLUMEDOWN|0073|0072).*(DOWN|00000001)') || true
 
     case "${_kraw}" in
-        *KEY_VOLUMEUP*)   return 0 ;;
-        *KEY_VOLUMEDOWN*) return 1 ;;
+        *KEY_VOLUMEUP*|*0073*)   return 0 ;;
+        *KEY_VOLUMEDOWN*|*0072*) return 1 ;;
         *)                return 2 ;;
     esac
 }
@@ -469,11 +508,11 @@ ic_select_bool() {
     esac
 }
 
-# ── Enum question (cycle-through) ─────────────────────────────────────────────
+# ── Enum question (indexed list + cycle) ─────────────────────────────────────
 # ic_select_enum <question> <space-separated-options> <default>
-# Shows each option in turn: VOL+=select, VOL-=advance to next, timeout=default.
-# Wraps around to default if all options are cycled without a VOL+ selection.
-# Stores result in IC_ENUM_RESULT.
+# Prints the full ordered list FIRST so users can see all choices up front.
+# Then allows cycling current selection: VOL+=select current, VOL-=next.
+# Timeout chooses <default>. Stores result in IC_ENUM_RESULT.
 
 ic_select_enum() {
     local question="$1"
@@ -485,29 +524,64 @@ ic_select_enum() {
         return 0
     fi
 
-    _ic_flush_events
-    _ic_print "  $question"
-    _ic_print "  VOL+: SELECT   VOL-: next   (${_IC_KEY_TIMEOUT}s timeout → $default)"
-
-    local opt count total
+    local opt count total idx current_opt
     count=0
     total=$(printf '%s\n' $options | wc -l | tr -d '[:space:]')
 
+    _ic_flush_events
+    _ic_print "  $question"
+    _ic_print "  Options (in order):"
     for opt in $options; do
         count=$((count + 1))
-        local mark=""
-        [ "$opt" = "$default" ] && mark=" (default)"
-        _ic_print "  [$count/$total] $opt$mark"
-        _ic_print "  VOL+: SELECT this   VOL-: next option"
+        if [ "$opt" = "$default" ]; then
+            _ic_print "   $count) $opt (default)"
+        else
+            _ic_print "   $count) $opt"
+        fi
+    done
+    _ic_print "  VOL+: SELECT current   VOL-: next   (${_IC_KEY_TIMEOUT}s timeout → $default)"
+
+    count=0
+    idx=1
+    for opt in $options; do
+        [ "$opt" = "$default" ] && idx=$count
+        count=$((count + 1))
+    done
+    idx=$((idx + 1))
+
+    count=0
+    for opt in $options; do
+        count=$((count + 1))
+        if [ "$count" = "$idx" ]; then
+            current_opt="$opt"
+            break
+        fi
+    done
+
+    count=0
+    while [ "$count" -lt "$total" ]; do
+        count=$((count + 1))
+        _ic_print "  Current: [$idx/$total] $current_opt"
 
         ic_volkey "${_IC_KEY_TIMEOUT}"
         case $? in
             0)
-                IC_ENUM_RESULT="$opt"
+                IC_ENUM_RESULT="$current_opt"
                 return 0
                 ;;
             1)
-                continue
+                idx=$((idx + 1))
+                if [ "$idx" -gt "$total" ]; then
+                    idx=1
+                fi
+                local i=0
+                for opt in $options; do
+                    i=$((i + 1))
+                    if [ "$i" = "$idx" ]; then
+                        current_opt="$opt"
+                        break
+                    fi
+                done
                 ;;
             2)
                 IC_ENUM_RESULT="$default"

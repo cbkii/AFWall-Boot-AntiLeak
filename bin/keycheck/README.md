@@ -8,15 +8,23 @@ fallback for volume-key input detection. They are used when the primary
 
 ## Shipped binaries
 
-| Architecture    | Filename          | Status    |
-|-----------------|-------------------|-----------|
-| arm64 / aarch64 | `keycheck-arm64`  | Included  |
+| Architecture    | Filename           | Status    |
+|-----------------|--------------------|-----------|
+| arm64 / aarch64 | `keycheck-arm64`   | Included  |
+| x86_64          | `keycheck-x86_64`  | TODO (placeholder only) |
 
-The `keycheck-arm64` binary targets AArch64 (ARM 64-bit), which covers:
-- Pixel 9a (primary target)
-- All other modern Android devices using a 64-bit ARM SoC
+The module currently ships an ARM64 keycheck binary plus an x86_64 placeholder
+file (`keycheck-x86_64.placeholder`) with build instructions/TODO notes.
 
-The binary is statically linked and has no external dependencies.
+The installer already detects alternate keycheck names/locations used by common
+MMT/module-installer layouts (`META-INF/com/google/android/<arch>/keycheck`).
+
+This improves compatibility across:
+- modern physical Android devices (arm64)
+- x86_64 Android emulators/virtualized test targets
+- installer environments that expose MMT-style helper paths
+
+The ARM64 binary is statically linked and has no external dependencies.
 
 ---
 
@@ -45,17 +53,20 @@ for a `EV_KEY` DOWN event with code `KEY_VOLUMEUP` (115) or `KEY_VOLUMEDOWN`
 3. If neither method works: non-interactive fallback
    (installer.cfg → existing config → safe defaults).
 
-On Pixel 9a and modern Pixels, `getevent` is the primary method and works
-reliably. `keycheck` is the fallback for unusual recovery environments.
-
 ---
 
 ## Build
 
-Compiled from a minimal C source using the Android-compatible struct layout:
+Compiled from a minimal C source using an Android-compatible input-event layout:
 
 ```sh
-aarch64-linux-gnu-gcc -O2 -static -o keycheck-arm64 keycheck.c
+# arm64
+aarch64-linux-gnu-gcc -O2 -static -o bin/keycheck/keycheck-arm64 tools/keycheck.c
+
+# TODO (future binary add):
+# x86_64
+x86_64-linux-gnu-gcc -O2 -static -o bin/keycheck/keycheck-x86_64 tools/keycheck.c
+chmod 755 bin/keycheck/keycheck-x86_64
 ```
 
 Source code is included in the module repository at `tools/keycheck.c`.
