@@ -248,14 +248,19 @@ _ic_get_keycheck_path() {
             done
         fi
 
-        # 2) MMT-style extracted installer paths.
-        for _sub in \
-            "${_dir}/META-INF/com/google/android/arm64" \
-            "${_dir}/META-INF/com/google/android/arm" \
-            "${_dir}/META-INF/com/google/android/x64" \
-            "${_dir}/META-INF/com/google/android/x86"; do
+        # 2) MMT-style extracted installer paths (arch-preferred ordering).
+        local _subdirs=""
+        case "$_arch" in
+            aarch64|arm64) _subdirs="arm64 arm x64 x86" ;;
+            arm*)          _subdirs="arm arm64 x64 x86" ;;
+            x86_64)        _subdirs="x64 x86 arm64 arm" ;;
+            x86|i686)      _subdirs="x86 x64 arm64 arm" ;;
+            *)             _subdirs="arm64 arm x64 x86" ;;
+        esac
+        for _sub_name in $_subdirs; do
+            _sub="${_dir}/META-INF/com/google/android/${_sub_name}"
             [ -d "$_sub" ] || continue
-            for _name in $_names keycheck; do
+            for _name in $_names; do
                 _kc_bin="${_sub}/${_name}"
                 [ -x "$_kc_bin" ] && printf '%s' "$_kc_bin" && return 0
             done
@@ -544,10 +549,9 @@ ic_select_enum() {
     count=0
     idx=1
     for opt in $options; do
-        [ "$opt" = "$default" ] && idx=$count
         count=$((count + 1))
+        [ "$opt" = "$default" ] && idx=$count
     done
-    idx=$((idx + 1))
 
     count=0
     for opt in $options; do
@@ -558,9 +562,7 @@ ic_select_enum() {
         fi
     done
 
-    count=0
-    while [ "$count" -lt "$total" ]; do
-        count=$((count + 1))
+    while true; do
         _ic_print "  Current: [$idx/$total] $current_opt"
 
         ic_volkey "${_IC_KEY_TIMEOUT}"
