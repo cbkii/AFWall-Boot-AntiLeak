@@ -106,6 +106,15 @@ fi
 
 echo "All required source files present."
 
+# ── Ensure executable permissions on installer/runtime entrypoints ───────────
+# Magisk executes these directly; package them with executable mode bits.
+chmod 755   "$REPO_ROOT/action.sh"   "$REPO_ROOT/customize.sh"   "$REPO_ROOT/post-fs-data.sh"   "$REPO_ROOT/reconfigure.sh"   "$REPO_ROOT/service.sh"   "$REPO_ROOT/uninstall.sh"
+
+# Ensure bundled helper binary keeps execute permissions.
+if [ -f "$REPO_ROOT/bin/keycheck/keycheck-arm64" ]; then
+  chmod 755 "$REPO_ROOT/bin/keycheck/keycheck-arm64"
+fi
+
 # ── Create output directory (already exists — created during path resolution) ─
 # Remove any existing output for this ZIP name (idempotent rebuild)
 rm -f "$ZIP_PATH" "$CHECKSUM_PATH" "$BUILD_INFO_PATH"

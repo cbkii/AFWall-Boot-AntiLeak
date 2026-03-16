@@ -1,183 +1,196 @@
 name: Release
 
-# Trigger 1: Push a version tag (e.g. v2.0.0) to automatically create a release.
-# Trigger 2: workflow_dispatch for manual release or re-release from any ref.
+# Manual-only release flow:
+#   1) Run from Actions UI (workflow_dispatch), or
+#   2) Comment `/release` (optionally `/release <tag>`) on a PR.
 on:
-  push:
-    tags:
-      - "v[0-9]*.[0-9]*.[0-9]*"
-
   workflow_dispatch:
     inputs:
       ref:
-        description: "Git ref to build from (branch, tag, or commit SHA). Defaults to HEAD."
+        description: "Git ref to build from (branch, tag, or commit SHA). Defaults to current ref."
         required: false
         type: string
         default: ""
       tag:
-        description: >
-          Release tag to create (e.g. v2.0.0). Must match module.prop version.
-          If the tag already exists the release is updated. Omit to derive from
-          module.prop version automatically.
+        description: "Release tag to create (defaults to module.prop versionCode)."
         required: false
         type: string
         default: ""
       draft:
-        description: "Create as draft release (publish manually after review)"
+        description: "Create as draft release"
         required: false
         type: boolean
         default: false
 
-# Write permission required to create tags, releases, and upload assets.
+  issue_comment:
+    types: [created]
+
 permissions:
   contents: write
+  issues: read
+  pull-requests: read
 
 jobs:
   release:
-    name: Build and Publish Release
+    name: Build, Tag, and Publish Release
     runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (
+        github.event_name == 'issue_comment' &&
+        github.event.issue.pull_request &&
+        contains(github.event.comment.body, '/release')
+      )
 
     steps:
-      - name: Resolve checkout ref
-        id: resolve-ref
+      - name: Validate comment author can trigger releases
+        if: github.event_name == 'issue_comment'
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.ref }}" ]; then
-            echo "ref=${{ inputs.ref }}" >> "$GITHUB_OUTPUT"
+          case "${{ github.event.comment.author_association }}" in
+            OWNER|MEMBER|COLLABORATOR)
+              echo "Authorized trigger from ${{ github.event.comment.user.login }}"
+              ;;
+            *)
+              echo "::error::Unauthorized release trigger from ${{ github.event.comment.user.login }} (${{ github.event.comment.author_association }})."
+              exit 1
+              ;;
+          esac
+
+      - name: Resolve ref and optional tag input
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            REF_INPUT="${{ inputs.ref }}"
+            TAG_INPUT="${{ inputs.tag }}"
+            if [ -n "$REF_INPUT" ]; then
+              REF="$REF_INPUT"
+            else
+              REF="${{ github.ref }}"
+            fi
           else
-            echo "ref=${{ github.ref }}" >> "$GITHUB_OUTPUT"
+            PR_NUMBER="${{ github.event.issue.number }}"
+            REF="$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.head.sha')"
+            TAG_INPUT="$(printf '%s' "${{ github.event.comment.body }}" | sed -nE 's#^/release[[:space:]]+([^[:space:]]+).*$#\1#p' | head -1)"
           fi
+
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "tag_input=$TAG_INPUT" >> "$GITHUB_OUTPUT"
+          echo "Resolved ref=$REF tag_input=${TAG_INPUT:-<none>}"
 
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ steps.resolve-ref.outputs.ref }}
+          ref: ${{ steps.resolve.outputs.ref }}
+          fetch-depth: 0
 
       - name: Install dependencies
         run: sudo apt-get install -y --no-install-recommends zip
 
-      # ── Read canonical version from module.prop ──────────────────────────────
-      - name: Read version from module.prop
-        id: version
+      - name: Read version metadata from module.prop
+        id: meta
         run: |
           VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           VERSION_CODE="$(grep '^versionCode=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
+
           if [ -z "$VERSION" ] || [ -z "$VERSION_CODE" ] || [ -z "$MODULE_ID" ]; then
             echo "::error::Could not parse id/version/versionCode from module.prop"
             exit 1
           fi
+
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
           echo "module_id=$MODULE_ID" >> "$GITHUB_OUTPUT"
-          echo "Parsed: id=$MODULE_ID version=$VERSION versionCode=$VERSION_CODE"
 
-      # ── Determine the release tag ─────────────────────────────────────────────
-      # For tag-push events, use the pushed tag.
-      # For workflow_dispatch, use the provided input or fall back to module.prop version.
-      - name: Determine release tag
+      - name: Determine and validate release tag
         id: tag
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            # Tag push: GITHUB_REF is refs/tags/vX.Y.Z
-            RELEASE_TAG="${GITHUB_REF#refs/tags/}"
-          elif [ -n "${{ inputs.tag }}" ]; then
-            RELEASE_TAG="${{ inputs.tag }}"
+          if [ -n "${{ steps.resolve.outputs.tag_input }}" ]; then
+            RELEASE_TAG="${{ steps.resolve.outputs.tag_input }}"
           else
-            RELEASE_TAG="${{ steps.version.outputs.version }}"
+            RELEASE_TAG="${{ steps.meta.outputs.version_code }}"
           fi
-          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-          echo "Release tag: $RELEASE_TAG"
 
-      # ── Validate: tag must match module.prop version ─────────────────────────
-      - name: Validate tag matches module.prop version
-        run: |
-          RELEASE_TAG="${{ steps.tag.outputs.release_tag }}"
-          PROP_VERSION="${{ steps.version.outputs.version }}"
-          if [ "$RELEASE_TAG" != "$PROP_VERSION" ]; then
-            echo "::error::Tag ($RELEASE_TAG) does not match module.prop version ($PROP_VERSION)."
-            echo "::error::Update module.prop version to match the tag before releasing."
+          if [ "$RELEASE_TAG" != "${{ steps.meta.outputs.version_code }}" ]; then
+            echo "::error::Release tag ($RELEASE_TAG) must match module.prop versionCode (${{ steps.meta.outputs.version_code }})."
             exit 1
           fi
-          echo "Tag matches module.prop version: $RELEASE_TAG"
 
-      # ── Create the tag (workflow_dispatch only, if tag doesn't exist yet) ────
-      - name: Create git tag if not present
-        if: github.event_name == 'workflow_dispatch'
+          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure executable permissions for module scripts
         run: |
-          RELEASE_TAG="${{ steps.tag.outputs.release_tag }}"
-          if git rev-parse "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "Tag $RELEASE_TAG already exists; skipping tag creation."
-          else
-            git config user.name  "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git tag -a "$RELEASE_TAG" -m "Release $RELEASE_TAG"
-            git push origin "$RELEASE_TAG"
-            echo "Created and pushed tag: $RELEASE_TAG"
-          fi
+          chmod 755 \
+            action.sh \
+            customize.sh \
+            post-fs-data.sh \
+            reconfigure.sh \
+            service.sh \
+            uninstall.sh
 
-      # ── Build: produce the release ZIP with stable filename ──────────────────
-      # The stable name (no version suffix) ensures the update.json zipUrl
-      # https://…/releases/latest/download/AFWall-Boot-AntiLeak.zip always resolves.
-      - name: Build module ZIP
+      - name: Build release ZIP
         run: |
           chmod +x tools/build-release.sh
-          MODULE_ID="${{ steps.version.outputs.module_id }}"
-          # Build with stable filename for Magisk OTA compatibility
-          tools/build-release.sh dist/ "${MODULE_ID}.zip"
+          ZIP_NAME="${{ steps.meta.outputs.module_id }}-${{ steps.meta.outputs.version }}.zip"
+          tools/build-release.sh dist/ "$ZIP_NAME"
 
-      # ── Validate ZIP internal structure ───────────────────────────────────────
       - name: Validate ZIP structure
         run: |
           chmod +x tools/validate-zip.sh
-          tools/validate-zip.sh "dist/${{ steps.version.outputs.module_id }}.zip"
+          tools/validate-zip.sh "dist/${{ steps.meta.outputs.module_id }}-${{ steps.meta.outputs.version }}.zip"
 
-      # ── Publish: create GitHub Release and attach assets ─────────────────────
-      - name: Create GitHub Release and upload assets
+      - name: Create tag if missing
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RELEASE_TAG="${{ steps.tag.outputs.release_tag }}"
-          MODULE_ID="${{ steps.version.outputs.module_id }}"
-          VERSION="${{ steps.version.outputs.version }}"
-          VERSION_CODE="${{ steps.version.outputs.version_code }}"
-          ZIP="dist/${MODULE_ID}.zip"
-          CHECKSUM="dist/sha256sum.txt"
-          BUILD_INFO="dist/build-info.txt"
+          TARGET_SHA="${{ steps.resolve.outputs.ref }}"
+          if git rev-parse "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Tag $RELEASE_TAG already exists."
+          else
+            git tag -a "$RELEASE_TAG" "$TARGET_SHA" -m "Release ${{ steps.meta.outputs.version }} ($RELEASE_TAG)"
+            git push origin "$RELEASE_TAG"
+            echo "Created and pushed tag $RELEASE_TAG -> $TARGET_SHA"
+          fi
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_TAG="${{ steps.tag.outputs.release_tag }}"
+          VERSION="${{ steps.meta.outputs.version }}"
+          VERSION_CODE="${{ steps.meta.outputs.version_code }}"
+          MODULE_ID="${{ steps.meta.outputs.module_id }}"
+          ZIP_PATH="dist/${MODULE_ID}-${VERSION}.zip"
           DRAFT_FLAG=""
           if [ "${{ inputs.draft }}" = "true" ]; then
             DRAFT_FLAG="--draft"
           fi
 
-          # Append sha256 checksum to build-info for the release notes footer
-          CHECKSUM_VAL="$(cat "$CHECKSUM" | awk '{print $1}')"
-
-          NOTES="## AFWall Boot AntiLeak ${VERSION}
-
-          Install via Magisk app → Modules → Install from storage.
-
-          | Field | Value |
-          |---|---|
-          | Version | \`${VERSION}\` |
-          | versionCode | \`${VERSION_CODE}\` |
-          | SHA256 | \`${CHECKSUM_VAL}\` |
-
-          See [README.md](https://github.com/${{ github.repository }}/blob/${RELEASE_TAG}/README.md) for full installation, configuration, and recovery instructions."
-
-          # If the release already exists (re-run), delete only the release (not
-          # the git tag) so the tag remains canonical and the new release is
-          # re-created at the same commit.
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "Release $RELEASE_TAG already exists; deleting release (tag preserved) for clean re-release."
-            gh release delete "$RELEASE_TAG" --yes 2>/dev/null || true
-            sleep 2
+          PREV_TAG="$(git tag --list '[0-9]*' --sort=v:refname | awk -v cur="$RELEASE_TAG" '$1 < cur {prev=$1} END {print prev}')"
+          CHANGELOG_LINE=""
+          if [ -n "$PREV_TAG" ]; then
+            CHANGELOG_LINE="**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${RELEASE_TAG}"
           fi
 
-          gh release create "$RELEASE_TAG" \
-            $DRAFT_FLAG \
-            --title "AFWall Boot AntiLeak ${VERSION}" \
-            --notes "$NOTES" \
-            "$ZIP#AFWall-Boot-AntiLeak.zip — Magisk module ZIP" \
-            "$CHECKSUM#sha256sum.txt — SHA256 checksum" \
-            "$BUILD_INFO#build-info.txt — Build metadata"
+          NOTES="See [README](https://github.com/${{ github.repository }}) 👀
+- Release \\`${VERSION}\\` (versionCode \\`${VERSION_CODE}\\`)
 
-          echo "Release created: https://github.com/${{ github.repository }}/releases/tag/${RELEASE_TAG}"
+## What's Changed
+* Automated module build + packaging for ${VERSION}.
+${CHANGELOG_LINE}"
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --title "$VERSION" --notes "$NOTES" $DRAFT_FLAG
+            gh release upload "$RELEASE_TAG" "$ZIP_PATH" --clobber
+          else
+            gh release create "$RELEASE_TAG" \
+              --title "$VERSION" \
+              --notes "$NOTES" \
+              $DRAFT_FLAG \
+              "$ZIP_PATH"
+          fi
+
+          echo "Release published: https://github.com/${{ github.repository }}/releases/tag/${RELEASE_TAG}"
