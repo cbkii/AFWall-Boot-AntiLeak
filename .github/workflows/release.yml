@@ -126,16 +126,6 @@ jobs:
 
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Ensure executable permissions for module scripts
-        run: |
-          chmod 755 \
-            action.sh \
-            customize.sh \
-            post-fs-data.sh \
-            reconfigure.sh \
-            service.sh \
-            uninstall.sh
-
       - name: Build release ZIP
         run: |
           chmod +x tools/build-release.sh
@@ -152,13 +142,19 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RELEASE_TAG="${{ steps.tag.outputs.release_tag }}"
-          TARGET_SHA="${{ steps.resolve.outputs.ref }}"
+          TARGET_REF="${{ steps.resolve.outputs.ref }}"
+          TARGET_COMMIT="$(git rev-parse "$TARGET_REF")"
           if git rev-parse "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "Tag $RELEASE_TAG already exists."
+            TAG_COMMIT="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+            if [ "$TAG_COMMIT" != "$TARGET_COMMIT" ]; then
+              echo "::error::Tag $RELEASE_TAG already exists pointing to $TAG_COMMIT, not $TARGET_COMMIT. Aborting."
+              exit 1
+            fi
+            echo "Tag $RELEASE_TAG already exists and points to the correct commit ($TAG_COMMIT)."
           else
-            git tag -a "$RELEASE_TAG" "$TARGET_SHA" -m "Release ${{ steps.meta.outputs.version }} ($RELEASE_TAG)"
+            git tag -a "$RELEASE_TAG" "$TARGET_COMMIT" -m "Release ${{ steps.meta.outputs.version }} ($RELEASE_TAG)"
             git push origin "$RELEASE_TAG"
-            echo "Created and pushed tag $RELEASE_TAG -> $TARGET_SHA"
+            echo "Created and pushed tag $RELEASE_TAG -> $TARGET_COMMIT"
           fi
 
       - name: Publish GitHub Release
@@ -181,12 +177,14 @@ jobs:
             CHANGELOG_LINE="**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${RELEASE_TAG}"
           fi
 
-          NOTES="See [README](https://github.com/${{ github.repository }}) 👀
-- Release \\`${VERSION}\\` (versionCode \\`${VERSION_CODE}\\`)
-
-## What's Changed
-* Automated module build + packaging for ${VERSION}.
-${CHANGELOG_LINE}"
+          NOTES="$(printf '%s\n%s\n\n%s\n%s' \
+            "See [README](https://github.com/${{ github.repository }}) 👀" \
+            "- Release \`${VERSION}\` (versionCode \`${VERSION_CODE}\`)" \
+            "## What's Changed" \
+            "* Automated module build + packaging for ${VERSION}.")"
+          if [ -n "$CHANGELOG_LINE" ]; then
+            NOTES="${NOTES}$(printf '\n%s' "$CHANGELOG_LINE")"
+          fi
 
           if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
             gh release edit "$RELEASE_TAG" --title "$VERSION" --notes "$NOTES" $DRAFT_FLAG
