@@ -1,1141 +1,505 @@
-# AFWall Boot AntiLeak: Advanced Documentation
+# AFWall Boot AntiLeak — Advanced reference
 
-This document provides a technical deep-dive into the module's inner workings, configuration, and troubleshooting.
+This document is the detailed reference for:
 
-## Table of Contents
+- advanced users,
+- anyone troubleshooting beyond the quick checks in `README.md`, and
+- developers auditing or modifying the module.
 
-- [Boot Process Deep-Dive](#boot-process-deep-dive)
-- [AFWall+ Readiness Detection](#afwall-readiness-detection)
-- [Configuration Reference](#configuration-reference)
-- [State Files & Logging](#state-files--logging)
+The beginner-focused guide is in [README.md](README.md).
+Use that first for install, first boot, quick recovery, and basic settings.
+
+## In this document
+
+- [Boot flow](#boot-flow)
+- [AFWall readiness and handoff](#afwall-readiness-and-handoff)
+- [Timeout and unlock semantics](#timeout-and-unlock-semantics)
+- [Configuration reference](#configuration-reference)
+- [Logs, state, and manual recovery](#logs-state-and-manual-recovery)
 - [Troubleshooting](#troubleshooting)
-- [Manual Interaction](#manual-interaction)
+- [Installer, profiles, and reconfiguration](#installer-profiles-and-reconfiguration)
 
-## Boot Process Deep-Dive
+## Boot flow
 
-The module's operation is split into two main stages to align with the Magisk boot process.
+The module is built around a staged handoff model:
 
-### Stage 1: `post-fs-data.sh` (Early Boot)
+1. install a kernel-level blackout as early as possible,
+2. suppress lower-layer connectivity once framework services exist,
+3. prove AFWall is actually ready,
+4. release the family blackout, then
+5. restore Wi-Fi and mobile when their own restore criteria are satisfied.
 
-This script runs before the main Android system (Zygote) is initialized. At this point, no regular apps are running.
+### Stage A — `post-fs-data.sh`
 
--   **Action:** Installs a robust, dual-layer `iptables` block in the kernel's `raw` and `filter` tables for both IPv4 and IPv6. This creates a "total-connectivity-blackout."
--   **Purpose:** To block all network packets at the earliest possible moment. The dual-layer approach provides redundancy in case another process flushes the `filter` table.
--   **Limitations:** Framework services like Wi-Fi and mobile data are not yet running, so they cannot be disabled here.
+Runs before the Android framework is up.
 
-### Stage 2: `service.sh` (Late Boot)
+What it does:
 
-This script runs in the background after the Android system has started and services become available.
+- clears stale per-boot override markers from the previous boot,
+- writes a fresh boot marker,
+- installs the module-owned blackout chains,
+- persists state showing that blackout is active and radios should remain suppressed.
 
--   **Phase 1: Integrity Check & Suppression**
-    -   Verifies that the `iptables` block from Stage 1 is still active and reinstalls it if necessary.
-    -   Disables the Wi-Fi and mobile data services using framework commands (`cmd wifi` and `cmd phone`). This prevents them from attempting to connect.
+This stage is where the module closes the earliest boot leak window.
 
--   **Phase 2: Monitoring & Handoff**
-    -   Enters a monitoring loop, checking every second for AFWall+ to become active.
-    -   Once AFWall+ readiness is confirmed (see next section), it removes its own `iptables` block.
-    -   Restores the Wi-Fi and mobile data services to their previous states.
+### Stage B — `service.sh` early service phase
 
-## AFWall+ Readiness Detection
+Runs in the Magisk service phase, after enough of Android exists for framework commands to be usable.
 
-To ensure a secure handoff, the module uses a sophisticated "composite readiness model" to verify that AFWall+ is truly in control. It doesn't just check if the AFWall+ process is running.
+What it does:
 
-Each second, the module:
+- writes `service.pid` so manual recovery can stop the loop,
+- verifies the Stage A blackout is still intact,
+- repairs it immediately if state says it should exist but live integrity checks fail,
+- disables Wi-Fi and mobile data with framework commands when configured,
+- optionally quiesces interfaces and stops tethering,
+- periodically reasserts both blackout integrity and radio-off state while waiting.
 
-1.  **Captures a Snapshot:** It takes a complete snapshot of the kernel's `iptables` filter table.
-2.  **Calculates a Fingerprint:** It generates a checksum (`cksum`) of all firewall chains and rules that belong to AFWall+ (i.e., those prefixed with `afwall`).
-3.  **Tracks Stability:** It waits for this fingerprint to remain unchanged for a specific duration. A stable fingerprint indicates that AFWall+ has finished modifying its rules.
+This stage is why the module is not relying on the raw `iptables` blackout alone. Lower-layer suppression is a second line of protection, not a replacement. See [Configuration reference](#configuration-reference).
 
-The module confirms readiness through one of two paths:
--   **Fast Path (2 seconds stable):** If the fingerprint is stable for 2 seconds *and* there is secondary evidence (like the AFWall+ process being visible or recent file activity), the handoff proceeds.
--   **Conservative Path (6 seconds stable):** If no secondary evidence is found, the module waits for 6 seconds of stability. This longer duration provides confidence that AFWall+ is ready even if other signals are unavailable.
+### Stage C — AFWall takeover detection
 
-This model is designed to be both fast and highly reliable, preventing a premature handoff that could compromise the firewall's integrity.
+The main poll loop waits for AFWall readiness per IP family.
 
-## Configuration Reference
+Important properties of the implementation:
 
-To customize the module's behavior, create a file at `/data/adb/AFWall-Boot-AntiLeak/config.sh` and add any of the following variables.
+- snapshots are captured once per family per poll using `iptables -t filter -S` / `ip6tables -t filter -S`,
+- all readiness checks for that poll use the same snapshot,
+- the module fingerprints the full AFWall graph, not just the root chain count,
+- stability is tracked with timestamps, not blocking settle sleeps.
 
-| Variable | Default | Description |
-|---|---|---|
-| `INTEGRATION_MODE` | `auto` | Controls coordination with AFWall+'s built-in "Fix Startup Leak" feature. `auto` is recommended. |
-| `ENABLE_FORWARD_BLOCK`| `1` | `1`: Blocks the `FORWARD` chain to prevent tethered clients from leaking traffic. `0`: Disables this block. |
-| `ENABLE_INPUT_BLOCK` | `0` | `1`: Blocks the `INPUT` chain for inbound traffic hardening. `0`: Disables this block. |
-| `TIMEOUT_SECS` | `120` | Seconds to wait for AFWall+ before a timeout occurs. |
-| `AUTO_TIMEOUT_UNBLOCK`| `0` | `1`: Automatically unblocks traffic on timeout. `0`: Keeps the device offline (fail-closed). **Warning: Setting to `1` may defeat the purpose of the module.** |
-| `TIMEOUT_UNLOCK_GATED`| `1` | `1`: The timeout countdown only begins after the device is first unlocked. `0`: Countdown starts as soon as the module's service starts. |
-| `LOG_LEVEL` | `2` | `0`: Errors only. `1`: Warnings. `2`: Info (Default). `3`: Debug. `4`: Verbose. |
+Details are in [AFWall readiness and handoff](#afwall-readiness-and-handoff).
 
-## State Files & Logging
+### Stage D — family blackout release
 
--   **Logs:** The module's logs can be found at `/data/adb/AFWall-Boot-AntiLeak/logs/`. A new log file is created for each boot.
--   **State Files:** The module uses a state directory at `/data/adb/AFWall-Boot-AntiLeak/state/` to manage its operations. These files are transient and should not be manually edited.
--   **Configuration:** Custom user configuration is loaded from `/data/adb/AFWall-Boot-AntiLeak/config.sh`.
+As soon as the AFWall graph is confirmed stable for a family, the module removes its own blackout for that family.
 
-## Troubleshooting
+This release is **not** gated on transport-specific Wi-Fi or mobile checks.
 
-If you lose connectivity after booting, it likely means the module is working as intended because AFWall+ did not become ready.
+That split is deliberate:
 
-1.  **Check AFWall+:**
-    -   Is AFWall+ enabled?
-    -   Go to AFWall+ settings and ensure "Enable Firewall" is checked.
-    -   Are rules enabled? Go to AFWall+ settings -> "Rules" -> ensure "Active Rules" is enabled.
+- family blackout removal answers the question, “is AFWall controlling this IP family?”
+- transport restoration answers the separate question, “is it safe to bring Wi-Fi/mobile back now?”
 
-2.  **Review Module Logs:**
-    -   Check the latest log file in `/data/adb/AFWall-Boot-AntiLeak/logs/` for errors or clues. You can do this via `adb shell` or a root file manager.
+### Stage E — transport restoration
 
-3.  **Check for Conflicts:**
-    -   Another module or startup script might be interfering with `iptables`.
-    -   Ensure AFWall+'s own "Fix Startup Data Leak" option is disabled.
+After family release, the service loop continues until Wi-Fi and mobile restoration criteria are satisfied, unless those gates are disabled.
 
-4.  **Manual Override:**
-    -   If you are stuck without connectivity and need to bypass the module's block, run the manual override command.
+Transport decisions are based on AFWall transport subtrees such as `afwall-wifi` and `afwall-3g`, including reachability and stable absence fallbacks. See [Transport-aware restore logic](#transport-aware-restore-logic).
 
-## Manual Interaction
-
-You can interact with the module's service using the `action.sh` script. This must be run as root.
-
-**Path:** `/data/adb/modules/afwall-boot-antileak/action.sh`
-
-**Commands:**
-
--   `action.sh override`
-    -   Immediately removes the `iptables` block and restores network services. This is the primary command for recovering connectivity if the module gets stuck.
-
--   `action.sh stop`
-    -   Requests a graceful shutdown of the monitoring service.
-
--   `action.sh status`
-    -   Prints the current status of the monitoring service (e.g., `waiting`, `done`, `timeout`).
-Runs in a background subshell once Magisk's service phase completes.
-
-Actions:
-- **Startup integrity check**: verify that the dual-layer OUTPUT blackout
-  (raw + filter) installed in Stage A is still intact for each IP family.
-  If `block_installed=1` (written by Stage A) but any layer is missing or
-  degraded, immediately repair it by re-installing both layers.  If repair
-  fails, the family is still treated as blocked (fail-closed) so that the
-  full handoff wait proceeds.
-- Merge early-phase interface list with service-phase quiesce list.
-- Wait for Android framework services (retry up to 5 times with 3s delay).
-- Disable Wi-Fi via `cmd wifi set-wifi-enabled disabled`; fallback to `svc wifi disable`.
-- Disable mobile data via `cmd phone data disable`; fallback to `svc data disable`.
-
-Radio-off reassertion runs every `RADIO_REASSERT_INTERVAL` seconds (default 10s)
-while waiting for AFWall+ readiness.
-
-Blackout integrity reassertion runs every `BLACKOUT_REASSERT_INTERVAL` seconds
-(default 5s, configurable) while the OUTPUT block is active and handoff is
-incomplete.
-
-### Stage C — AFWall+ takeover detection (composite readiness model)
-
-The main poll loop (1s interval by default) waits for AFWall+ to take over
-each IP family using a **composite readiness model**:
-
-1. Capture a **coherent per-poll filter-table snapshot** for each family.
-2. Derive all checks (presence, fingerprint, reachability) from that snapshot.
-3. Track **full AFWall graph fingerprint stability** over time via timestamps.
-4. Confirm takeover on the **fast path** (with corroboration) or **conservative
-   path** (stability only) — no blocking settle sleep.
-
-See [Section 2](#2-composite-readiness-model) for full details.
-
-### Stage D — Family block release (decoupled from transport)
-
-As soon as the main AFWall graph takeover is confirmed for a given IP family
-(`v4_done=1` or `v6_done=1`), the module removes its own OUTPUT block for that
-family **immediately**.  Wi-Fi and mobile transport readiness do **not** gate
-the family block removal.
-
-Log entries:
-```
-service: v4 handoff confirmed — removing family block immediately
-service: block removed; wifi restore deferred
-service: block removed; mobile restore deferred
-service: family handoff complete but transport restore still pending (wifi=0 mobile=0)
-```
-
-### Stage E — Transport restore (parallel, advisory)
-
-After the family block is released, the service loop continues to check
-transport-specific chains (`afwall-wifi`, `afwall-3g`) for Wi-Fi and mobile
-radio restoration.  This is independent of the block release decision.
-
-See [Section 3](#3-transport-aware-handoff) for full details.
-
----
-
-## 2. Composite readiness model
+## AFWall readiness and handoff
 
 ### Coherent per-poll snapshots
 
-At the start of each 1-second poll iteration, the module captures one
-consistent snapshot of the filter table for each IP family using
-`iptables -t filter -S` (producing `-N chain` / `-A chain rule` lines that
-all downstream parsers expect):
+Each poll captures one filter-table snapshot per family and derives all checks from that exact snapshot.
 
-```
-v4_snap = capture_filter_snapshot_v4()   # iptables  -t filter -S
-v6_snap = capture_filter_snapshot_v6()   # ip6tables -t filter -S
-```
+The module intentionally uses `iptables -t filter -S`, not `iptables-save`, because downstream parsing expects `-N` / `-A` rule-spec lines rather than restore-file syntax.
 
-All subsequent checks in that iteration (graph presence, fingerprint
-computation, transport reachability) read from these variables.  No separate
-iptables calls are made for individual sub-checks.
+Typical startup log lines:
 
-**Important:** `iptables-save` is NOT used for the snapshot.  Its restore-file
-format (`:chain - [packets:bytes]`, `*filter`, `COMMIT` markers) is incompatible
-with all downstream parsers, which look for `-N chain` / `-A chain rule` lines.
-Until a normalisation layer is added, only `iptables -t filter -S` is used.
-
-The chosen backend is logged at startup:
-```
+```text
 service: snapshot backend v4=iptables-S
 service: snapshot backend v6=ip6tables-S
 ```
 
-This guarantees that presence, fingerprint, and reachability tests see the
-same consistent iptables state within each poll.
+### Full-graph fingerprinting
 
-### Full AFWall graph fingerprint
+Readiness is based on the whole AFWall graph, including:
 
-The main AFWall takeover fingerprint now covers the **entire AFWall rule
-graph**, not just the main `afwall` chain rule count:
+- `afwall*` chain definitions,
+- rules inside `afwall*` chains,
+- jumps to `afwall*` chains.
 
-- All `-N afwall*` chain definitions (afwall, afwall-wifi, afwall-3g, etc.)
-- All rules inside any `afwall*`-prefixed chain (`-A afwall* ...`)
-- All jumps to any `afwall*` chain from any chain (`-j afwall*`)
+The sorted graph is checksummed with `cksum`. Any change in descendants, such as transport subchains, resets stability.
 
-The sorted set is checksummed with `cksum` (portable, available in Android
-toybox).  Changes in descendant chains (e.g. afwall-wifi rule additions) are
-fully visible in the fingerprint and reset the stability timer.
+### Confirmation paths
 
-### Stability tracking (non-blocking)
+A family can hand off in two ways.
 
-The module tracks fingerprint stability using timestamps:
+#### Fast path
 
-- `v4_last_fp` / `v6_last_fp`: last seen fingerprint value.
-- `v4_fp_stable_since` / `v6_fp_stable_since`: timestamp when that value was
-  last seen for the first time; reset whenever the fingerprint changes.
+All of the following must be true:
 
-No blocking `sleep` is used inside the confirmation path.  The loop continues
-running at 1s intervals, repairing blackout and reasserting radios throughout.
+1. AFWall main chain is present and non-trivial.
+2. The full graph fingerprint is stable for `FAST_STABLE_SECS`.
+3. There is corroboration, such as:
+   - AFWall process visible,
+   - current-boot file evidence,
+   - or `sys.boot_completed=1` plus sufficient AFWall rule density.
 
-When the fingerprint drifts (AFWall is still populating rules), stability is
-reset and the module waits again.
+Typical log line:
 
-### Fast path
-
-Confirms family takeover when **all** of the following are true:
-1. AFWall main chain present in filter table with OUTPUT hook.
-2. AFWall chain non-trivial (≥1 rule).
-3. Full graph fingerprint stable for `FAST_STABLE_SECS` (default 2s).
-   - Post-boot: `LIVENESS_SECS_POST_BOOT` (default 2s).
-4. At least one **corroborating signal**:
-   - AFWall process visible (`afwall_process_present`), **or**
-   - Current-boot file evidence (AFWall data files modified after boot marker),
-     **or**
-   - `sys.boot_completed=1` + AFWall chain has ≥ `AFWALL_RULE_DENSITY_MIN` rules.
-
-Log entry example:
-```
-service: v4 fast-path confirmed stable=2s corroboration=process fp=3412867341
-service: v4 fast-path confirmed stable=2s corroboration=boot_complete_dense fp=...
+```text
+service: v4 fast-path confirmed stable=2s corroboration=process fp=...
 ```
 
-### Conservative path
+#### Conservative path
 
-Confirms family takeover when **all** of the following are true:
-1. AFWall main chain present with OUTPUT hook.
-2. AFWall chain non-trivial.
-3. Full graph fingerprint stable for `SLOW_STABLE_SECS` (default 6s).
-   - Post-boot: `FALLBACK_SECS_POST_BOOT` (default 4s).
-4. No corroboration required.
+All of the following must be true:
 
-Log entry example:
-```
-service: v4 conservative-path confirmed stable=6s fp=... (corroboration absent)
-```
+1. AFWall main chain is present and non-trivial.
+2. The full graph fingerprint is stable for `SLOW_STABLE_SECS`.
+3. No corroboration is required.
 
-### Drift and reset
+Typical log line:
 
-If the fingerprint changes while the module is waiting, stability resets:
-```
-service: v4 graph drift old=3412867341 new=2981734256 reset
+```text
+service: v4 conservative-path confirmed stable=6s fp=...
 ```
 
-If the graph disappears entirely:
-```
+### Drift handling
+
+If the fingerprint changes, stability resets rather than sleeping through the change.
+
+Typical lines:
+
+```text
+service: v4 graph drift old=... new=... reset
 service: v4 AFWall graph gone/trivial — resetting stability
 ```
 
----
+### Transport-aware restore logic
 
-## 3. Transport-aware handoff
+Transport restoration is separate from family blackout release.
 
-### AFWall chain names
+#### Transport chains
 
-| Chain         | Meaning                              |
-|---------------|--------------------------------------|
-| `afwall`      | Main chain — all traffic             |
-| `afwall-wifi` | Wi-Fi specific rules + sub-chains    |
-| `afwall-3g`   | Mobile data specific rules + sub-chains|
+| Chain | Meaning |
+|---|---|
+| `afwall` | main AFWall chain |
+| `afwall-wifi` | Wi-Fi transport subtree |
+| `afwall-3g` | mobile-data transport subtree |
 
-### Transport subtree fingerprints
+#### Reachability requirement
 
-For each transport, the module fingerprints the **entire subtree**, not just
-the root chain rule count:
+A transport subtree only counts as usable when it is reachable from the active AFWall graph. A stale chain that exists but is not referenced does not block restore forever.
 
-- Wi-Fi: all chains/rules/references with prefix `afwall-wifi`
-- Mobile: all chains/rules/references with prefix `afwall-3g`
+Typical lines:
 
-Descendant chains (e.g. `afwall-wifi-lan`, `afwall-3g-mms`) are included.
-
-### Reachability requirement
-
-A transport subtree is only considered "ready" if it is **reachable from the
-active AFWall graph**.  This is verified by checking that at least one rule
-inside any `afwall*` chain in the snapshot jumps to the transport prefix.
-
-An isolated or stale transport chain that exists but is not referenced by the
-live AFWall chain will **not** be accepted.
-
-Log entries:
-```
-service: wifi subtree first seen fp=... reachable=1
+```text
 service: wifi subtree exists but is unreachable from AFWall graph — not accepting
-service: wifi subtree drift old=... new=... reset
 service: wifi transport: subtree stable=3s fp=... — Wi-Fi ready
 ```
 
-### Transport-absence and unreachable-stable fallback
+#### Stable absence fallback
 
-If no chains or references with the transport prefix appear in any snapshot,
-or if a transport chain is present but not reachable from the live AFWall graph
-(orphan/stale chain), the module uses a "not-usable" stability fallback:
+If a transport subtree is absent, or present but unreachable, the module tracks that “not usable” condition. Once it stays stable for the configured threshold, the transport is accepted and restoration can proceed.
 
-- Track how long the transport has been "not usable" (absent OR present-but-unreachable).
-  The timer only resets to 0 when the transport subtree is both present AND reachable.
-- Once stability is held for `TRANSPORT_ABSENCE_STABLE_SECS` (default 3s),
-  or `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT` (default 2s) post-boot,
-  accept and restore that radio.
-- **Important:** this does NOT delay family block removal.  It only controls
-  when the radio (Wi-Fi / mobile) is restored.
+Defaults:
 
-This covers both cases:
-1. AFWall doesn't use transport-specific chains at all (absent).
-2. AFWall has a stale/orphan transport chain that it no longer references (present+unreachable).
-   An orphan chain can NEVER permanently block transport restore.
+- `TRANSPORT_ABSENCE_STABLE_SECS=3`
+- `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT=2`
 
-`TRANSPORT_WAIT_SECS_POST_BOOT` is a retained compatibility alias; it is NOT
-used for any active logic path. The active threshold is `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT`.
+Typical line:
 
-Log entry example:
-```
+```text
 service: wifi transport accepted via absence-stable fallback after 3s
-  (no wifi-prefixed subtree detected in snapshot)
 ```
 
----
+This is why a stale `afwall-wifi` or `afwall-3g` chain does not create a permanent deadlock.
 
-## 4. Timeout and unlock semantics
+## Timeout and unlock semantics
 
-### Unlock-gated timeout (default: enabled)
+### Default behaviour
 
-When `TIMEOUT_UNLOCK_GATED=1` (default):
-- The `TIMEOUT_SECS` countdown does NOT begin at boot.
-- The countdown begins only after the device is positively detected as unlocked.
-- Unlock detection uses multiple independent probes including boot-completion
-  signals (`sys.boot_completed`, `init.svc.bootanim`) and keyguard state.
-- Before unlock: the module polls every `UNLOCK_POLL_INTERVAL` seconds.
+The shipped defaults are conservative:
 
-### Auto timeout unblocking (default: disabled)
+- `TIMEOUT_POLICY=fail_closed`
+- `AUTO_TIMEOUT_UNBLOCK=0`
+- `TIMEOUT_UNLOCK_GATED=1`
 
-`AUTO_TIMEOUT_UNBLOCK=0` (default) means the module NEVER automatically
-unblocks connectivity on timeout, regardless of `TIMEOUT_POLICY`.
+That means:
 
-To enable timeout-based unblocking:
-1. Set `AUTO_TIMEOUT_UNBLOCK=1`
-2. Set `TIMEOUT_POLICY=unblock`
-3. Accept that if AFWall+ is absent/broken, connectivity will be restored
-   after `TIMEOUT_SECS` seconds following device unlock.
+- timeout countdown does not start before device unlock,
+- timeout never auto-unblocks unless you explicitly opt into it,
+- on unresolved families the module keeps the blackout by default.
 
-### Legacy `TIMEOUT_POLICY=unblock`
+### Unlock-gated timeout
 
-This option is retained for compatibility but is now subject to:
-1. `AUTO_TIMEOUT_UNBLOCK=1` (required; default is 0)
-2. Device must be unlocked (when `TIMEOUT_UNLOCK_GATED=1`)
+When `TIMEOUT_UNLOCK_GATED=1`, the timeout countdown starts only after the device has been positively detected as unlocked.
 
-Setting `TIMEOUT_POLICY=unblock` alone (without `AUTO_TIMEOUT_UNBLOCK=1`)
-will log a warning and behave as `fail_closed`.
+This prevents a timeout expiring while the device is still sitting at the lock screen.
 
-### Fail-closed behaviour
+### Auto-unblocking on timeout
 
-When `TIMEOUT_POLICY=fail_closed` (default) or when auto-unblocking is
-disabled:
-- On timeout: lower-layer state (Wi-Fi, mobile) is restored, but iptables
-  blocks are retained.
-- Use the Magisk action button to manually remove blocks.
+Timeout-based unblocking requires **both**:
 
----
+```sh
+AUTO_TIMEOUT_UNBLOCK=1
+TIMEOUT_POLICY=unblock
+```
 
-## 5. Full config reference
+If you set only `TIMEOUT_POLICY=unblock`, the module logs a warning and still behaves fail-closed.
 
-All config keys and their defaults. Override at:
-`/data/adb/AFWall-Boot-AntiLeak/config.sh`
+### What happens on fail-closed timeout
 
-### Integration
+With the default fail-closed behaviour, lower-layer state can be restored while unresolved family blackouts remain in place. Recovery is then manual; see [Manual recovery](#manual-recovery).
 
-| Key                | Default | Description                                  |
-|--------------------|---------|----------------------------------------------|
-| `INTEGRATION_MODE` | `auto`  | `auto`/`prefer_module`/`prefer_afwall`/`off` |
+## Configuration reference
 
-### iptables blocks
+Persistent user overrides live at:
 
-| Key                    | Default | Description                            |
-|------------------------|---------|----------------------------------------|
-| `ENABLE_FORWARD_BLOCK` | `1`     | Block FORWARD chain (tethering)        |
-| `ENABLE_INPUT_BLOCK`   | `0`     | Block INPUT chain (opt-in)             |
+```sh
+/data/adb/AFWall-Boot-AntiLeak/config.sh
+```
+
+Built-in defaults ship in [`config.sh`](config.sh). Edit the persistent file, then reboot.
+
+### Integration mode
+
+| Key | Default | Meaning |
+|---|---:|---|
+| `INTEGRATION_MODE` | `auto` | Coordinate with AFWall's own startup-leak feature. `auto` is recommended; `prefer_module` always installs the module blackout; `prefer_afwall` defers only when AFWall startup protection is actually detected; `off` disables module blocking. |
+
+### Kernel blackout and chain coverage
+
+| Key | Default | Meaning |
+|---|---:|---|
+| `ENABLE_FORWARD_BLOCK` | `1` | Also block `FORWARD` so tethered clients cannot leak through hotspot/USB/Bluetooth tethering during boot. |
+| `ENABLE_INPUT_BLOCK` | `0` | Optional inbound hardening for `INPUT`; loopback stays exempt. |
 
 ### Lower-layer suppression
 
-| Key                          | Default  | Description                             |
-|------------------------------|----------|-----------------------------------------|
-| `LOWLEVEL_MODE`              | `safe`   | `off`/`safe`/`strict`                   |
-| `LOWLEVEL_INTERFACE_QUIESCE` | `1`      | Bring non-loopback interfaces down      |
-| `LOWLEVEL_USE_WIFI_SERVICE`  | `1`      | Disable Wi-Fi via service commands      |
-| `LOWLEVEL_USE_PHONE_DATA_CMD`| `1`      | Disable mobile data via service commands|
-| `LOWLEVEL_USE_BLUETOOTH_MANAGER` | `0`  | Disable Bluetooth (disabled by default) |
-| `LOWLEVEL_USE_TETHER_STOP`   | `1`      | Stop active tethering sessions          |
+| Key | Default | Meaning |
+|---|---:|---|
+| `LOWLEVEL_MODE` | `safe` | `off`, `safe`, or `strict`. `safe` is the default balanced mode. |
+| `LOWLEVEL_INTERFACE_QUIESCE` | `1` | Bring eligible interfaces down during the waiting period. |
+| `LOWLEVEL_USE_WIFI_SERVICE` | `1` | Disable and later restore Wi-Fi if the module changed it. |
+| `LOWLEVEL_USE_PHONE_DATA_CMD` | `1` | Disable and later restore mobile data if the module changed it. |
+| `LOWLEVEL_USE_BLUETOOTH_MANAGER` | `0` | Optional Bluetooth suppression. Disabled by default because it is disruptive and rarely needed. |
+| `LOWLEVEL_USE_TETHER_STOP` | `1` | Stop active tethering during boot; tethering is not automatically restarted. |
 
-### Timeout and unlock
+### Timeout and restore behaviour
 
-| Key                    | Default       | Description                                      |
-|------------------------|---------------|--------------------------------------------------|
-| `TIMEOUT_SECS`         | `120`         | Max seconds to wait (after countdown begins)     |
-| `TIMEOUT_POLICY`       | `fail_closed` | `fail_closed` = stay blocked; `unblock` = restore|
-| `AUTO_TIMEOUT_UNBLOCK` | `0`           | Master gate; `1` required for auto-unblocking    |
-| `TIMEOUT_UNLOCK_GATED` | `1`           | Countdown only starts after device unlock        |
-| `UNLOCK_POLL_INTERVAL` | `5`           | Unlock check interval in seconds                 |
+| Key | Default | Meaning |
+|---|---:|---|
+| `TIMEOUT_SECS` | `120` | Maximum wait before timeout handling. |
+| `TIMEOUT_POLICY` | `fail_closed` | `fail_closed` keeps unresolved family blackouts; `unblock` only works when auto-timeout unblocking is also enabled. |
+| `AUTO_TIMEOUT_UNBLOCK` | `0` | Master gate for timeout-based unblocking. Default disables it entirely. |
+| `TIMEOUT_UNLOCK_GATED` | `1` | Timeout starts only after unlock. |
+| `WIFI_AFWALL_GATE` | `1` | Gate Wi-Fi restore on transport-aware logic. |
+| `MOBILE_AFWALL_GATE` | `1` | Gate mobile-data restore on transport-aware logic. |
+| `RADIO_REASSERT_INTERVAL` | `10` | Seconds between radio-off verification while waiting. |
+| `BLACKOUT_REASSERT_INTERVAL` | `5` | Seconds between blackout integrity checks while waiting. |
+| `UNLOCK_POLL_INTERVAL` | `5` | Seconds between unlock checks before timeout starts. |
 
-### Transport gating
+### Readiness and timing
 
-| Key                              | Default | Description                                  |
-|----------------------------------|---------|----------------------------------------------|
-| `WIFI_AFWALL_GATE`               | `1`     | Gate Wi-Fi restore on afwall-wifi chain       |
-| `MOBILE_AFWALL_GATE`             | `1`     | Gate mobile restore on afwall-3g chain        |
-| `RADIO_REASSERT_INTERVAL`        | `10`    | Radio-off reassertion interval in seconds     |
-| `BLACKOUT_REASSERT_INTERVAL`     | `5`     | iptables blackout integrity check/repair (s)  |
+| Key | Default | Meaning |
+|---|---:|---|
+| `SETTLE_SECS` | `5` | Stable window for reachable transport subtree acceptance before post-boot acceleration applies. |
+| `POLL_INTERVAL_SECS` | `1` | Main readiness poll interval. |
+| `FAST_STABLE_SECS` | `2` | Fast-path AFWall graph stability window when corroboration exists. |
+| `SLOW_STABLE_SECS` | `6` | Conservative AFWall graph stability window without corroboration. |
+| `TRANSPORT_ABSENCE_STABLE_SECS` | `3` | Accept absent or unreachable transport after this stable window. |
+| `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT` | `2` | Shorter post-boot absence window. |
+| `BOOT_COMPLETE_ACCELERATE` | `1` | Enable shorter post-boot thresholds. |
+| `AFWALL_RULE_DENSITY_MIN` | `3` | Minimum chain density for boot-complete corroboration. |
+| `LIVENESS_SECS_POST_BOOT` | `2` | Post-boot fast-path stability threshold. |
+| `FALLBACK_SECS_POST_BOOT` | `4` | Post-boot conservative-path stability threshold. |
+| `SETTLE_SECS_POST_BOOT` | `1` | Post-boot transport subtree settle window. |
+| `TRANSPORT_WAIT_SECS_POST_BOOT` | `5` | Retained compatibility alias; not the active absence-stable control path. |
 
-### Composite-readiness timing
+### Diagnostics and behaviour flags
 
-| Key                                       | Default | Description                                        |
-|-------------------------------------------|---------|----------------------------------------------------|
-| `POLL_INTERVAL_SECS`                      | `1`     | Main loop poll interval (s); lower = faster detect |
-| `FAST_STABLE_SECS`                        | `2`     | Fast-path stability window (corroboration required)|
-| `SLOW_STABLE_SECS`                        | `6`     | Conservative-path stability window (no corroboration needed) |
-| `TRANSPORT_ABSENCE_STABLE_SECS`           | `3`     | Absence-stable fallback for transport chains (s)   |
-| `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT` | `2`     | Post-boot absence-stable threshold (shorter, s)    |
-| `SETTLE_SECS`                             | `5`     | Legacy: not used as blocking sleep; kept for compat|
+| Key | Default | Meaning |
+|---|---:|---|
+| `MANUAL_OVERRIDE_PERSISTS_THIS_BOOT` | `1` | Informational flag documenting current-boot override behaviour. |
+| `DEBUG` | `0` | Set to `1` for verbose boot logging. |
 
-### Boot-completion acceleration
+## Logs, state, and manual recovery
 
-| Key                          | Default | Description                                       |
-|------------------------------|---------|---------------------------------------------------|
-| `BOOT_COMPLETE_ACCELERATE`   | `1`     | Use post-boot shortened timing windows            |
-| `AFWALL_RULE_DENSITY_MIN`    | `3`     | Min rules in afwall chain for boot-complete corroborator |
-| `LIVENESS_SECS_POST_BOOT`    | `2`     | Fast-path stable window post-boot                 |
-| `FALLBACK_SECS_POST_BOOT`    | `4`     | Conservative-path stable window post-boot         |
-| `SETTLE_SECS_POST_BOOT`      | `1`     | Transport subtree settle window post-boot         |
-| `TRANSPORT_WAIT_SECS_POST_BOOT`| `5`   | Transport absence fallback threshold post-boot    |
+### Log file
 
-### Misc
-
-| Key     | Default | Description              |
-|---------|---------|--------------------------|
-| `DEBUG` | `0`     | Verbose logging          |
-
----
-
-## 6. Logging and state files
-
-### Log
-
-```
+```sh
 /data/adb/AFWall-Boot-AntiLeak/logs/boot.log
 ```
 
-Key log entries (v2.6+):
-- `post-fs-data: hard block installed` — earliest block in place
-- `post-fs-data: boot marker written` — reference timestamp for evidence checks
-- `service: snapshot backend v4=iptables-S` — confirms correct snapshot backend
-- `service: v4 graph first seen fp=...` — first non-trivial AFWall graph seen
-- `service: v4 graph drift old=... new=... reset` — fingerprint changed; waiting
-- `service: v4 fast-path confirmed stable=Xs corroboration=... fp=...` — fast release
-- `service: v4 conservative-path confirmed stable=Xs fp=...` — conservative release
-- `service: v4 AFWall graph gone/trivial — resetting stability` — graph disappeared
-- `service: v4 handoff confirmed — removing family block immediately` — block removed
-- `service: block removed; wifi restore deferred` — block gone, transport still pending
-- `service: wifi subtree first seen fp=... reachable=1` — transport chain found
-- `service: wifi subtree drift old=... new=... reset` — transport still settling
-- `service: wifi transport: subtree stable=Xs fp=... — Wi-Fi ready` — transport done
-- `service: wifi transport accepted via absence-stable fallback after Xs` — no wifi chain
-- `service: wifi transport accepted via unreachable-stable fallback after Xs` — orphan chain dismissed
-- `service: family handoff complete but transport restore still pending (wifi=... mobile=...)` — service continues for radios
-- `service: v4 release preconditions satisfied ...` — block about to be removed
-- `service: handoff complete` — module handed off to AFWall+
-- `service: TIMEOUT v4: block RETAINED` — timeout, blocks kept (fail-closed)
-- `service: manual_override detected — stopping loop` — action.sh override active
-- `service: stop_requested detected — stopping loop` — action.sh stop signal received
+### Log signals worth grepping
 
-### State files
+| Pattern | Meaning |
+|---|---|
+| `snapshot backend` | snapshot source selected for the current boot |
+| `graph first seen fp=` | AFWall graph detected for the first time |
+| `fast-path confirmed` | early release with corroboration |
+| `conservative-path confirmed` | release without corroboration after longer stability |
+| `graph drift` | AFWall rules still changing |
+| `graph gone/trivial` | AFWall root graph disappeared or is too small to trust |
+| `transport accepted via absence-stable fallback` | no usable transport subtree, but stable fallback allowed restore |
+| `manual_override detected` | manual recovery latched and service loop stopped |
 
-```
-/data/adb/AFWall-Boot-AntiLeak/state/
-  blackout_active       — blackout is in progress (deleted after handoff)
-  radio_off_pending     — radios must remain off (deleted after handoff)
-  block_installed       — iptables block is active (1 = yes)
-  boot_marker           — current-boot timestamp marker (used for evidence checks)
-  integration_mode      — chosen integration mode
-  manual_override       — written by action.sh; prevents service re-block this boot
-  stop_requested        — written by action.sh; signals service loop to exit
-  service.pid           — PID of background service.sh loop (deleted on clean exit)
-  ipv4_out_table        — primary table for IPv4 OUTPUT block
-  ipv6_out_table        — primary table for IPv6 OUTPUT block
-  ipv4_fwd_active       — IPv4 FORWARD block active (1 = yes)
-  ipv6_fwd_active       — IPv6 FORWARD block active (1 = yes)
-  ipv4_in_active        — IPv4 INPUT block active (1 = yes, opt-in)
-  ipv6_in_active        — IPv6 INPUT block active (1 = yes, opt-in)
-  ll/
-    mode                — lower-layer mode (safe/strict)
-    wifi_was_enabled    — module disabled Wi-Fi (present = yes)
-    data_was_enabled    — module disabled mobile data (present = yes)
-    bt_was_enabled      — module disabled Bluetooth (present = yes)
-    ifaces_down         — interfaces brought down by module (one per line)
-    tether_was_active   — tethering was stopped (present = yes)
-```
+### State directory
 
-Manual override lifecycle:
-- Written by `action.sh` (before block removal).
-- Persists for the current boot only.
-- Cleared by `post-fs-data.sh` at the start of every subsequent reboot.
-- While present: service loop exits without repairing blocks or reasserting
-  radios off.
-
----
-
-## 7. Troubleshooting
-
-### Device stuck offline after boot
-
-**Step 1 — Check the log:**
 ```sh
-cat /data/adb/AFWall-Boot-AntiLeak/logs/boot.log | tail -50
+/data/adb/AFWall-Boot-AntiLeak/state/
 ```
-Look for the last status message. Key patterns:
-- `v4 graph first seen fp=...` but no `confirmed` line → fingerprint still drifting
-- `v4 AFWall graph gone/trivial` → AFWall chain disappeared or has no rules
-- `wifi subtree exists but is unreachable` → AFWall chain not referencing afwall-wifi
-- No `graph first seen` at all → AFWall has not applied any rules
 
-**Step 2 — Run manual recovery:**
+Useful files and markers:
+
+| Path | Meaning |
+|---|---|
+| `boot_marker` | current-boot reference marker used by evidence checks |
+| `block_installed` | Stage A blackout was installed |
+| `blackout_active` | blackout should still be considered active |
+| `radio_off_pending` | radios should remain suppressed until restore criteria are met |
+| `manual_override` | current-boot manual recovery latch |
+| `stop_requested` | service loop should stop |
+| `service.pid` | PID of the current service loop |
+| `ipv4_out_table`, `ipv6_out_table` | which table owns the family blackout |
+| `ipv4_fwd_active`, `ipv6_fwd_active` | `FORWARD` block state |
+| `ipv4_in_active`, `ipv6_in_active` | optional `INPUT` block state |
+| `ll/` | lower-layer state written only for things the module changed |
+
+Do not hand-edit these unless you are deliberately debugging the module internals.
+
+### Manual recovery
+
+Supported recovery path:
+
 ```sh
 sh /data/adb/modules/AFWall-Boot-AntiLeak/action.sh
 ```
 
-**Step 3 — Check AFWall+ configuration:**
-- Ensure "Firewall enabled on boot" is checked in AFWall+.
-- Ensure you have active rules applied at least once.
-- Disable "Fix Startup Data Leak" in AFWall+.
+Or use the Magisk module **Action** button.
 
-**Step 4 — Check iptables blocks:**
+What it does:
+
+1. writes `manual_override` and `stop_requested`,
+2. clears blackout-active markers,
+3. stops the service loop if it is still running,
+4. removes module-owned blackout chains,
+5. restores lower-layer state recorded in `state/ll/`,
+6. prints diagnostics and the last log lines.
+
+The override persists only for the current boot and is cleared by the next `post-fs-data` run.
+
+## Troubleshooting
+
+Use [README.md → Recovery and common problems](README.md#recovery-and-common-problems) for the short version.
+Use this section when you need the exact checks, rule inspection, or developer-level detail.
+
+### Device stuck offline after boot
+
+Start with the log:
+
 ```sh
-iptables -t raw -S | grep MOD_PRE_AFW
-iptables -t filter -S | grep MOD_PRE_AFW
-ip6tables -t raw -S | grep MOD_PRE_AFW
+tail -50 /data/adb/AFWall-Boot-AntiLeak/logs/boot.log
+```
+
+Then check the live rule state:
+
+```sh
+iptables  -t filter -S | grep afwall
+ip6tables -t filter -S | grep afwall
+iptables  -t raw    -S | grep MOD_PRE_AFW
+iptables  -t filter -S | grep MOD_PRE_AFW
+ip6tables -t raw    -S | grep MOD_PRE_AFW
 ip6tables -t filter -S | grep MOD_PRE_AFW
 ```
 
-**Step 5 — Check AFWall+ chain:**
+Common causes:
+
+- AFWall firewall not enabled
+- AFWall rules never applied
+- AFWall “Fix Startup Data Leak” still enabled
+- AFWall graph still drifting during boot
+- AFWall graph missing or trivial
+
+Recover immediately with [Manual recovery](#manual-recovery) if needed.
+
+### Wi-Fi not coming back after AFWall loads
+
+Check for Wi-Fi transport lines in the log, then inspect whether `afwall-wifi` is actually reachable from the main AFWall graph.
+
+Useful checks:
+
 ```sh
-iptables -t filter -S | grep afwall
-ip6tables -t filter -S | grep afwall
+iptables  -t filter -S | grep afwall-wifi
+ip6tables -t filter -S | grep afwall-wifi
+iptables  -t filter -S | grep 'afwall.*afwall-wifi'
+ip6tables -t filter -S | grep 'afwall.*afwall-wifi'
 ```
-If `afwall` is missing, AFWall+ has not applied rules. Check AFWall+ settings.
-If `afwall-wifi` is present but not referenced by `afwall`, that is an orphan/
-unreachable chain — v2.6 detects this and still restores Wi-Fi via the
-unreachable-stable fallback after `TRANSPORT_ABSENCE_STABLE_SECS` seconds.
 
-### Wi-Fi not coming back after AFWall+ loads
-
-1. Check log for `wifi subtree` messages.
-2. Verify `afwall-wifi` is reachable: `iptables -t filter -S | grep "afwall.*afwall-wifi"`
-3. If AFWall+ doesn't use `afwall-wifi`, set `WIFI_AFWALL_GATE=0` in config.
-4. With `WIFI_AFWALL_GATE=1`, absence/unreachable-stable fallback fires after
-   `TRANSPORT_ABSENCE_STABLE_SECS` (default 3s) once the main graph is confirmed.
+If AFWall does not use a dedicated Wi-Fi transport subtree on your setup, `WIFI_AFWALL_GATE=0` is the blunt workaround; otherwise the default absence-stable fallback should still restore Wi-Fi once the “not usable” state is stable.
 
 ### Mobile data not coming back
 
-Same as Wi-Fi but for `MOBILE_AFWALL_GATE` and `afwall-3g`.
+Same pattern as Wi-Fi, using `afwall-3g` and `MOBILE_AFWALL_GATE`.
+
+```sh
+iptables  -t filter -S | grep afwall-3g
+ip6tables -t filter -S | grep afwall-3g
+iptables  -t filter -S | grep 'afwall.*afwall-3g'
+ip6tables -t filter -S | grep 'afwall.*afwall-3g'
+```
 
 ### Release is slower than expected
 
-1. Check if fingerprint is drifting repeatedly (`v4 graph drift` in log).
-2. Enable `DEBUG=1` for per-poll stability progress.
-3. Verify boot-completion acceleration: `boot_accel=1` in startup log line.
-4. If corroboration is unavailable (no process visibility, no file evidence,
-   no boot marker), only the conservative path is available.  Check that
-   `/data/adb/AFWall-Boot-AntiLeak/state/boot_marker` exists.
+Look for repeated drift or lack of corroboration.
+
+Typical checks:
+
+- repeated `graph drift` lines mean AFWall is still mutating rules,
+- missing `fast-path confirmed` with eventual `conservative-path confirmed` means the module had to wait for the longer path,
+- enabling `DEBUG=1` gives finer-grained progress information,
+- absence of `boot_marker` or other evidence signals can remove fast-path corroboration.
 
 ### Timeout fires but device stays offline
 
-This is expected with the default `AUTO_TIMEOUT_UNBLOCK=0`. To allow
-auto-unblocking on timeout:
+That is expected with the default configuration.
+
+To opt into timeout-based recovery:
+
 ```sh
-# In /data/adb/AFWall-Boot-AntiLeak/config.sh:
+# /data/adb/AFWall-Boot-AntiLeak/config.sh
 AUTO_TIMEOUT_UNBLOCK=1
 TIMEOUT_POLICY=unblock
 ```
 
----
+Be explicit about the trade-off: connectivity can return even if AFWall is still absent or broken.
 
-## 8. Migration from v2.4 / v2.6
+## Installer, profiles, and reconfiguration
 
-### New in v2.6 (vs v2.4)
+### Profiles
 
-| Feature                      | v2.4                             | v2.6                                   |
-|------------------------------|----------------------------------|----------------------------------------|
-| Graph fingerprint            | Rule count + chain count (weak)  | Full graph cksum (all afwall* content) |
-| Transport fingerprint        | Root-chain rule count only       | Full subtree cksum (incl. descendants) |
-| Transport reachability check | Not present                      | Required: subtree must be referenced   |
-| Settle mechanism             | Blocking `sleep SETTLE_SECS`     | Non-blocking stable-since timestamps   |
-| Poll interval                | 2s fixed                         | 1s (configurable `POLL_INTERVAL_SECS`) |
-| Transport absence fallback   | Fixed 30s (`TRANSPORT_WAIT_SECS`)| Absence-stable 3s (`TRANSPORT_ABSENCE_STABLE_SECS`) |
-| Secondary evidence           | `/data/data/<pkg>` only          | CE + DE dirs; shared_prefs, databases  |
-| Boot marker                  | Reuses ipv4_out_table timestamp  | Dedicated `boot_marker` file           |
-| Per-poll snapshots           | Each helper calls iptables       | One coherent snapshot per family/poll  |
+The installer offers four entry points:
 
-### Fixes applied in v2.6
+| Profile | Meaning |
+|---|---|
+| `standard` | recommended default; full protection with balanced defaults |
+| `minimal` | firewall-only mode; lower-layer suppression off |
+| `strict` | maximum protection; more features enabled by default |
+| `custom` | individual option selection |
 
-| Fault                                | Before fix                                         | After fix                                                    |
-|--------------------------------------|----------------------------------------------------|--------------------------------------------------------------|
-| Snapshot backend mismatch            | `iptables-save` used (incompatible format)         | `iptables -t filter -S` only (matches all parsers)           |
-| Block release gated on transport     | `v4_done && wifi_done && mobile_done`              | `v4_done` alone removes v4 block; transport is separate      |
-| Manual override not sticky           | `action.sh` unblocks; service re-blocks next cycle | `manual_override` + `stop_requested` latch; service exits    |
-| Post-boot absence threshold wrong    | Used `TRANSPORT_WAIT_SECS_POST_BOOT` (5s)          | Uses `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT` (2s)          |
-| Orphan transport chain deadlock      | Present-but-unreachable resets absence timer → permanent deadlock | Treated as "not usable"; absence-stable fallback still fires |
-| Snapshot coherence (density check)   | `afwall_rules_dense_v4/v6` made fresh iptables calls | `afwall_rules_dense_from_snapshot()` uses per-poll snapshot  |
-| Early no-block exit missing PID cleanup | `service.pid` left stale on early exit          | `remove_service_pid` called on all clean exits               |
+### Input method priority
 
-### Breaking changes
+The installer tries, in order:
 
-None. All v2.4 and v2.6 config keys continue to work. New keys have safe defaults.
+1. raw `getevent`,
+2. bundled `keycheck`,
+3. non-interactive fallback.
 
-### New config keys (all have safe defaults)
+Non-interactive fallback priority is:
 
-| Key                                       | Default | Description                              |
-|-------------------------------------------|---------|------------------------------------------|
-| `POLL_INTERVAL_SECS`                      | `1`     | Poll loop interval                       |
-| `FAST_STABLE_SECS`                        | `2`     | Fast-path stability window               |
-| `SLOW_STABLE_SECS`                        | `6`     | Conservative-path stability window       |
-| `TRANSPORT_ABSENCE_STABLE_SECS`           | `3`     | Transport absence stable window          |
-| `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT` | `2`     | Post-boot transport absence threshold    |
-| `MANUAL_OVERRIDE_PERSISTS_THIS_BOOT`      | `1`     | Informational: manual override is per-boot|
+1. external `/data/adb/AFWall-Boot-AntiLeak/installer.cfg`,
+2. existing persistent `/data/adb/AFWall-Boot-AntiLeak/config.sh`,
+3. standard defaults.
 
-### Removed internal state
+### Reconfiguration after install
 
-The following internal tracking variables from v2.4 are no longer used:
-`v4_takeover_ts`, `v4_sig`, `v4_alive_ts`, `v4_bc_ts`, `v4_fallback_ts`,
-`v6_takeover_ts`, `v6_sig`, `v6_alive_ts`, `v6_bc_ts`, `v6_fallback_ts`,
-`wifi_check_ts`, `wifi_sig`, `wifi_chain_seen`, `mobile_check_ts`,
-`mobile_sig`, `mobile_chain_seen`.
+To rerun the interactive configuration flow later:
 
-These are replaced by the stable-since fingerprint model:
-`v4_last_fp`, `v4_fp_stable_since`, `v6_last_fp`, `v6_fp_stable_since`,
-`wifi_last_fp`, `wifi_fp_stable_since`, `wifi_absent_since`,
-`mobile_last_fp`, `mobile_fp_stable_since`, `mobile_absent_since`.
+```sh
+sh /data/adb/modules/AFWall-Boot-AntiLeak/reconfigure.sh
+```
 
----
+Changes are written to the persistent config and take effect on the next reboot.
 
-## 9. Installer input and keycheck
-
-### Volume key input priority
-
-1. **Raw getevent** — primary method on modern Pixels (Android 7+).
-   Uses `/system/bin/getevent -lq` with a timeout probe.
-   Exit code 0 or 124 (timeout-killed) both indicate getevent is available.
-2. **keycheck binary** — fallback for unusual recovery environments.
-   Architecture-appropriate binary from `bin/keycheck/`.
-3. **Non-interactive** — if neither method works:
-   a. Read `${MODULE_DATA}/installer.cfg` for pre-seeded values.
-   b. Preserve existing `${MODULE_DATA}/config.sh` on upgrades.
-   c. Use standard safe defaults (fresh install).
-
-### keycheck binary details
-
-Located at `bin/keycheck/keycheck-arm64` (arm64, for Pixel 9a and all modern
-Android devices).
-
-The binary opens all `/dev/input/event*` devices and waits 10 seconds for a
-`EV_KEY` DOWN event. Returns 41 (VOL+) or 42 (VOL-). Statically linked,
-no runtime dependencies.
-
-Source: `tools/keycheck.c` in the repository.
-
-### Pre-seeded installer config
-
-Place a file at `/data/adb/AFWall-Boot-AntiLeak/installer.cfg` before flashing
-to skip interactive selection. Example:
+### Pre-seeded installer config example
 
 ```sh
 IC_PROFILE=standard
-# or IC_PROFILE=strict / minimal / custom
-# Individual overrides (optional):
-AUTO_TIMEOUT_UNBLOCK=0
-TIMEOUT_UNLOCK_GATED=1
-WIFI_AFWALL_GATE=1
-MOBILE_AFWALL_GATE=1
-```
-
-
----
-
-## Table of contents
-
-1. [Boot stage design](#1-boot-stage-design)
-2. [Transport-aware handoff](#2-transport-aware-handoff)
-3. [Timeout and unlock semantics](#3-timeout-and-unlock-semantics)
-4. [Full config reference](#4-full-config-reference)
-5. [Logging and state files](#5-logging-and-state-files)
-6. [Troubleshooting](#6-troubleshooting)
-7. [Migration from v2.2.2](#7-migration-from-v222)
-8. [Installer input and keycheck](#8-installer-input-and-keycheck)
-
----
-
-## 1. Boot stage design
-
-### Stage A — `post-fs-data` (before framework)
-
-Runs before any Android framework services start.
-
-Actions:
-- Load config.
-- Install iptables hard block (OUTPUT, FORWARD, optionally INPUT) for both
-  IPv4 and IPv6. Dual-layer blackout: installs OUTPUT block in both the raw
-  table (pre-conntrack, primary) and the filter table (shadow/failsafe) for
-  defence-in-depth. If the raw layer is disrupted externally, the filter layer
-  continues blocking OUTPUT traffic until the raw layer is repaired.
-- Quiesce any network interfaces already present in `/sys/class/net`.
-- Persist blackout state: `${STATE_DIR}/blackout_active` and
-  `${STATE_DIR}/radio_off_pending`.
-- Write early-phase interface list to state.
-
-Framework radio commands (Wi-Fi off, mobile data off) are **deferred** to
-Stage B. They are not valid in `post-fs-data` because the Wi-Fi and telephony
-services are not running yet.
-
-### Stage B — `service.sh` late phase (framework available)
-
-Runs in a background subshell once Magisk's service phase completes.
-
-Actions:
-- **Startup integrity check**: verify that the dual-layer OUTPUT blackout
-  (raw + filter) installed in Stage A is still intact for each IP family.
-  If `block_installed=1` (written by Stage A) but any layer is missing or
-  degraded, immediately repair it by re-installing both layers.  If repair
-  fails, the family is still treated as blocked (fail-closed) so that the
-  full handoff wait proceeds.
-- Merge early-phase interface list with service-phase quiesce list.
-- Wait for Android framework services (retry up to 5 times with 3s delay).
-- Disable Wi-Fi via `cmd wifi set-wifi-enabled disabled`; fallback to `svc wifi disable`.
-  - Verify off-state using: `settings get global wifi_on`, `cmd wifi status`,
-    and wlan interface operstate.
-  - Reinforce by bringing `wlan*`/`swlan*` interfaces down.
-- Disable mobile data via `cmd phone data disable`; fallback to `svc data disable`.
-  - Verify off-state using: `settings get global mobile_data` and absence of
-    default routes via `rmnet*`/`ccmni*`/`wwan*` interfaces.
-  - Reinforce by bringing cellular data interfaces down.
-
-Radio-off reassertion runs every `RADIO_REASSERT_INTERVAL` seconds (default 10s)
-while waiting for AFWall+ readiness.
-
-Blackout integrity reassertion runs every `BLACKOUT_REASSERT_INTERVAL` seconds
-(default 5s, configurable) while the OUTPUT block is active and handoff is
-incomplete.  For each family, the module checks that the chain exists, the
-DROP rule is present, and the OUTPUT jump exists in both the raw and filter
-tables.  If any layer is missing, it is immediately repaired.
-
-### Stage C — AFWall+ takeover detection
-
-The main poll loop waits for AFWall+ to take over each IP family.
-
-Per-family handoff (v4 and v6 tracked independently):
-
-**Preferred path** (AFWall+ process visible):
-1. AFWall main chain present in filter table with OUTPUT hook.
-2. Chain contains at least one rule (non-trivial).
-3. AFWall process visible continuously for `LIVENESS_SECS` (default 6s).
-4. Rule-graph signature stable throughout.
-5. Final settle: `SETTLE_SECS` (default 5s) re-check.
-6. Mark family as takeover confirmed.
-
-**Fallback path** (no process visibility):
-1. AFWall main chain present, non-trivial.
-2. Signature stable for `FALLBACK_SECS` (default 12s).
-3. Optional: secondary evidence (AFWall data files newer than state file).
-4. Final settle: `SETTLE_SECS` re-check.
-5. Mark family as takeover confirmed.
-
-### Stage D — Transport readiness check
-
-After the main AFWall chain is confirmed for at least one IP family, the
-module checks transport-specific chain readiness:
-
-**Wi-Fi transport** (if `WIFI_AFWALL_GATE=1`):
-- Check for `afwall-wifi` chain in filter table (v4 and v6).
-- If present: require non-trivial rules + signature stable for `SETTLE_SECS`.
-- If not present after `30s` of main chain readiness: fall back to accepting
-  main-chain readiness (AFWall not using transport-specific chains).
-- When ready: call `lowlevel_restore_wifi_if_allowed`.
-
-**Mobile data transport** (if `MOBILE_AFWALL_GATE=1`):
-- Same as Wi-Fi but checks `afwall-3g` chain.
-- When ready: call `lowlevel_restore_mobile_data_if_allowed`.
-
-### Stage E — Block release and restore
-
-The module-owned iptables blocks are removed **only when**:
-- The corresponding IP family takeover is confirmed, AND
-- ALL required transports (Wi-Fi and mobile) are confirmed ready.
-
-This means: if Wi-Fi is not yet ready, the IPv4 iptables block is not
-removed even if the IPv4 family takeover would otherwise be complete.
-
-After all blocks are removed:
-- Remaining lower-layer state is restored (interfaces brought up, bluetooth,
-  tethering note).
-- Blackout state files are cleared.
-- AFWall+ is now the sole active protection.
-
----
-
-## 2. Transport-aware handoff
-
-### AFWall chain names
-
-| Chain         | Meaning                           |
-|---------------|-----------------------------------|
-| `afwall`      | Main chain — all traffic          |
-| `afwall-wifi` | Wi-Fi specific rules              |
-| `afwall-3g`   | Mobile data specific rules        |
-
-AFWall+ creates `afwall-wifi` and `afwall-3g` when the user has configured
-per-transport rules. If these chains are absent, the module falls back to
-accepting main-chain readiness after a wait period.
-
-### Transport readiness proof requirements
-
-Wi-Fi is considered ready only when ALL of the following are true:
-1. AFWall main chain is confirmed in filter OUTPUT.
-2. `afwall-wifi` chain exists with at least one rule.
-3. Rule count for `afwall-wifi` is stable over `SETTLE_SECS`.
-
-Mobile data is considered ready only when ALL of the following are true:
-1. AFWall main chain is confirmed in filter OUTPUT.
-2. `afwall-3g` chain exists with at least one rule.
-3. Rule count for `afwall-3g` is stable over `SETTLE_SECS`.
-
-Presence of the AFWall process alone is NOT sufficient proof. Existence of
-the main `afwall` chain alone is NOT sufficient proof.
-
----
-
-## 3. Timeout and unlock semantics
-
-### Unlock-gated timeout (default: enabled)
-
-When `TIMEOUT_UNLOCK_GATED=1` (default):
-- The `TIMEOUT_SECS` countdown does NOT begin at boot.
-- The countdown begins only after the device is positively detected as unlocked.
-- Unlock detection uses two independent probes (keyguard state + screen awake).
-  If either probe fails or is ambiguous, the device is treated as still locked.
-- Before unlock: the module polls every `UNLOCK_POLL_INTERVAL` seconds.
-
-### Auto timeout unblocking (default: disabled)
-
-`AUTO_TIMEOUT_UNBLOCK=0` (default) means the module NEVER automatically
-unblocks connectivity on timeout, regardless of `TIMEOUT_POLICY`.
-
-To enable timeout-based unblocking:
-1. Set `AUTO_TIMEOUT_UNBLOCK=1`
-2. Set `TIMEOUT_POLICY=unblock`
-3. Accept that if AFWall+ is absent/broken, connectivity will be restored
-   after `TIMEOUT_SECS` seconds following device unlock.
-
-### Legacy `TIMEOUT_POLICY=unblock`
-
-This option is retained for compatibility but is now subject to:
-1. `AUTO_TIMEOUT_UNBLOCK=1` (required; default is 0)
-2. Device must be unlocked (when `TIMEOUT_UNLOCK_GATED=1`)
-
-Setting `TIMEOUT_POLICY=unblock` alone (without `AUTO_TIMEOUT_UNBLOCK=1`)
-will log a warning and behave as `fail_closed`.
-
-### Fail-closed behaviour
-
-When `TIMEOUT_POLICY=fail_closed` (default) or when auto-unblocking is
-disabled:
-- On timeout: lower-layer state (Wi-Fi, mobile) is restored, but iptables
-  blocks are retained.
-- Use the Magisk action button to manually remove blocks.
-
----
-
-## 4. Full config reference
-
-All config keys and their defaults. Override at:
-`/data/adb/AFWall-Boot-AntiLeak/config.sh`
-
-### Integration
-
-| Key                | Default | Description                                  |
-|--------------------|---------|----------------------------------------------|
-| `INTEGRATION_MODE` | `auto`  | `auto`/`prefer_module`/`prefer_afwall`/`off` |
-
-### iptables blocks
-
-| Key                    | Default | Description                            |
-|------------------------|---------|----------------------------------------|
-| `ENABLE_FORWARD_BLOCK` | `1`     | Block FORWARD chain (tethering)        |
-| `ENABLE_INPUT_BLOCK`   | `0`     | Block INPUT chain (opt-in)             |
-
-### Lower-layer suppression
-
-| Key                          | Default  | Description                             |
-|------------------------------|----------|-----------------------------------------|
-| `LOWLEVEL_MODE`              | `safe`   | `off`/`safe`/`strict`                   |
-| `LOWLEVEL_INTERFACE_QUIESCE` | `1`      | Bring non-loopback interfaces down      |
-| `LOWLEVEL_USE_WIFI_SERVICE`  | `1`      | Disable Wi-Fi via service commands      |
-| `LOWLEVEL_USE_PHONE_DATA_CMD`| `1`      | Disable mobile data via service commands|
-| `LOWLEVEL_USE_BLUETOOTH_MANAGER` | `0`  | Disable Bluetooth (disabled by default) |
-| `LOWLEVEL_USE_TETHER_STOP`   | `1`      | Stop active tethering sessions          |
-
-### Timeout and unlock
-
-| Key                    | Default       | Description                                      |
-|------------------------|---------------|--------------------------------------------------|
-| `TIMEOUT_SECS`         | `120`         | Max seconds to wait (after countdown begins)     |
-| `TIMEOUT_POLICY`       | `fail_closed` | `fail_closed` = stay blocked; `unblock` = restore|
-| `AUTO_TIMEOUT_UNBLOCK` | `0`           | Master gate; `1` required for auto-unblocking    |
-| `TIMEOUT_UNLOCK_GATED` | `1`           | Countdown only starts after device unlock        |
-| `UNLOCK_POLL_INTERVAL` | `5`           | Unlock check interval in seconds                 |
-
-### Transport gating
-
-| Key                     | Default | Description                                  |
-|-------------------------|---------|----------------------------------------------|
-| `WIFI_AFWALL_GATE`      | `1`     | Gate Wi-Fi restore on afwall-wifi chain       |
-| `MOBILE_AFWALL_GATE`    | `1`     | Gate mobile restore on afwall-3g chain        |
-| `RADIO_REASSERT_INTERVAL` | `10`  | Radio-off reassertion interval in seconds     |
-| `BLACKOUT_REASSERT_INTERVAL` | `5` | iptables blackout integrity check/repair interval (s) |
-
-### Handoff timing
-
-| Key           | Default | Description                                      |
-|---------------|---------|--------------------------------------------------|
-| `SETTLE_SECS` | `5`     | Settle delay before releasing block              |
-| `LIVENESS_SECS` | `6`   | AFWall process visibility window for pref. path  |
-| `FALLBACK_SECS` | `12`  | Stability window for fallback path               |
-
-### Misc
-
-| Key     | Default | Description              |
-|---------|---------|--------------------------|
-| `DEBUG` | `0`     | Verbose logging          |
-
----
-
-## 5. Logging and state files
-
-### Log
-
-```
-/data/adb/AFWall-Boot-AntiLeak/logs/boot.log
-```
-
-Key log entries:
-- `post-fs-data: hard block installed` — earliest block in place
-- `lowlevel_early:` — early interface quiesce results
-- `lowlevel_late:` — late radio-off attempts
-- `lowlevel: Wi-Fi off-state confirmed` — verified off-state
-- `service: device unlock detected` — unlock gate opened
-- `service: timeout countdown started` — countdown began
-- `service: v4 takeover confirmed` — AFWall v4 takeover proven
-- `service: wifi transport: afwall-wifi chain stable` — Wi-Fi ready
-- `service: mobile transport: afwall-3g chain stable` — mobile ready
-- `service: v4 block removed` — v4 iptables block gone
-- `service: handoff complete` — module handed off to AFWall+
-- `service: TIMEOUT v4: block RETAINED` — timeout, blocks kept
-- `service: TIMEOUT: unblocking per AUTO_TIMEOUT_UNBLOCK=1` — auto-unblock
-
-### State files
-
-```
-/data/adb/AFWall-Boot-AntiLeak/state/
-  blackout_active       — blackout is in progress (deleted after handoff)
-  radio_off_pending     — radios must remain off (deleted after handoff)
-  block_installed       — iptables block is active (1 = yes)
-  integration_mode      — chosen integration mode
-  ipv4_out_table        — primary table for IPv4 OUTPUT block (raw or filter);
-                          block is also installed in the other table as shadow
-  ipv6_out_table        — primary table for IPv6 OUTPUT block (raw or filter);
-                          block is also installed in the other table as shadow
-  ipv4_fwd_active       — IPv4 FORWARD block active (1 = yes)
-  ipv6_fwd_active       — IPv6 FORWARD block active (1 = yes)
-  ipv4_in_active        — IPv4 INPUT block active (1 = yes, opt-in)
-  ipv6_in_active        — IPv6 INPUT block active (1 = yes, opt-in)
-  ll/
-    mode                — lower-layer mode (safe/strict)
-    wifi_was_enabled    — module disabled Wi-Fi (present = yes)
-    data_was_enabled    — module disabled mobile data (present = yes)
-    bt_was_enabled      — module disabled Bluetooth (present = yes)
-    ifaces_down         — interfaces brought down by module (one per line)
-    tether_was_active   — tethering was stopped (present = yes)
-```
-
----
-
-## 6. Troubleshooting
-
-### Device stuck offline after boot
-
-**Step 1 — Check the log:**
-```sh
-cat /data/adb/AFWall-Boot-AntiLeak/logs/boot.log | tail -50
-```
-Look for the last status message to understand what the module is waiting for.
-
-**Step 2 — Run manual recovery:**
-```sh
-sh /data/adb/modules/AFWall-Boot-AntiLeak/action.sh
-```
-Or use the Magisk app → Modules → AFWall Boot AntiLeak → Action.
-
-**Step 3 — Check AFWall+ configuration:**
-- Ensure "Firewall enabled on boot" is checked in AFWall+.
-- Ensure you have active rules applied at least once.
-- Disable "Fix Startup Data Leak" in AFWall+.
-
-**Step 4 — Check iptables blocks:**
-```sh
-iptables -t raw -S | grep MOD_PRE_AFW
-iptables -t filter -S | grep MOD_PRE_AFW
-ip6tables -t raw -S | grep MOD_PRE_AFW
-ip6tables -t filter -S | grep MOD_PRE_AFW
-```
-The module installs a dual-layer blackout (raw + filter) for defence-in-depth.
-You should see `MOD_PRE_AFW` chains in both `raw` and `filter` tables for each
-family while the blackout is active.  If blocks are present, the module is
-still waiting for AFWall+.
-
-**Step 5 — Check AFWall+ chain:**
-```sh
-iptables -t filter -S afwall | head -5
-iptables -t filter -S afwall-wifi | head -5
-iptables -t filter -S afwall-3g | head -5
-```
-If `afwall` is missing, AFWall+ has not applied rules. Check AFWall+ settings.
-
-### Wi-Fi not coming back after AFWall+ loads
-
-1. Check `WIFI_AFWALL_GATE`: if `1`, the module needs `afwall-wifi` chain.
-2. Check log for `wifi transport` messages.
-3. If AFWall+ doesn't use `afwall-wifi`, set `WIFI_AFWALL_GATE=0` in config.
-
-### Mobile data not coming back
-
-Same as Wi-Fi but for `MOBILE_AFWALL_GATE` and `afwall-3g`.
-
-### Timeout fires but device stays offline
-
-This is expected with the default `AUTO_TIMEOUT_UNBLOCK=0`. To allow
-auto-unblocking on timeout:
-```sh
-# In /data/adb/AFWall-Boot-AntiLeak/config.sh:
-AUTO_TIMEOUT_UNBLOCK=1
-TIMEOUT_POLICY=unblock
-```
-
----
-
-## 7. Migration from v2.2.2
-
-### Breaking changes
-
-| Setting              | v2.2.2 default | v2.2.22 default | Action needed                      |
-|----------------------|----------------|------------------|------------------------------------|
-| `TIMEOUT_POLICY`     | `unblock`      | `fail_closed`    | If you want auto-unblock on timeout, set `AUTO_TIMEOUT_UNBLOCK=1` |
-| Auto timeout unblock | always on      | off by default   | Set `AUTO_TIMEOUT_UNBLOCK=1` to restore old behaviour |
-| Transport gating     | not present    | enabled by default | AFWall+ needs `afwall-wifi`/`afwall-3g` chains, or set gates to 0 |
-
-### Preserved behaviours
-
-- All existing config keys are recognised.
-- Upgrade preserves your existing `/data/adb/AFWall-Boot-AntiLeak/config.sh`.
-- The iptables chain names are unchanged.
-- Lower-layer suppression options are unchanged.
-- Per-family (v4/v6) handoff logic is preserved and extended.
-
-### Recommended migration path
-
-1. Install v2.2.22 over v2.2.2.
-2. Review the new defaults; test on reboot.
-3. If device gets stuck: run `action.sh` for recovery.
-4. If AFWall+ lacks transport chains: set `WIFI_AFWALL_GATE=0 MOBILE_AFWALL_GATE=0`.
-5. If you want the old auto-unblock on timeout:
-   ```
-   AUTO_TIMEOUT_UNBLOCK=1
-   TIMEOUT_POLICY=unblock
-   ```
-
----
-
-## 8. Installer input and keycheck
-
-### Volume key input priority
-
-1. **Raw getevent** — primary method on modern Pixels (Android 7+).
-   Uses `/system/bin/getevent -lq` with a timeout probe.
-   Exit code 0 or 124 (timeout-killed) both indicate getevent is available.
-2. **keycheck binary** — fallback for unusual recovery environments.
-   Architecture-appropriate binary from `bin/keycheck/`.
-3. **Non-interactive** — if neither method works:
-   a. Read `${MODULE_DATA}/installer.cfg` for pre-seeded values.
-   b. Preserve existing `${MODULE_DATA}/config.sh` on upgrades.
-   c. Use standard safe defaults (fresh install).
-
-### keycheck binary details
-
-Located at `bin/keycheck/keycheck-arm64` (arm64, for Pixel 9a and all modern
-Android devices).
-
-The binary opens all `/dev/input/event*` devices and waits 10 seconds for a
-`EV_KEY` DOWN event. Returns 41 (VOL+) or 42 (VOL-). Statically linked,
-no runtime dependencies.
-
-Source: `tools/keycheck.c` in the repository.
-
-### Pre-seeded installer config
-
-Place a file at `/data/adb/AFWall-Boot-AntiLeak/installer.cfg` before flashing
-to skip interactive selection. Example:
-
-```sh
-IC_PROFILE=standard
-# or IC_PROFILE=strict / minimal / custom
-# Individual overrides (optional):
+# or minimal / strict / custom
 AUTO_TIMEOUT_UNBLOCK=0
 TIMEOUT_UNLOCK_GATED=1
 WIFI_AFWALL_GATE=1
