@@ -38,7 +38,8 @@ For a more detailed technical explanation of the boot process and detection logi
 
 -   Android 8.0+
 -   Magisk v24+
--   AFWall+ (with "Active Rules" enabled)
+-   AFWall+ (use [Safe Settings(#safest-afwall-settings))
+-   Recommended: Busybox for Android NDK (v1.36+)
 
 ## Installation
 
@@ -97,6 +98,8 @@ This means release happens **much sooner** when AFWall+ is genuinely ready, whil
 
 ## Safest AFWall+ settings
 
+Ensure you **have some "Active Rules" enabled** (as connectivity blackout will not release automatically *if the firewall is not on*), and:
+
 | Setting                       | Recommended value |
 |-------------------------------|-------------------|
 | Fix Startup Data Leak         | **DISABLE**       |
@@ -104,15 +107,16 @@ This means release happens **much sooner** when AFWall+ is genuinely ready, whil
 | Startup Delay                 | 0 (not needed)    |
 | IPv6 support                  | Enable            |
 
-Disable AFWall's own leak-fix: this module replaces it. Having both active may cause conflicts.
+> [!WARNING]
+> Disable AFWall's own leak-fix: this module replaces it. Having both active may cause conflicts.
 
 ---
 
 ## Installation
 
 1. Install the module ZIP through Magisk.
-2. When prompted, choose a profile (standard recommended for most users).
-3. Configure AFWall+ as shown in the table above.
+2. When prompted, choose a profile (**standard** recommended for most users, applied by default on new installs e.g. if keypress timeout).
+3. Configure AFWall+ as shown in the 'safe settings' [table above](#safest-afwall-settings).
 4. Reboot.
 
 **Upgrade path:** existing configurations are preserved automatically. The module installer asks whether you want to reconfigure on upgrade.
@@ -167,8 +171,8 @@ Edit this file to change module settings. Changes take effect on the next reboot
 
 If your device is stuck with no connectivity:
 
-**Option 1 — Magisk action button:**
-Open the Magisk app → Modules → AFWall Boot AntiLeak → Action button.
+**Option 1 — Magisk "Action ▶️" button:**
+Open the Magisk app → Modules → AFWall Boot AntiLeak → 'Action' button.
 This removes all module-owned blocks, restores radio state, and **latches a manual override** that prevents the background service loop from re-blocking for the remainder of the current boot session.
 
 **Option 2 — ADB:**
