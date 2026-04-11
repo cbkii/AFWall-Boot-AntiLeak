@@ -51,9 +51,28 @@ debug_log() {
 # ── Command discovery ──────────────────────────────────────────────────────────
 # Returns the full path of a command, checking PATH first then known locations.
 _find_cmd() {
-  local name="$1" p
+  local name="$1" p _cache_key _cached
+  # Command names used in this module are simple tool identifiers; guard to
+  # avoid unsafe eval variable construction for unexpected input.
+  case "$name" in
+    *[!A-Za-z0-9_+-]*|'') ;;
+    *)
+      _cache_key="_CMD_CACHE_${name}"
+      eval "_cached=\${${_cache_key}:-}"
+      if [ -n "$_cached" ] && [ -x "$_cached" ]; then
+        printf '%s' "$_cached"
+        return 0
+      fi
+      ;;
+  esac
+
   if command -v "$name" >/dev/null 2>&1; then
-    command -v "$name"
+    p="$(command -v "$name")"
+    case "$name" in
+      *[!A-Za-z0-9_+-]*|'') ;;
+      *) eval "${_cache_key}=\"\$p\"" ;;
+    esac
+    printf '%s' "$p"
     return 0
   fi
   for p in \
@@ -63,6 +82,10 @@ _find_cmd() {
     "/data/adb/magisk/${name}" \
     "/data/adb/ksu/bin/${name}"; do
     if [ -x "$p" ]; then
+      case "$name" in
+        *[!A-Za-z0-9_+-]*|'') ;;
+        *) eval "${_cache_key}=\"\$p\"" ;;
+      esac
       printf '%s' "$p"
       return 0
     fi
@@ -79,6 +102,10 @@ has_cmd() { _find_cmd "$1" >/dev/null 2>&1; }
 # persistent override at MODULE_DATA/config.sh takes precedence over defaults
 # and survives module updates.
 load_config() {
+  # Config is static for a given boot/session. Avoid repeated filesystem reads
+  # in hot paths (post-fs-data/service loops) by loading once per process.
+  [ "${_MODULE_CFG_LOADED:-0}" = "1" ] && return 0
+
   local cfg loaded=0
   # Load built-in defaults from the module directory first.
   cfg="${MODDIR:-}/config.sh"
@@ -95,6 +122,7 @@ load_config() {
     loaded=1
   fi
   [ "$loaded" = "0" ] && debug_log "config: no config files found; using built-in defaults"
+  _MODULE_CFG_LOADED=1
   return 0
 }
 
@@ -1572,6 +1600,54 @@ manual_override_active() {
 
 stop_requested_active() {
   [ -f "${STATE_DIR}/stop_requested" ]
+}
+
+# ── Shared connectivity recovery helpers ──────────────────────────────────────
+# Used by action.sh (manual recovery) and service.sh (automatic final restore)
+# to avoid divergent cleanup behavior.
+#
+# recover_stop_service_loop:
+#   Best-effort stop of the background service loop using service.pid.
+#   Safe to call multiple times.
+recover_stop_service_loop() {
+  if [ -f "${STATE_DIR}/service.pid" ]; then
+    local _svc_pid
+    _svc_pid="$(cat "${STATE_DIR}/service.pid" 2>/dev/null)"
+    if [ -n "$_svc_pid" ] && kill -0 "$_svc_pid" 2>/dev/null; then
+      kill "$_svc_pid" 2>/dev/null || true
+      log "recover_stop_service_loop: service pid ${_svc_pid} signalled"
+    else
+      log "recover_stop_service_loop: service.pid present but process not running (pid=${_svc_pid:-empty})"
+    fi
+    rm -f "${STATE_DIR}/service.pid" 2>/dev/null || true
+  fi
+}
+
+# recover_connectivity:
+#   Canonical connectivity restoration path.
+#   Arguments:
+#     $1 origin label for logs (e.g. "action", "service-finalize")
+#     $2 manual_mode: 1 => latch manual override markers, 0 => do not
+recover_connectivity() {
+  local origin="${1:-unknown}" manual_mode="${2:-0}"
+
+  if [ "$manual_mode" = "1" ]; then
+    write_manual_override
+    write_stop_requested
+    log "recover_connectivity[$origin]: manual override latched"
+  fi
+
+  clear_blackout_active
+  rm -f "${STATE_DIR}/block_installed" "${STATE_DIR}/radio_off_pending" 2>/dev/null || true
+
+  # Remove all module-owned firewall protections (idempotent).
+  remove_block
+  # Use the proven emergency restore path so recovery behavior is identical
+  # between manual action and automatic paths.
+  lowlevel_emergency_restore
+  cleanup_legacy "$origin"
+
+  log "recover_connectivity[$origin]: complete"
 }
 
 # Remove manual_override and stop_requested markers (not service.pid).

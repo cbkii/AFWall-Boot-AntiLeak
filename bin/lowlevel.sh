@@ -182,29 +182,49 @@ lowlevel_restore_interfaces() {
 }
 
 # ── Wi-Fi control ──────────────────────────────────────────────────────────────
-# Returns 0 if Wi-Fi is currently enabled (best-effort check).
-_ll_wifi_is_enabled() {
-  local val
+# Returns one of: on | off | unknown
+_ll_wifi_state() {
+  local val st
   if has_cmd settings; then
     val="$(settings get global wifi_on 2>/dev/null)"
     case "$val" in
-      1) return 0 ;;
-      0) return 1 ;;
+      1) printf 'on'; return 0 ;;
+      0) printf 'off'; return 0 ;;
     esac
   fi
-  # Cannot determine; assume enabled to avoid skipping suppression.
-  return 0
+  if has_cmd cmd; then
+    st="$(cmd wifi status 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+    printf '%s' "$st" | grep -q 'disabled\|wifi is off' && { printf 'off'; return 0; }
+    printf '%s' "$st" | grep -q 'enabled\|wifi is on' && { printf 'on'; return 0; }
+  fi
+  printf 'unknown'
+}
+
+# Returns 0 if Wi-Fi is currently enabled (strict positive evidence only).
+_ll_wifi_is_enabled() {
+  [ "$(_ll_wifi_state)" = "on" ]
 }
 
 lowlevel_disable_wifi() {
   [ "${LOWLEVEL_USE_WIFI_SERVICE:-1}" = "1" ] || return 0
 
-  if ! _ll_wifi_is_enabled; then
+  local wifi_state
+  wifi_state="$(_ll_wifi_state)"
+  _ll_state_set "wifi_initial_state" "$wifi_state"
+
+  if [ "$wifi_state" = "off" ]; then
     # Service already off; clear any stale marker so we don't restore what we
     # never changed.
     _ll_state_rm "wifi_was_enabled"
-    debug_log "lowlevel_disable_wifi: Wi-Fi already disabled; skipping"
+    debug_log "lowlevel_disable_wifi: initial state=off; preserving user preference"
     return 0
+  fi
+
+  if [ "$wifi_state" = "unknown" ]; then
+    # Keep anti-leak behavior (try to disable), but do not create a restore
+    # marker unless we have positive proof Wi-Fi started enabled.
+    _ll_state_rm "wifi_was_enabled"
+    debug_log "lowlevel_disable_wifi: initial state unknown; disable for safety but restore marker will not be set"
   fi
 
   local disabled=0
@@ -250,10 +270,10 @@ lowlevel_disable_wifi() {
     done
     if [ "$verified" -ge 1 ]; then
       log "lowlevel: Wi-Fi off-state confirmed (probes_passed=$verified)"
-      _ll_state_set "wifi_was_enabled" "1"
+      [ "$wifi_state" = "on" ] && _ll_state_set "wifi_was_enabled" "1"
     else
       log "lowlevel: Wi-Fi disable sent but off-state not yet confirmed; tracking anyway"
-      _ll_state_set "wifi_was_enabled" "1"
+      [ "$wifi_state" = "on" ] && _ll_state_set "wifi_was_enabled" "1"
     fi
     # Step 4: reinforce by bringing wlan interfaces down if present
     local ip_cmd
@@ -277,6 +297,11 @@ lowlevel_disable_wifi() {
 
 lowlevel_restore_wifi() {
   _ll_state_exists "wifi_was_enabled" || return 0
+  if [ "$(_ll_state_get "wifi_initial_state")" = "off" ]; then
+    # Defensive guard: never force Wi-Fi on when initial state was off.
+    _ll_state_rm "wifi_was_enabled"
+    return 0
+  fi
 
   local restored=0 verified_on=0 val wl_state wl_iface
   if has_cmd cmd && cmd wifi set-wifi-enabled enabled >/dev/null 2>&1; then
@@ -314,6 +339,7 @@ lowlevel_restore_wifi() {
   if [ "$verified_on" -ge 1 ]; then
     log "lowlevel: Wi-Fi restore verified (probes_passed=$verified_on)"
     _ll_state_rm "wifi_was_enabled"
+    _ll_state_rm "wifi_initial_state"
     return 0
   fi
 
@@ -322,28 +348,49 @@ lowlevel_restore_wifi() {
 }
 
 # ── Mobile data control ────────────────────────────────────────────────────────
-# Returns 0 if mobile data is currently enabled (best-effort check).
-_ll_data_is_enabled() {
-  local val
+# Returns one of: on | off | unknown
+_ll_data_state() {
+  local val ip_cmd rt_out
   if has_cmd settings; then
     val="$(settings get global mobile_data 2>/dev/null)"
     case "$val" in
-      1) return 0 ;;
-      0) return 1 ;;
+      1) printf 'on'; return 0 ;;
+      0) printf 'off'; return 0 ;;
     esac
   fi
-  return 0
+  ip_cmd="$(_find_cmd ip 2>/dev/null)" || ip_cmd=""
+  if [ -n "$ip_cmd" ]; then
+    rt_out="$("$ip_cmd" route show default 2>/dev/null)" || rt_out=""
+    printf '%s' "$rt_out" | grep -qE 'rmnet|ccmni|pdp|wwan' && { printf 'on'; return 0; }
+  fi
+  printf 'unknown'
+}
+
+# Returns 0 if mobile data is currently enabled (strict positive evidence only).
+_ll_data_is_enabled() {
+  [ "$(_ll_data_state)" = "on" ]
 }
 
 lowlevel_disable_mobile_data() {
   [ "${LOWLEVEL_USE_PHONE_DATA_CMD:-1}" = "1" ] || return 0
 
-  if ! _ll_data_is_enabled; then
+  local data_state
+  data_state="$(_ll_data_state)"
+  _ll_state_set "data_initial_state" "$data_state"
+
+  if [ "$data_state" = "off" ]; then
     # Service already off; clear any stale marker so we don't restore what we
     # never changed.
     _ll_state_rm "data_was_enabled"
-    debug_log "lowlevel_disable_mobile_data: mobile data already disabled; skipping"
+    debug_log "lowlevel_disable_mobile_data: initial state=off; preserving user preference"
     return 0
+  fi
+
+  if [ "$data_state" = "unknown" ]; then
+    # Keep anti-leak behavior (try to disable), but do not create a restore
+    # marker unless we positively know mobile data started enabled.
+    _ll_state_rm "data_was_enabled"
+    debug_log "lowlevel_disable_mobile_data: initial state unknown; disable for safety but restore marker will not be set"
   fi
 
   local disabled=0
@@ -387,7 +434,7 @@ lowlevel_disable_mobile_data() {
     else
       log "lowlevel: mobile data disable sent but off-state not yet confirmed; tracking anyway"
     fi
-    _ll_state_set "data_was_enabled" "1"
+    [ "$data_state" = "on" ] && _ll_state_set "data_was_enabled" "1"
     # Step 4: reinforce by bringing cellular data interfaces down where safe
     if [ -n "$ip_cmd" ]; then
       local cell_iface cell_state
@@ -410,6 +457,11 @@ lowlevel_disable_mobile_data() {
 
 lowlevel_restore_mobile_data() {
   _ll_state_exists "data_was_enabled" || return 0
+  if [ "$(_ll_state_get "data_initial_state")" = "off" ]; then
+    # Defensive guard: never force mobile data on when initial state was off.
+    _ll_state_rm "data_was_enabled"
+    return 0
+  fi
 
   local restored=0 verified_on=0 val ip_cmd rt_out
   if has_cmd cmd && cmd phone data enable >/dev/null 2>&1; then
@@ -443,6 +495,7 @@ lowlevel_restore_mobile_data() {
   if [ "$verified_on" -ge 1 ]; then
     log "lowlevel: mobile data restore verified (probes_passed=$verified_on)"
     _ll_state_rm "data_was_enabled"
+    _ll_state_rm "data_initial_state"
     return 0
   fi
 
@@ -695,8 +748,10 @@ lowlevel_reassert_radios_off() {
 
   # Wi-Fi reassertion
   if [ "${LOWLEVEL_USE_WIFI_SERVICE:-1}" = "1" ] && _ll_state_exists "wifi_was_enabled"; then
-    if _ll_wifi_is_enabled; then
-      log "lowlevel_reassert: Wi-Fi is back on; re-disabling"
+    local wifi_state_now
+    wifi_state_now="$(_ll_wifi_state)"
+    if [ "$wifi_state_now" != "off" ]; then
+      log "lowlevel_reassert: Wi-Fi state=${wifi_state_now}; re-disabling"
       if has_cmd cmd && cmd wifi set-wifi-enabled disabled >/dev/null 2>&1; then
         debug_log "lowlevel_reassert: Wi-Fi re-disabled via cmd wifi"
       elif has_cmd svc; then
@@ -721,8 +776,10 @@ lowlevel_reassert_radios_off() {
 
   # Mobile data reassertion
   if [ "${LOWLEVEL_USE_PHONE_DATA_CMD:-1}" = "1" ] && _ll_state_exists "data_was_enabled"; then
-    if _ll_data_is_enabled; then
-      log "lowlevel_reassert: mobile data is back on; re-disabling"
+    local data_state_now
+    data_state_now="$(_ll_data_state)"
+    if [ "$data_state_now" != "off" ]; then
+      log "lowlevel_reassert: mobile data state=${data_state_now}; re-disabling"
       if has_cmd cmd && cmd phone data disable >/dev/null 2>&1; then
         debug_log "lowlevel_reassert: mobile data re-disabled via cmd phone"
       elif has_cmd svc; then
@@ -842,6 +899,8 @@ lowlevel_prepare_environment() {
   # early-phase data written during this boot's post-fs-data stage.
   _ll_state_rm "wifi_was_enabled"
   _ll_state_rm "data_was_enabled"
+  _ll_state_rm "wifi_initial_state"
+  _ll_state_rm "data_initial_state"
   _ll_state_rm "bt_was_enabled"
   _ll_state_rm "tether_was_active"
   _ll_state_rm "tether_ifaces_down"
@@ -868,6 +927,8 @@ lowlevel_restore_changed_state() {
   lowlevel_restore_mobile_data
   lowlevel_restore_bluetooth
   lowlevel_restore_tethering_note
+  _ll_state_rm "wifi_initial_state"
+  _ll_state_rm "data_initial_state"
   _ll_state_rm "mode"
   log "lowlevel_restore_changed_state: done"
 }
@@ -918,6 +979,7 @@ lowlevel_emergency_restore() {
     fi
     if [ "$restored" = "1" ]; then
       _ll_state_rm "wifi_was_enabled"
+      _ll_state_rm "wifi_initial_state"
     else
       log "lowlevel: emergency: WARN: could not re-enable Wi-Fi; marker kept for retry"
     fi
@@ -938,6 +1000,7 @@ lowlevel_emergency_restore() {
     fi
     if [ "$restored" = "1" ]; then
       _ll_state_rm "data_was_enabled"
+      _ll_state_rm "data_initial_state"
     else
       log "lowlevel: emergency: WARN: could not re-enable mobile data; marker kept for retry"
     fi
@@ -971,6 +1034,8 @@ lowlevel_emergency_restore() {
     _ll_state_rm "tether_ifaces_down"
   fi
 
+  _ll_state_rm "wifi_initial_state"
+  _ll_state_rm "data_initial_state"
   _ll_state_rm "mode"
   log "lowlevel_emergency_restore: done"
 }
