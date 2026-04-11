@@ -7,17 +7,17 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Git ref to build from (branch, tag, or commit SHA). Defaults to current ref."
+        description: "Branch, tag, or commit SHA to build from (e.g. main, v1.2.3, abc1234)."
         required: false
         type: string
-        default: ""
+        default: "main"
       tag:
-        description: "Release tag to create (defaults to module.prop versionCode)."
+        description: "Release tag (numeric versionCode, or vMAJOR.MINOR.PATCH). Leave blank to use current module.prop versionCode."
         required: false
         type: string
         default: ""
       draft:
-        description: "Create as draft release"
+        description: "Publish as a draft release"
         required: false
         type: boolean
         default: false
@@ -34,6 +34,9 @@ jobs:
   release:
     name: Build, Tag, and Publish Release
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (
@@ -61,38 +64,48 @@ jobs:
 
       - name: Resolve ref and optional tag input
         id: resolve
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             REF_INPUT="${{ inputs.ref }}"
             TAG_INPUT="${{ inputs.tag }}"
+            DRAFT_INPUT="${{ inputs.draft }}"
             if [ -n "$REF_INPUT" ]; then
               REF="$REF_INPUT"
             else
-              REF="${{ github.ref }}"
+              REF="main"
             fi
           else
             PR_NUMBER="${{ github.event.issue.number }}"
-            # Resolve to the PR's BASE branch (a trusted, protected ref owned by this
-            # repo), NOT the contributor's head SHA.  Checking out untrusted fork code
-            # while this job holds contents:write is a pwn-request attack vector.
+            # Resolve to PR base (trusted repo ref), not PR head SHA from potential forks.
             REF="$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.base.ref')"
             TAG_INPUT="$(printf '%s' "${{ github.event.comment.body }}" | sed -nE 's#^/release[[:space:]]+([^[:space:]]+).*$#\1#p' | head -1)"
+            DRAFT_INPUT="false"
           fi
 
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
           echo "tag_input=$TAG_INPUT" >> "$GITHUB_OUTPUT"
-          echo "Resolved ref=$REF tag_input=${TAG_INPUT:-<none>}"
+          echo "draft_input=$DRAFT_INPUT" >> "$GITHUB_OUTPUT"
+          echo "Resolved ref=$REF tag_input=${TAG_INPUT:-<none>} draft=$DRAFT_INPUT"
 
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
+          token: ${{ github.token }}
+          persist-credentials: true
           ref: ${{ steps.resolve.outputs.ref }}
           fetch-depth: 0
 
+      - name: Ensure authenticated origin for push/tag in public or private repos
+        run: |
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+      - name: Configure git identity
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       - name: Install dependencies
-        run: sudo apt-get install -y --no-install-recommends zip
+        run: sudo apt-get install -y --no-install-recommends zip unzip python3
 
       - name: Read version metadata from module.prop
         id: meta
@@ -100,12 +113,10 @@ jobs:
           VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           VERSION_CODE="$(grep '^versionCode=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
-
           if [ -z "$VERSION" ] || [ -z "$VERSION_CODE" ] || [ -z "$MODULE_ID" ]; then
             echo "::error::Could not parse id/version/versionCode from module.prop"
             exit 1
           fi
-
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
           echo "module_id=$MODULE_ID" >> "$GITHUB_OUTPUT"
@@ -113,30 +124,70 @@ jobs:
       - name: Determine and validate release tag
         id: tag
         run: |
-          if [ -n "${{ steps.resolve.outputs.tag_input }}" ]; then
-            RELEASE_TAG="${{ steps.resolve.outputs.tag_input }}"
+          TAG_INPUT="${{ steps.resolve.outputs.tag_input }}"
+          CURRENT_VERSION="${{ steps.meta.outputs.version }}"
+          CURRENT_CODE="${{ steps.meta.outputs.version_code }}"
+
+          RELEASE_TAG=""
+          RELEASE_VERSION=""
+
+          if [ -z "$TAG_INPUT" ]; then
+            # Backwards compatible default: keep tag aligned to current versionCode.
+            RELEASE_TAG="$CURRENT_CODE"
+            RELEASE_VERSION="$CURRENT_VERSION"
+          elif echo "$TAG_INPUT" | grep -qE '^[0-9]+$'; then
+            # Backwards compatible manual override with numeric versionCode tag.
+            RELEASE_TAG="$TAG_INPUT"
+            V_MAJOR="$((RELEASE_TAG / 10000))"
+            V_MINOR="$(((RELEASE_TAG % 10000) / 100))"
+            V_PATCH="$((RELEASE_TAG % 100))"
+            RELEASE_VERSION="v${V_MAJOR}.${V_MINOR}.${V_PATCH}"
           else
-            RELEASE_TAG="${{ steps.meta.outputs.version_code }}"
+            # Improved UX: also accept vMAJOR.MINOR.PATCH and derive numeric versionCode.
+            case "$TAG_INPUT" in
+              v*) SEMVER_TAG="$TAG_INPUT" ;;
+              *) SEMVER_TAG="v$TAG_INPUT" ;;
+            esac
+            if ! echo "$SEMVER_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::Tag must be numeric versionCode or vX.Y.Z. Got: $TAG_INPUT"
+              exit 1
+            fi
+
+            VERSION_BODY="${SEMVER_TAG#v}"
+            V_MAJOR="$(printf '%s' "$VERSION_BODY" | cut -d. -f1)"
+            V_MINOR="$(printf '%s' "$VERSION_BODY" | cut -d. -f2)"
+            V_PATCH="$(printf '%s' "$VERSION_BODY" | cut -d. -f3)"
+
+            if [ "$V_MINOR" -gt 99 ] || [ "$V_PATCH" -gt 99 ]; then
+              echo "::error::Minor/patch must be <=99 when deriving numeric versionCode from vX.Y.Z. Got: $SEMVER_TAG"
+              exit 1
+            fi
+
+            RELEASE_TAG="$(printf '%d%02d%02d' "$V_MAJOR" "$V_MINOR" "$V_PATCH")"
+            RELEASE_VERSION="$SEMVER_TAG"
           fi
 
-          if ! [[ "$RELEASE_TAG" =~ ^[0-9]+$ ]]; then
-            echo "::error::Release tag must be a numeric versionCode (got: $RELEASE_TAG)."
+          if ! echo "$RELEASE_TAG" | grep -qE '^[0-9]+$'; then
+            echo "::error::Final release tag must be numeric versionCode. Got: $RELEASE_TAG"
             exit 1
           fi
 
-          if [ "$RELEASE_TAG" != "${{ steps.meta.outputs.version_code }}" ]; then
-            NEEDS_BUMP=true
-          else
+          if [ "$CURRENT_VERSION" = "$RELEASE_VERSION" ] && [ "$CURRENT_CODE" = "$RELEASE_TAG" ]; then
             NEEDS_BUMP=false
+          else
+            if [ "$RELEASE_TAG" -le "$CURRENT_CODE" ]; then
+              echo "::error::Release tag/versionCode $RELEASE_TAG is not greater than current $CURRENT_CODE."
+              exit 1
+            fi
+            NEEDS_BUMP=true
           fi
 
-          RELEASE_VERSION="$(awk -v c="$RELEASE_TAG" 'BEGIN { printf "v%.1f", c / 1000 }')"
-
           echo "needs_bump=$NEEDS_BUMP" >> "$GITHUB_OUTPUT"
-          echo "release_version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
           echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "release_version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Release tag: $RELEASE_TAG release_version=$RELEASE_VERSION needs_bump=$NEEDS_BUMP"
 
-      - name: Bump module metadata when releasing a new versionCode
+      - name: Bump module metadata when releasing a new version
         id: bump
         if: steps.tag.outputs.needs_bump == 'true'
         run: |
@@ -152,29 +203,54 @@ jobs:
           sed -E -i "s/^version=.*/version=${RELEASE_VERSION}/" module.prop
           sed -E -i "s/^versionCode=.*/versionCode=${RELEASE_TAG}/" module.prop
 
-          RELEASE_TAG="$RELEASE_TAG" RELEASE_VERSION="$RELEASE_VERSION" python3 - <<'PY'
+          RELEASE_VERSION="$RELEASE_VERSION" RELEASE_TAG="$RELEASE_TAG" python3 - <<'PY'
           import json
           import os
+          import pathlib
 
-          release_version = os.environ["RELEASE_VERSION"]
-          release_code = int(os.environ["RELEASE_TAG"])
-
-          with open("update.json", "r", encoding="utf-8") as f:
-              data = json.load(f)
-
-          data["version"] = release_version
-          data["versionCode"] = release_code
-
-          with open("update.json", "w", encoding="utf-8") as f:
-              json.dump(data, f, indent=2)
-              f.write("\n")
+          p = pathlib.Path('update.json')
+          data = json.loads(p.read_text(encoding='utf-8'))
+          data['version'] = os.environ['RELEASE_VERSION']
+          data['versionCode'] = int(os.environ['RELEASE_TAG'])
+          p.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
           PY
 
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add module.prop update.json
-          git commit -m "chore(release): bump module version to ${RELEASE_VERSION} (${RELEASE_TAG})"
-          git push origin HEAD:"$BRANCH"
+          if git diff --cached --quiet; then
+            echo "No metadata changes detected after bump logic; skipping commit/push."
+          else
+            git commit -m "chore(release): bump module version to ${RELEASE_VERSION} (versionCode ${RELEASE_TAG})"
+            git push origin HEAD:"$BRANCH"
+          fi
+
+      - name: Sync update.json version metadata from module.prop
+        run: |
+          BRANCH="$(git symbolic-ref --short -q HEAD || true)"
+          VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
+          VERSION_CODE="$(grep '^versionCode=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
+          VERSION="$VERSION" VERSION_CODE="$VERSION_CODE" python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          p = pathlib.Path('update.json')
+          data = json.loads(p.read_text(encoding='utf-8'))
+          data['version'] = os.environ['VERSION']
+          data['versionCode'] = int(os.environ['VERSION_CODE'])
+          p.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
+          PY
+
+          if git diff --quiet -- update.json; then
+            echo "update.json already in sync with module.prop."
+          else
+            if [ -z "$BRANCH" ]; then
+              echo "::error::update.json changed but checkout is detached; cannot commit synced metadata."
+              exit 1
+            fi
+            git add update.json
+            git commit -m "chore: sync update.json version"
+            git push origin HEAD:"$BRANCH"
+          fi
 
       - name: Read final version metadata
         id: meta_final
@@ -183,10 +259,10 @@ jobs:
           VERSION_CODE="$(grep '^versionCode=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
 
-          if [ -z "$VERSION" ] || [ -z "$VERSION_CODE" ] || [ -z "$MODULE_ID" ]; then
+          [ -n "$VERSION" ] && [ -n "$VERSION_CODE" ] && [ -n "$MODULE_ID" ] || {
             echo "::error::Could not parse id/version/versionCode from module.prop after release tag processing"
             exit 1
-          fi
+          }
 
           if [ "$VERSION_CODE" != "${{ steps.tag.outputs.release_tag }}" ]; then
             echo "::error::Final module.prop versionCode ($VERSION_CODE) does not match release tag (${{ steps.tag.outputs.release_tag }})."
@@ -197,20 +273,19 @@ jobs:
           echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
           echo "module_id=$MODULE_ID" >> "$GITHUB_OUTPUT"
 
-      - name: Build release ZIP
+      - name: Build release ZIPs
         run: |
           chmod +x tools/build-release.sh
           ZIP_NAME="${{ steps.meta_final.outputs.module_id }}-${{ steps.meta_final.outputs.version }}.zip"
-          tools/build-release.sh dist/ "$ZIP_NAME"
+          tools/build-release.sh dist/ "$ZIP_NAME" "${{ steps.meta_final.outputs.module_id }}.zip"
 
       - name: Validate ZIP structure
         run: |
           chmod +x tools/validate-zip.sh
           tools/validate-zip.sh "dist/${{ steps.meta_final.outputs.module_id }}-${{ steps.meta_final.outputs.version }}.zip"
+          tools/validate-zip.sh "dist/${{ steps.meta_final.outputs.module_id }}.zip"
 
       - name: Create tag if missing
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RELEASE_TAG="${{ steps.tag.outputs.release_tag }}"
           TARGET_REF="${{ steps.resolve.outputs.ref }}"
@@ -229,43 +304,57 @@ jobs:
           fi
 
       - name: Publish GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           RELEASE_TAG="${{ steps.tag.outputs.release_tag }}"
           VERSION="${{ steps.meta_final.outputs.version }}"
           VERSION_CODE="${{ steps.meta_final.outputs.version_code }}"
           MODULE_ID="${{ steps.meta_final.outputs.module_id }}"
-          ZIP_PATH="dist/${MODULE_ID}-${VERSION}.zip"
+          ZIP_VERSIONED="dist/${MODULE_ID}-${VERSION}.zip"
+          ZIP_STABLE="dist/${MODULE_ID}.zip"
           DRAFT_FLAG=""
-          if [ "${{ inputs.draft }}" = "true" ]; then
+          if [ "${{ steps.resolve.outputs.draft_input }}" = "true" ]; then
             DRAFT_FLAG="--draft"
           fi
 
-          PREV_TAG="$(git tag --list '[0-9]*' --sort=v:refname | awk -v cur="$RELEASE_TAG" '$1 < cur {prev=$1} END {print prev}')"
-          CHANGELOG_LINE=""
+          PREV_TAG="$(
+            gh release list --repo "$GH_REPO" --limit 1000 --exclude-drafts --json tagName --jq '.[].tagName' 2>/dev/null |
+            awk -v rel="$RELEASE_TAG" '
+              function k(s,v,a,l){
+                if(match(s,/^[0-9]+$/)) return s+0
+                if(match(s,/[0-9]+\.[0-9]+\.[0-9]+/)){
+                  v=substr(s,RSTART,RLENGTH); split(v,a,".")
+                  return a[1] sprintf("%02d%02d",a[2],a[3]) + 0
+                }
+                if(match(s,/(^|[^0-9])([0-9]{5,}|[0-9]{3})([^0-9]|$)/)){
+                  v=substr(s,RSTART,RLENGTH); gsub(/[^0-9]/,"",v); l=length(v)
+                  return l==3 ? substr(v,1,1) sprintf("%02d%02d",substr(v,2,1),substr(v,3,1)) + 0 : v + 0
+                }
+                return -1
+              }
+              { n=k($0); if(n>=0 && $0!=rel && n>b) b=n, o=$0 }
+              END { print o }
+            '
+          )"
+
           if [ -n "$PREV_TAG" ]; then
             CHANGELOG_LINE="**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${RELEASE_TAG}"
-          fi
-
-          NOTES="$(printf '%s\n%s\n\n%s\n%s' \
-            "See [README](https://github.com/${{ github.repository }}) 👀" \
-            "- Release \`${VERSION}\` (versionCode \`${VERSION_CODE}\`)" \
-            "## What's Changed" \
-            "* Automated module build + packaging for ${VERSION}.")"
-          if [ -n "$CHANGELOG_LINE" ]; then
-            NOTES="${NOTES}$(printf '\n%s' "$CHANGELOG_LINE")"
-          fi
-
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release edit "$RELEASE_TAG" --title "$VERSION" --notes "$NOTES" $DRAFT_FLAG
-            gh release upload "$RELEASE_TAG" "$ZIP_PATH" --clobber
           else
-            gh release create "$RELEASE_TAG" \
-              --title "$VERSION" \
-              --notes "$NOTES" \
-              $DRAFT_FLAG \
-              "$ZIP_PATH"
+            FIRST_COMMIT="$(git rev-list --max-parents=0 HEAD)"
+            CHANGELOG_LINE="**Full Changelog**: https://github.com/${{ github.repository }}/compare/${FIRST_COMMIT}...${RELEASE_TAG}"
+          fi
+
+          NOTES="$(printf '%s\n\n%s\n%s' \
+            "See [README](https://github.com/${{ github.repository }}) 👀" \
+            "## What's Changed" \
+            "* Automated module build + packaging.")"
+          NOTES="${NOTES}$(printf '\n%s' "$CHANGELOG_LINE")"
+
+          if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --title "$VERSION" --notes "$NOTES" $DRAFT_FLAG
+            gh release upload "$RELEASE_TAG" --repo "$GH_REPO" "$ZIP_VERSIONED" "$ZIP_STABLE" dist/sha256sum.txt dist/build-info.txt update.json --clobber
+          else
+            gh release create "$RELEASE_TAG" --repo "$GH_REPO" --title "$VERSION" --notes "$NOTES" $DRAFT_FLAG \
+              "$ZIP_VERSIONED" "$ZIP_STABLE" dist/sha256sum.txt dist/build-info.txt update.json
           fi
 
           echo "Release published: https://github.com/${{ github.repository }}/releases/tag/${RELEASE_TAG}"
