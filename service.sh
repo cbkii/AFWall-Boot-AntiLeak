@@ -321,6 +321,7 @@
   # transport restore is still pending, to avoid logging this every poll.
   _wifi_restore_logged=0
   _mobile_restore_logged=0
+  _finalize_defer_logged=0
 
   # ── Unlock state for timeout gating ────────────────────────────────────────
   device_unlocked=0
@@ -1057,11 +1058,41 @@
 
     if [ "$_v4_complete" = "1" ] && [ "$_v6_complete" = "1" ]; then
       if [ "$wifi_done" = "0" ] || [ "$mobile_done" = "0" ]; then
-        log "service: family handoff complete; bypassing transport-gate tail (wifi=${wifi_done} mobile=${mobile_done}) and running shared recovery"
+        log "service: family handoff complete; transport gates not fully satisfied (wifi=${wifi_done} mobile=${mobile_done})"
       else
         log "service: handoff complete (v4=${v4_path:-skipped} v6=${v6_path:-skipped} wifi=done mobile=done)"
       fi
-      recover_connectivity "service-finalize" "0"
+
+      # Finalize in verified mode: remove module-owned blocks first, then use
+      # verified lowlevel restore helpers (with retry loop) so we do not clear
+      # markers on command-ack alone.
+      clear_blackout_active
+      rm -f "${STATE_DIR}/block_installed" "${STATE_DIR}/radio_off_pending" 2>/dev/null || true
+      remove_block
+      cleanup_legacy "service-finalize"
+
+      lowlevel_restore_wifi_if_allowed || \
+        debug_log "service: Wi-Fi restore not yet confirmed at finalize"
+      lowlevel_restore_mobile_data_if_allowed || \
+        debug_log "service: mobile-data restore not yet confirmed at finalize"
+      if _ll_state_exists "wifi_was_enabled" || _ll_state_exists "data_was_enabled"; then
+        _wifi_marker=0; _mobile_marker=0
+        _ll_state_exists "wifi_was_enabled" && _wifi_marker=1
+        _ll_state_exists "data_was_enabled" && _mobile_marker=1
+        if [ "$_finalize_defer_logged" = "0" ]; then
+          log "service: finalization deferred: verified restore pending (wifi=${_wifi_marker} mobile=${_mobile_marker})"
+          _finalize_defer_logged=1
+        else
+          debug_log "service: finalization still deferred (wifi=${_wifi_marker} mobile=${_mobile_marker})"
+        fi
+        sleep "$POLL_INTERVAL_SECS"
+        continue
+      fi
+      _finalize_defer_logged=0
+      lowlevel_restore_interfaces 2>/dev/null || true
+      lowlevel_restore_bluetooth 2>/dev/null || true
+      lowlevel_restore_tethering_note 2>/dev/null || true
+      _ll_state_rm "mode" 2>/dev/null || true
       remove_service_pid
       log "service: handoff complete — AFWall is now sole active protection"
       exit 0
