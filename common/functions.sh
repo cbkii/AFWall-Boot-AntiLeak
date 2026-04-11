@@ -179,16 +179,12 @@ if $KSU; then
   MAGISKTMP="/mnt"
   ORIGDIR="$MAGISKTMP/mirror"
   mount_mirrors
-elif [ "$(magisk --path 2>/dev/null)" ]; then
-  if [ $MAGISK_VER_CODE -ge 27000 ]; then # Atomic Mount
-    if [ -z $MAGISKTMP ]; then
-      [ -d /sbin ] && MAGISKTMP=/sbin || MAGISKTMP=/debug_ramdisk
-    fi
-    ORIGDIR="$MAGISKTMP/mirror"
-    mount_mirrors
-  else
-    ORIGDIR="$(magisk --path 2>/dev/null)/.magisk/mirror"
+elif [ $MAGISK_VER_CODE -ge 27000 ]; then # Atomic Mount
+  if [ -z $MAGISKTMP ]; then
+    [ -d /sbin ] && MAGISKTMP=/sbin || MAGISKTMP=/debug_ramdisk
   fi
+  ORIGDIR="$MAGISKTMP/mirror"
+  mount_mirrors
 elif [ "$(echo $MAGISKTMP | awk -F/ '{ print $NF}')" == ".magisk" ]; then
   ORIGDIR="$MAGISKTMP/mirror"
 else

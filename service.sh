@@ -49,10 +49,6 @@
   RADIO_REASSERT_INTERVAL="${RADIO_REASSERT_INTERVAL:-10}"
   BLACKOUT_REASSERT_INTERVAL="${BLACKOUT_REASSERT_INTERVAL:-5}"
   UNLOCK_POLL_INTERVAL="${UNLOCK_POLL_INTERVAL:-5}"
-  # Retained as a compatibility alias only; not used in any active transport
-  # logic.  The active fallback path uses TRANSPORT_ABSENCE_STABLE_SECS and
-  # TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT.
-  TRANSPORT_WAIT_SECS="${TRANSPORT_WAIT_SECS:-30}"
 
   # ── Composite-readiness timing ─────────────────────────────────────────────
   # POLL_INTERVAL_SECS: how often the loop iterates (1s default → faster reaction).
@@ -76,12 +72,9 @@
   LIVENESS_SECS_POST_BOOT="${LIVENESS_SECS_POST_BOOT:-2}"
   FALLBACK_SECS_POST_BOOT="${FALLBACK_SECS_POST_BOOT:-4}"
   SETTLE_SECS_POST_BOOT="${SETTLE_SECS_POST_BOOT:-1}"
-  TRANSPORT_WAIT_SECS_POST_BOOT="${TRANSPORT_WAIT_SECS_POST_BOOT:-5}"
   # Absence-stable threshold post-boot: how many consecutive seconds with no
   # transport-specific chains (afwall-wifi* / afwall-3g*) in snapshots before
   # accepting that transport as absent and proceeding with radio restoration.
-  # Must NOT be confused with TRANSPORT_WAIT_SECS_POST_BOOT (which gates a
-  # different legacy detection wait path).
   TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT="${TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT:-2}"
   TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT="${TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT:-8}"
 
@@ -90,7 +83,7 @@
   log "service: config: poll=${POLL_INTERVAL_SECS}s fast=${FAST_STABLE_SECS}s slow=${SLOW_STABLE_SECS}s transport_absence=${TRANSPORT_ABSENCE_STABLE_SECS}s absence_pb=${TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT}s transport_inconclusive=${TRANSPORT_INCONCLUSIVE_SECS}s inconclusive_pb=${TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT}s"
   log "service: config: fwd=${ENABLE_FORWARD_BLOCK:-1} in=${ENABLE_INPUT_BLOCK:-0} ll_mode=${LOWLEVEL_MODE:-safe}"
   log "service: config: wifi_gate=${WIFI_AFWALL_GATE} mobile_gate=${MOBILE_AFWALL_GATE} reassert=${RADIO_REASSERT_INTERVAL}s blackout_reassert=${BLACKOUT_REASSERT_INTERVAL}s"
-  log "service: config: boot_accel=${BOOT_COMPLETE_ACCELERATE} density_min=${AFWALL_RULE_DENSITY_MIN} liveness_pb=${LIVENESS_SECS_POST_BOOT}s fallback_pb=${FALLBACK_SECS_POST_BOOT}s settle_pb=${SETTLE_SECS_POST_BOOT}s twait_pb=${TRANSPORT_WAIT_SECS_POST_BOOT}s"
+  log "service: config: boot_accel=${BOOT_COMPLETE_ACCELERATE} density_min=${AFWALL_RULE_DENSITY_MIN} liveness_pb=${LIVENESS_SECS_POST_BOOT}s fallback_pb=${FALLBACK_SECS_POST_BOOT}s settle_pb=${SETTLE_SECS_POST_BOOT}s"
   log "service: snapshot backend v4=iptables-S"
   log "service: snapshot backend v6=ip6tables-S"
 

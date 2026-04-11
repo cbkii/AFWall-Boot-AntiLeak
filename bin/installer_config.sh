@@ -173,6 +173,27 @@ ic_load_existing_config() {
     val=$(_ic_read_key TIMEOUT_SECS "$cfg_file")
     [ -n "$val" ] && IC_TIMEOUT_SECS="$val"
 
+    val=$(_ic_read_key TIMEOUT_POLICY "$cfg_file")
+    [ -n "$val" ] && IC_TIMEOUT_POLICY="$val"
+
+    val=$(_ic_read_key AUTO_TIMEOUT_UNBLOCK "$cfg_file")
+    [ -n "$val" ] && IC_AUTO_TIMEOUT_UNBLOCK="$val"
+
+    val=$(_ic_read_key TIMEOUT_UNLOCK_GATED "$cfg_file")
+    [ -n "$val" ] && IC_TIMEOUT_UNLOCK_GATED="$val"
+
+    val=$(_ic_read_key WIFI_AFWALL_GATE "$cfg_file")
+    [ -n "$val" ] && IC_WIFI_AFWALL_GATE="$val"
+
+    val=$(_ic_read_key MOBILE_AFWALL_GATE "$cfg_file")
+    [ -n "$val" ] && IC_MOBILE_AFWALL_GATE="$val"
+
+    val=$(_ic_read_key RADIO_REASSERT_INTERVAL "$cfg_file")
+    [ -n "$val" ] && IC_RADIO_REASSERT_INTERVAL="$val"
+
+    val=$(_ic_read_key UNLOCK_POLL_INTERVAL "$cfg_file")
+    [ -n "$val" ] && IC_UNLOCK_POLL_INTERVAL="$val"
+
     val=$(_ic_read_key SETTLE_SECS "$cfg_file")
     [ -n "$val" ] && IC_SETTLE_SECS="$val"
 
@@ -770,7 +791,10 @@ ic_write_config() {
     printf 'LOWLEVEL_USE_TETHER_STOP=%s\n'    "${IC_LOWLEVEL_USE_TETHER_STOP:-1}"       >> "$dest"
     printf 'VPN_LOCKDOWN_BOOT_ENFORCE=%s\n'   "${IC_VPN_LOCKDOWN_BOOT_ENFORCE:-1}"      >> "$dest"
     printf 'VPN_LOCKDOWN_RELEASE_ON_RESTORE=%s\n' "${IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE:-1}" >> "$dest"
-    printf 'VPN_LOCKDOWN_PROVIDER_PACKAGES=\"%s\"\n' "${IC_VPN_LOCKDOWN_PROVIDER_PACKAGES:-}" >> "$dest"
+    # Single-quote the VPN package list to prevent shell injection if the value
+    # contains special characters; embedded single quotes are escaped as '\''.
+    _vpn_pkgs="$(printf '%s' "${IC_VPN_LOCKDOWN_PROVIDER_PACKAGES:-}" | sed "s/'/'\\\\''/g")"
+    printf "VPN_LOCKDOWN_PROVIDER_PACKAGES='%s'\n" "$_vpn_pkgs" >> "$dest"
     printf 'TIMEOUT_SECS=%s\n'                "${IC_TIMEOUT_SECS:-120}"                >> "$dest"
     printf 'TIMEOUT_POLICY=%s\n'             "${IC_TIMEOUT_POLICY:-fail_closed}"       >> "$dest"
     printf 'AUTO_TIMEOUT_UNBLOCK=%s\n'       "${IC_AUTO_TIMEOUT_UNBLOCK:-0}"           >> "$dest"
@@ -782,10 +806,6 @@ ic_write_config() {
     printf 'SETTLE_SECS=%s\n'                 "${IC_SETTLE_SECS:-5}"                   >> "$dest"
     printf 'DEBUG=%s\n'                       "${IC_DEBUG:-0}"                         >> "$dest"
 
-    if [ ! -f "$dest" ]; then
-        _ic_print "  ERROR: Config file not created at $dest"
-        return 1
-    fi
     chmod 644 "$dest" 2>/dev/null || true
     return 0
 }

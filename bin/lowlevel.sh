@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v2.6 - Lower-layer suppression subsystem
+# AFWall Boot AntiLeak v3.0.1 - Lower-layer suppression subsystem
 # POSIX/ash compatible. No bashisms. Sourced by common.sh; do not execute directly.
 #
 # PURPOSE
@@ -514,7 +514,7 @@ _ll_bt_is_enabled() {
       0) return 1 ;;
     esac
   fi
-  return 0
+  return 1  # unknown/unavailable state — assume not enabled (conservative; avoids spurious restore)
 }
 
 lowlevel_disable_bluetooth() {

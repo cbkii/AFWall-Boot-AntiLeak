@@ -298,13 +298,11 @@ Built-in defaults ship in [`config.sh`](config.sh). Edit the persistent file, th
 | `LIVENESS_SECS_POST_BOOT` | `2` | Post-boot fast-path stability threshold. |
 | `FALLBACK_SECS_POST_BOOT` | `4` | Post-boot conservative-path stability threshold. |
 | `SETTLE_SECS_POST_BOOT` | `1` | Post-boot transport subtree settle window. |
-| `TRANSPORT_WAIT_SECS_POST_BOOT` | `5` | Retained compatibility alias; not the active absence-stable control path. |
 
 ### Diagnostics and behaviour flags
 
 | Key | Default | Meaning |
 |---|---:|---|
-| `MANUAL_OVERRIDE_PERSISTS_THIS_BOOT` | `1` | Informational flag documenting current-boot override behaviour. |
 | `DEBUG` | `0` | Set to `1` for verbose boot logging. |
 
 ## Logs, state, and manual recovery
