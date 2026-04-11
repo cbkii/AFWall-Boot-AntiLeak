@@ -331,7 +331,7 @@ jobs:
                 }
                 return -1
               }
-              { n=k($0); if(n>=0 && $0!=rel && n>b) b=n, o=$0 }
+              { n=k($0); if(n>=0 && $0!=rel && n>b) { b=n; o=$0 } }
               END { print o }
             '
           )"
