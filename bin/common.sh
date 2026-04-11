@@ -11,7 +11,6 @@ LOG_DIR="${MODULE_DATA}/logs"
 LOG_FILE="${LOG_DIR}/boot.log"
 STATE_DIR="${MODULE_DATA}/state"
 SERVICE_PID_FILE="${STATE_DIR}/aba_service.pid"
-SERVICE_PID_FILE_LEGACY="${STATE_DIR}/service.pid"
 
 # ── Module-owned chain names ───────────────────────────────────────────────────
 # Each traffic direction gets its own named chain so ownership is unambiguous.
@@ -1571,7 +1570,6 @@ radio_off_pending() {
 # stop_requested: written alongside manual_override; service.sh stops on either.
 # aba_service.pid: module-unique PID marker written by service.sh at startup;
 #   cleared on clean exit or by action.sh after ownership-validated signalling.
-# service.pid: legacy compatibility marker retained for older revisions.
 
 write_manual_override() {
   _init_dirs
@@ -1588,16 +1586,14 @@ write_stop_requested() {
 write_service_pid() {
   local pid="${1:-$$}"
   _init_dirs
-  # Write a module-unique pid marker; also write legacy filename for
-  # compatibility with older module revisions/scripts.
+  # Write module-unique pid marker.
   printf '%s' "$pid" > "$SERVICE_PID_FILE" 2>/dev/null || true
-  printf '%s' "$pid" > "$SERVICE_PID_FILE_LEGACY" 2>/dev/null || true
   debug_log "write_service_pid: pid=$pid written"
 }
 
 remove_service_pid() {
-  rm -f "$SERVICE_PID_FILE" "$SERVICE_PID_FILE_LEGACY" 2>/dev/null || true
-  debug_log "remove_service_pid: service.pid removed"
+  rm -f "$SERVICE_PID_FILE" 2>/dev/null || true
+  debug_log "remove_service_pid: pid marker removed"
 }
 
 manual_override_active() {
@@ -1616,35 +1612,31 @@ stop_requested_active() {
 #   Best-effort stop of the background service loop using module PID markers.
 #   Safe to call multiple times.
 recover_stop_service_loop() {
-  local _pid_file _svc_pid _cmdline
+  local _svc_pid _cmdline
+  [ -s "$SERVICE_PID_FILE" ] || return 0
 
-  # Prefer unique pid filename; fall back to legacy path for compatibility.
-  if [ -f "$SERVICE_PID_FILE" ]; then
-    _pid_file="$SERVICE_PID_FILE"
-  elif [ -f "$SERVICE_PID_FILE_LEGACY" ]; then
-    _pid_file="$SERVICE_PID_FILE_LEGACY"
-  else
-    return 0
-  fi
-
-  _svc_pid="$(cat "$_pid_file" 2>/dev/null)"
-  if [ -z "$_svc_pid" ] || ! kill -0 "$_svc_pid" 2>/dev/null; then
-    log "recover_stop_service_loop: pid file present but process not running (pid=${_svc_pid:-empty} file=$_pid_file)"
+  _svc_pid="$(cat "$SERVICE_PID_FILE" 2>/dev/null)"
+  if [ -z "$_svc_pid" ]; then
+    log "recover_stop_service_loop: PID file empty/unreadable ($SERVICE_PID_FILE)"
     return 0
   fi
 
   # Ownership validation: only signal when cmdline indicates this module's
   # service loop. This prevents killing unrelated processes if PID is reused.
+  kill -0 "$_svc_pid" 2>/dev/null || {
+    log "recover_stop_service_loop: PID not running (pid=${_svc_pid})"
+    return 0
+  }
   _cmdline="$(tr '\0' ' ' < "/proc/${_svc_pid}/cmdline" 2>/dev/null)"
   case "$_cmdline" in
     *"/AFWall-Boot-AntiLeak/service.sh"*|*"${MODDIR}/service.sh"*)
       kill "$_svc_pid" 2>/dev/null || true
       log "recover_stop_service_loop: service pid ${_svc_pid} signalled (owner-confirmed)"
       # Remove pid markers only after ownership is confirmed.
-      rm -f "$SERVICE_PID_FILE" "$SERVICE_PID_FILE_LEGACY" 2>/dev/null || true
+      rm -f "$SERVICE_PID_FILE" 2>/dev/null || true
       ;;
     *)
-      log "recover_stop_service_loop: PID ownership mismatch (pid=${_svc_pid} file=$_pid_file cmdline='${_cmdline:-unreadable}') — not signalling"
+      log "recover_stop_service_loop: PID ownership mismatch (pid=${_svc_pid} file=$SERVICE_PID_FILE cmdline='${_cmdline:-unreadable}') — not signalling"
       ;;
   esac
 }
