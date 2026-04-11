@@ -322,6 +322,7 @@
   _family_handoff_logged=0
   _wifi_restore_logged=0
   _mobile_restore_logged=0
+  _finalize_defer_logged=0
 
   # ── Unlock state for timeout gating ────────────────────────────────────────
   device_unlocked=0
@@ -419,7 +420,7 @@
               wifi_done=1
               wifi_pending_since=0
             else
-              log "service: wifi transport: restore not yet confirmed; will retry"
+              debug_log "service: wifi transport: restore not yet confirmed; will retry"
             fi
           fi
         fi
@@ -456,7 +457,7 @@
                 wifi_done=1
                 wifi_pending_since=0
               else
-                log "service: wifi transport fallback path: restore not yet confirmed; will retry"
+                debug_log "service: wifi transport fallback path: restore not yet confirmed; will retry"
               fi
             fi
           fi
@@ -484,7 +485,7 @@
               wifi_pending_since=0
               log "service: wifi transport resolved via inconclusive-time fallback"
             else
-              log "service: wifi inconclusive-time fallback restore not yet confirmed; continuing retries"
+              debug_log "service: wifi inconclusive-time fallback restore not yet confirmed; continuing retries"
             fi
           fi
         fi
@@ -536,7 +537,7 @@
               mobile_done=1
               mobile_pending_since=0
             else
-              log "service: mobile transport: restore not yet confirmed; will retry"
+              debug_log "service: mobile transport: restore not yet confirmed; will retry"
             fi
           fi
         fi
@@ -571,7 +572,7 @@
                 mobile_done=1
                 mobile_pending_since=0
               else
-                log "service: mobile transport fallback path: restore not yet confirmed; will retry"
+                debug_log "service: mobile transport fallback path: restore not yet confirmed; will retry"
               fi
             fi
           fi
@@ -595,7 +596,7 @@
               mobile_pending_since=0
               log "service: mobile transport resolved via inconclusive-time fallback"
             else
-              log "service: mobile inconclusive-time fallback restore not yet confirmed; continuing retries"
+              debug_log "service: mobile inconclusive-time fallback restore not yet confirmed; continuing retries"
             fi
           fi
         fi
@@ -1103,17 +1104,23 @@
       # transport-specific helper calls inside _check_transport_readiness would
       # have been skipped if wifi_done/mobile_done started as 1.
       lowlevel_restore_wifi_if_allowed || \
-        log "service: WARN: Wi-Fi restore not yet confirmed at finalize"
+        debug_log "service: Wi-Fi restore not yet confirmed at finalize"
       lowlevel_restore_mobile_data_if_allowed || \
-        log "service: WARN: mobile-data restore not yet confirmed at finalize"
+        debug_log "service: mobile-data restore not yet confirmed at finalize"
       if _ll_state_exists "wifi_was_enabled" || _ll_state_exists "data_was_enabled"; then
         _wifi_marker=0; _mobile_marker=0
         _ll_state_exists "wifi_was_enabled" && _wifi_marker=1
         _ll_state_exists "data_was_enabled" && _mobile_marker=1
-        log "service: finalization deferred: restore markers remain (wifi=${_wifi_marker} mobile=${_mobile_marker})"
+        if [ "$_finalize_defer_logged" = "0" ]; then
+          log "service: finalization deferred: restore markers remain (wifi=${_wifi_marker} mobile=${_mobile_marker})"
+          _finalize_defer_logged=1
+        else
+          debug_log "service: finalization still deferred (wifi=${_wifi_marker} mobile=${_mobile_marker})"
+        fi
         sleep "$POLL_INTERVAL_SECS"
         continue
       fi
+      _finalize_defer_logged=0
       lowlevel_restore_interfaces 2>/dev/null || true
       lowlevel_restore_bluetooth 2>/dev/null || true
       lowlevel_restore_tethering_note 2>/dev/null || true
