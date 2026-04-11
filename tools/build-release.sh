@@ -2,15 +2,19 @@
 # build-release.sh — Build a Magisk-installable module ZIP for AFWall Boot AntiLeak.
 #
 # Usage:
-#   tools/build-release.sh [output_dir [zip_name]]
+#   tools/build-release.sh [output_dir [zip_name [stable_zip_name]]]
 #
 # Arguments:
 #   output_dir  Directory to write the ZIP and checksum into (default: dist/)
-#   zip_name    Override the output ZIP filename (default: <MODULE_ID>-<VERSION>.zip)
+#   zip_name         Override the primary output ZIP filename
+#                    (default: <MODULE_ID>-<VERSION>.zip)
+#   stable_zip_name  Optional second ZIP name (typically <MODULE_ID>.zip)
+#                    copied from the primary ZIP for stable/latest downloads.
 #
 # Output:
-#   <output_dir>/<zip_name>       — Magisk-installable module ZIP
-#   <output_dir>/sha256sum.txt    — SHA256 checksum of the ZIP
+#   <output_dir>/<zip_name>             — Magisk-installable module ZIP
+#   <output_dir>/<stable_zip_name>      — Optional stable ZIP alias
+#   <output_dir>/sha256sum.txt          — SHA256 checksums of produced ZIP(s)
 #   <output_dir>/build-info.txt   — Build metadata (version, date, git ref)
 #
 # Exit codes:
@@ -33,6 +37,7 @@ else
   mkdir -p "$OUTPUT_DIR"
 fi
 ZIP_NAME_OVERRIDE="${2:-}"
+STABLE_ZIP_NAME_OVERRIDE="${3:-}"
 
 # ── Parse version from module.prop ────────────────────────────────────────────
 MODULE_PROP="$REPO_ROOT/module.prop"
@@ -58,6 +63,10 @@ else
 fi
 
 ZIP_PATH="$OUTPUT_DIR/$ZIP_NAME"
+STABLE_ZIP_PATH=""
+if [ -n "$STABLE_ZIP_NAME_OVERRIDE" ]; then
+  STABLE_ZIP_PATH="$OUTPUT_DIR/$STABLE_ZIP_NAME_OVERRIDE"
+fi
 CHECKSUM_PATH="$OUTPUT_DIR/sha256sum.txt"
 BUILD_INFO_PATH="$OUTPUT_DIR/build-info.txt"
 
@@ -118,6 +127,7 @@ done
 # ── Create output directory (already exists — created during path resolution) ─
 # Remove any existing output for this ZIP name (idempotent rebuild)
 rm -f "$ZIP_PATH" "$CHECKSUM_PATH" "$BUILD_INFO_PATH"
+[ -n "$STABLE_ZIP_PATH" ] && rm -f "$STABLE_ZIP_PATH"
 
 # ── Build ZIP ─────────────────────────────────────────────────────────────────
 # All files are added from REPO_ROOT so they appear at the ZIP root (no nesting).
@@ -143,12 +153,25 @@ zip -r9 "$ZIP_PATH" \
 
 echo "Built: $ZIP_PATH"
 
+# ── Optional stable ZIP alias ────────────────────────────────────────────────
+if [ -n "$STABLE_ZIP_PATH" ]; then
+  cp -f "$ZIP_PATH" "$STABLE_ZIP_PATH"
+  echo "Stable alias: $STABLE_ZIP_PATH"
+fi
+
 # ── Generate checksum ─────────────────────────────────────────────────────────
 # Run sha256sum from OUTPUT_DIR (which is absolute) so the checksum line records
 # just the bare filename — this is what `sha256sum -c` expects on the device.
 # Use a subshell so the `cd` does not affect the rest of the script.
 echo "Generating checksum..."
-( cd "$OUTPUT_DIR" && sha256sum "$ZIP_NAME" > sha256sum.txt )
+(
+  cd "$OUTPUT_DIR"
+  if [ -n "$STABLE_ZIP_NAME_OVERRIDE" ]; then
+    sha256sum "$ZIP_NAME" "$STABLE_ZIP_NAME_OVERRIDE" > sha256sum.txt
+  else
+    sha256sum "$ZIP_NAME" > sha256sum.txt
+  fi
+)
 echo "Checksum:"
 cat "$CHECKSUM_PATH"
 
@@ -162,6 +185,7 @@ module_id=$MODULE_ID
 version=$VERSION
 versionCode=$VERSION_CODE
 zip_name=$ZIP_NAME
+stable_zip_name=${STABLE_ZIP_NAME_OVERRIDE:-}
 git_ref=$GIT_REF
 git_branch=$GIT_BRANCH
 build_date=$BUILD_DATE

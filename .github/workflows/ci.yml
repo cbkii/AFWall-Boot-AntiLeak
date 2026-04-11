@@ -28,7 +28,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get install -y --no-install-recommends shellcheck zip
+        run: sudo apt-get install -y --no-install-recommends shellcheck zip unzip
 
       # ── Lint: module runtime scripts ────────────────────────────────────────
       # Checks the module's own shell scripts (not third-party MMT-Extended
@@ -52,15 +52,18 @@ jobs:
       - name: Build module ZIP
         run: |
           chmod +x tools/build-release.sh
-          tools/build-release.sh dist/
+          MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
+          VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
+          tools/build-release.sh dist/ "${MODULE_ID}-${VERSION}.zip" "${MODULE_ID}.zip"
 
       # ── Validate: check ZIP internal structure ───────────────────────────────
       - name: Validate ZIP structure
         run: |
           chmod +x tools/validate-zip.sh
-          ZIP="$(ls dist/*.zip | head -1)"
-          echo "Validating: $ZIP"
-          tools/validate-zip.sh "$ZIP"
+          MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
+          VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
+          tools/validate-zip.sh "dist/${MODULE_ID}-${VERSION}.zip"
+          tools/validate-zip.sh "dist/${MODULE_ID}.zip"
 
       # ── Upload: make artifacts available for PR review ───────────────────────
       - name: Upload module ZIP artifact
