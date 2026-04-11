@@ -138,7 +138,10 @@ jobs:
           elif echo "$TAG_INPUT" | grep -qE '^[0-9]+$'; then
             # Backwards compatible manual override with numeric versionCode tag.
             RELEASE_TAG="$TAG_INPUT"
-            RELEASE_VERSION="$(awk -v c="$RELEASE_TAG" 'BEGIN { printf "v%.1f", c / 1000 }')"
+            V_MAJOR="$((RELEASE_TAG / 10000))"
+            V_MINOR="$(((RELEASE_TAG % 10000) / 100))"
+            V_PATCH="$((RELEASE_TAG % 100))"
+            RELEASE_VERSION="v${V_MAJOR}.${V_MINOR}.${V_PATCH}"
           else
             # Improved UX: also accept vMAJOR.MINOR.PATCH and derive numeric versionCode.
             case "$TAG_INPUT" in
@@ -222,6 +225,7 @@ jobs:
 
       - name: Sync update.json version metadata from module.prop
         run: |
+          BRANCH="$(git symbolic-ref --short -q HEAD || true)"
           VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           VERSION_CODE="$(grep '^versionCode=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           VERSION="$VERSION" VERSION_CODE="$VERSION_CODE" python3 - <<'PY'
@@ -235,6 +239,18 @@ jobs:
           data['versionCode'] = int(os.environ['VERSION_CODE'])
           p.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
           PY
+
+          if git diff --quiet -- update.json; then
+            echo "update.json already in sync with module.prop."
+          else
+            if [ -z "$BRANCH" ]; then
+              echo "::error::update.json changed but checkout is detached; cannot commit synced metadata."
+              exit 1
+            fi
+            git add update.json
+            git commit -m "chore: sync update.json version"
+            git push origin HEAD:"$BRANCH"
+          fi
 
       - name: Read final version metadata
         id: meta_final
