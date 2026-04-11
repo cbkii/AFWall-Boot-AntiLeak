@@ -618,19 +618,19 @@ _ll_vpn_discover_providers() {
   if has_cmd cmd; then
     out="$(cmd package query-intent-services -a android.net.VpnService 2>/dev/null)"
     if [ -n "$out" ]; then
-      printf '%s\n' "$out" | sed -n 's/.*\([^[:space:]]\+\)\/.*/\1/p'
+      printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([^/[:space:]][^/]*\)\/.*/\1/p'
       return 0
     fi
     out="$(cmd package query-services -a android.net.VpnService 2>/dev/null)"
     if [ -n "$out" ]; then
-      printf '%s\n' "$out" | sed -n 's/.*\([^[:space:]]\+\)\/.*/\1/p'
+      printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([^/[:space:]][^/]*\)\/.*/\1/p'
       return 0
     fi
   fi
   if has_cmd pm; then
     out="$(pm query-intent-services -a android.net.VpnService 2>/dev/null)"
     if [ -n "$out" ]; then
-      printf '%s\n' "$out" | sed -n 's/.*\([^[:space:]]\+\)\/.*/\1/p'
+      printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([^/[:space:]][^/]*\)\/.*/\1/p'
       return 0
     fi
   fi
@@ -675,7 +675,6 @@ EOF
     case "$seen" in *" $pkg "*) continue ;; esac
     seen="$seen$pkg "
     if cmd connectivity set-always-on-vpn "$pkg" true >/dev/null 2>&1; then
-      _ll_state_append "vpn_lockdown_enabled_pkgs" "$pkg"
       log "vpn_lockdown: enabled 'block connections without VPN' for provider $pkg"
       ok=1
     else
@@ -721,6 +720,7 @@ lowlevel_vpn_lockdown_release_if_needed() {
     esac
   fi
 
+  _ll_state_rm "vpn_lockdown_enabled_pkgs"
   _ll_state_set "vpn_lockdown_released" "1"
 }
 # ── Tethering control ──────────────────────────────────────────────────────────
@@ -1062,6 +1062,7 @@ lowlevel_prepare_environment() {
   _ll_state_rm "tether_was_active"
   _ll_state_rm "tether_ifaces_down"
   _ll_state_rm "ifaces_down"
+  _ll_state_rm "vpn_lockdown_enabled_pkgs"
   _ll_state_rm "vpn_lockdown_released"
 
   _ll_state_set "mode" "$mode"

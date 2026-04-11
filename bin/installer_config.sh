@@ -112,6 +112,18 @@ _ic_read_key() {
         | sed 's/[[:space:]]*#.*//' | tr -d '"'"'"'[:space:]'
 }
 
+# Read a KEY=value entry while preserving internal whitespace.
+# Trims inline comments, surrounding quotes, and surrounding whitespace only.
+_ic_read_key_preserve_ws() {
+    local key="$1" file="$2" raw
+    raw="$(grep "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2-)"
+    [ -n "$raw" ] || { printf ''; return 0; }
+    raw="$(printf '%s' "$raw" | sed 's/[[:space:]]*#.*//')"
+    raw="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    raw="$(printf '%s' "$raw" | sed 's/^"//; s/"$//; s/^'\''//; s/'\''$//')"
+    printf '%s' "$raw"
+}
+
 # ── Load existing config ───────────────────────────────────────────────────────
 # Read recognized config keys from a config.sh file into IC_* variables.
 # Only overwrites an IC_* variable if the key is present in the file.
@@ -155,7 +167,7 @@ ic_load_existing_config() {
     val=$(_ic_read_key VPN_LOCKDOWN_RELEASE_ON_RESTORE "$cfg_file")
     [ -n "$val" ] && IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE="$val"
 
-    val=$(_ic_read_key VPN_LOCKDOWN_PROVIDER_PACKAGES "$cfg_file")
+    val=$(_ic_read_key_preserve_ws VPN_LOCKDOWN_PROVIDER_PACKAGES "$cfg_file")
     [ -n "$val" ] && IC_VPN_LOCKDOWN_PROVIDER_PACKAGES="$val"
 
     val=$(_ic_read_key TIMEOUT_SECS "$cfg_file")
@@ -783,7 +795,7 @@ ic_write_config() {
 
 ic_render_summary() {
     local fwd_str in_str quiesce_str wifi_str data_str bt_str teth_str dbg_str
-    local auto_unblock_str unlock_gate_str
+    local auto_unblock_str unlock_gate_str vpn_boot_str vpn_release_str
 
     [ "${IC_ENABLE_FORWARD_BLOCK:-1}" = "1" ]       && fwd_str="enabled"    || fwd_str="disabled"
     [ "${IC_ENABLE_INPUT_BLOCK:-0}" = "1" ]          && in_str="enabled"     || in_str="disabled"
@@ -795,6 +807,8 @@ ic_render_summary() {
     [ "${IC_DEBUG:-0}" = "1" ]                       && dbg_str="enabled"    || dbg_str="disabled"
     [ "${IC_AUTO_TIMEOUT_UNBLOCK:-0}" = "1" ]        && auto_unblock_str="enabled"  || auto_unblock_str="DISABLED (safe default)"
     [ "${IC_TIMEOUT_UNLOCK_GATED:-1}" = "1" ]        && unlock_gate_str="yes"       || unlock_gate_str="no"
+    [ "${IC_VPN_LOCKDOWN_BOOT_ENFORCE:-1}" = "1" ]   && vpn_boot_str="enabled" || vpn_boot_str="disabled"
+    [ "${IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE:-1}" = "1" ] && vpn_release_str="enabled" || vpn_release_str="disabled"
 
     _ic_print ""
     _ic_print "  ── Configuration Summary ───────────────────────────"
@@ -807,8 +821,8 @@ ic_render_summary() {
     _ic_print "  Mobile data:           $data_str"
     _ic_print "  Bluetooth:             $bt_str"
     _ic_print "  Tethering:             $teth_str"
-    _ic_print "  VPN lockdown on boot:  ${IC_VPN_LOCKDOWN_BOOT_ENFORCE:-1}"
-    _ic_print "  VPN release restore:   ${IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE:-1}"
+    _ic_print "  VPN lockdown on boot:  $vpn_boot_str"
+    _ic_print "  VPN release restore:   $vpn_release_str"
     _ic_print "  AFWall timeout:        ${IC_TIMEOUT_SECS:-120}s"
     _ic_print "  Timeout policy:        ${IC_TIMEOUT_POLICY:-fail_closed}"
     _ic_print "  Auto timeout unblock:  $auto_unblock_str"
