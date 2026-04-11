@@ -10,6 +10,8 @@ MODULE_DATA="/data/adb/${MODULE_ID}"
 LOG_DIR="${MODULE_DATA}/logs"
 LOG_FILE="${LOG_DIR}/boot.log"
 STATE_DIR="${MODULE_DATA}/state"
+SERVICE_PID_FILE="${STATE_DIR}/aba_service.pid"
+SERVICE_PID_FILE_LEGACY="${STATE_DIR}/service.pid"
 
 # ── Module-owned chain names ───────────────────────────────────────────────────
 # Each traffic direction gets its own named chain so ownership is unambiguous.
@@ -1567,8 +1569,9 @@ radio_off_pending() {
 #   the next reboot (cleared by post-fs-data.sh).  Tells service.sh to stop the
 #   main loop and not repair blackout state.
 # stop_requested: written alongside manual_override; service.sh stops on either.
-# service.pid:    written by service.sh at startup; cleared on clean exit or by
-#   action.sh after signalling the process.
+# aba_service.pid: module-unique PID marker written by service.sh at startup;
+#   cleared on clean exit or by action.sh after ownership-validated signalling.
+# service.pid: legacy compatibility marker retained for older revisions.
 
 write_manual_override() {
   _init_dirs
@@ -1585,12 +1588,15 @@ write_stop_requested() {
 write_service_pid() {
   local pid="${1:-$$}"
   _init_dirs
-  printf '%s' "$pid" > "${STATE_DIR}/service.pid" 2>/dev/null || true
+  # Write a module-unique pid marker; also write legacy filename for
+  # compatibility with older module revisions/scripts.
+  printf '%s' "$pid" > "$SERVICE_PID_FILE" 2>/dev/null || true
+  printf '%s' "$pid" > "$SERVICE_PID_FILE_LEGACY" 2>/dev/null || true
   debug_log "write_service_pid: pid=$pid written"
 }
 
 remove_service_pid() {
-  rm -f "${STATE_DIR}/service.pid" 2>/dev/null || true
+  rm -f "$SERVICE_PID_FILE" "$SERVICE_PID_FILE_LEGACY" 2>/dev/null || true
   debug_log "remove_service_pid: service.pid removed"
 }
 
@@ -1607,20 +1613,40 @@ stop_requested_active() {
 # to avoid divergent cleanup behavior.
 #
 # recover_stop_service_loop:
-#   Best-effort stop of the background service loop using service.pid.
+#   Best-effort stop of the background service loop using module PID markers.
 #   Safe to call multiple times.
 recover_stop_service_loop() {
-  if [ -f "${STATE_DIR}/service.pid" ]; then
-    local _svc_pid
-    _svc_pid="$(cat "${STATE_DIR}/service.pid" 2>/dev/null)"
-    if [ -n "$_svc_pid" ] && kill -0 "$_svc_pid" 2>/dev/null; then
-      kill "$_svc_pid" 2>/dev/null || true
-      log "recover_stop_service_loop: service pid ${_svc_pid} signalled"
-    else
-      log "recover_stop_service_loop: service.pid present but process not running (pid=${_svc_pid:-empty})"
-    fi
-    rm -f "${STATE_DIR}/service.pid" 2>/dev/null || true
+  local _pid_file _svc_pid _cmdline
+
+  # Prefer unique pid filename; fall back to legacy path for compatibility.
+  if [ -f "$SERVICE_PID_FILE" ]; then
+    _pid_file="$SERVICE_PID_FILE"
+  elif [ -f "$SERVICE_PID_FILE_LEGACY" ]; then
+    _pid_file="$SERVICE_PID_FILE_LEGACY"
+  else
+    return 0
   fi
+
+  _svc_pid="$(cat "$_pid_file" 2>/dev/null)"
+  if [ -z "$_svc_pid" ] || ! kill -0 "$_svc_pid" 2>/dev/null; then
+    log "recover_stop_service_loop: pid file present but process not running (pid=${_svc_pid:-empty} file=$_pid_file)"
+    return 0
+  fi
+
+  # Ownership validation: only signal when cmdline indicates this module's
+  # service loop. This prevents killing unrelated processes if PID is reused.
+  _cmdline="$(tr '\0' ' ' < "/proc/${_svc_pid}/cmdline" 2>/dev/null)"
+  case "$_cmdline" in
+    *"/AFWall-Boot-AntiLeak/service.sh"*|*"${MODDIR}/service.sh"*)
+      kill "$_svc_pid" 2>/dev/null || true
+      log "recover_stop_service_loop: service pid ${_svc_pid} signalled (owner-confirmed)"
+      # Remove pid markers only after ownership is confirmed.
+      rm -f "$SERVICE_PID_FILE" "$SERVICE_PID_FILE_LEGACY" 2>/dev/null || true
+      ;;
+    *)
+      log "recover_stop_service_loop: PID ownership mismatch (pid=${_svc_pid} file=$_pid_file cmdline='${_cmdline:-unreadable}') — not signalling"
+      ;;
+  esac
 }
 
 # recover_connectivity:
@@ -1650,7 +1676,7 @@ recover_connectivity() {
   log "recover_connectivity[$origin]: complete"
 }
 
-# Remove manual_override and stop_requested markers (not service.pid).
+# Remove manual_override and stop_requested markers (not PID markers).
 # Called by post-fs-data.sh on boot start to clear stale state from a previous
 # boot where the user may have triggered manual recovery.
 clear_override_markers() {
