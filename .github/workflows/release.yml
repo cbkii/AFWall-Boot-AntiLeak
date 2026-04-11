@@ -124,7 +124,7 @@ jobs:
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Install dependencies
-        run: sudo apt-get install -y --no-install-recommends zip unzip python3
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends zip unzip python3
 
       - name: Read version metadata from module.prop
         id: meta
@@ -196,8 +196,8 @@ jobs:
           if [ "$CURRENT_VERSION" = "$RELEASE_VERSION" ] && [ "$CURRENT_CODE" = "$RELEASE_TAG" ]; then
             NEEDS_BUMP=false
           else
-            if [ "$RELEASE_TAG" -le "$CURRENT_CODE" ]; then
-              echo "::error::Release tag/versionCode $RELEASE_TAG is not greater than current $CURRENT_CODE."
+            if [ "$RELEASE_TAG" -lt "$CURRENT_CODE" ]; then
+              echo "::error::Release tag/versionCode $RELEASE_TAG is less than current $CURRENT_CODE. Use a higher versionCode to publish a newer release."
               exit 1
             fi
             NEEDS_BUMP=true
@@ -334,8 +334,10 @@ jobs:
           # Resolve HEAD after all bump/sync commits so the tag targets the exact
           # commit that contains the released code.
           TARGET_COMMIT="$(git rev-parse HEAD)"
-          if git rev-parse --verify "$RELEASE_TAG" >/dev/null 2>&1; then
-            TAG_COMMIT="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          # Use the full refs/tags/ path so a branch that happens to share the
+          # numeric tag name cannot produce a false positive.
+          if git rev-parse --verify "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            TAG_COMMIT="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
             if [ "$TAG_COMMIT" = "$TARGET_COMMIT" ]; then
               echo "Tag $RELEASE_TAG already exists and points to the correct commit ($TAG_COMMIT)."
             elif [ "$FORCE_RETAG" = "true" ]; then
