@@ -319,10 +319,10 @@
 
   # One-time diagnostic flag: set when all family blocks are released but
   # transport restore is still pending, to avoid logging this every poll.
-  _family_handoff_logged=0
   _wifi_restore_logged=0
   _mobile_restore_logged=0
   _finalize_defer_logged=0
+  _finalize_cleanup_done=0
 
   # ── Unlock state for timeout gating ────────────────────────────────────────
   device_unlocked=0
@@ -752,33 +752,7 @@
            [ "$device_unlocked" = "1" ]; then
           # ── Timeout: unblock policy (user opted in, device unlocked) ──────
           log "service: TIMEOUT: unblocking per AUTO_TIMEOUT_UNBLOCK=1 + TIMEOUT_POLICY=unblock"
-          if [ "$v4_done" = "0" ] || [ "$v4_released" = "0" ]; then
-            log "service: TIMEOUT v4: removing block"
-            _log_pre_remove_integrity_v4 "timeout"
-            log_transition_snapshot "v4" "timeout_unblock"
-            remove_output_block_v4
-            if [ -f "${STATE_DIR}/ipv4_fwd_active" ] || forward_block_present_v4; then
-              remove_forward_block_v4
-            fi
-            if [ -f "${STATE_DIR}/ipv4_in_active" ] || input_block_present_v4; then
-              remove_input_block_v4
-            fi
-          fi
-          if [ "$v6_done" = "0" ] || [ "$v6_released" = "0" ]; then
-            log "service: TIMEOUT v6: removing block"
-            _log_pre_remove_integrity_v6 "timeout"
-            log_transition_snapshot "v6" "timeout_unblock"
-            remove_output_block_v6
-            if [ -f "${STATE_DIR}/ipv6_fwd_active" ] || forward_block_present_v6; then
-              remove_forward_block_v6
-            fi
-            if [ -f "${STATE_DIR}/ipv6_in_active" ] || input_block_present_v6; then
-              remove_input_block_v6
-            fi
-          fi
-          rm -f "${STATE_DIR}/block_installed" 2>/dev/null || true
-          clear_blackout_active
-          lowlevel_restore_changed_state
+          recover_connectivity "service-timeout-unblock" "0"
           log "service: TIMEOUT: networking restored (unblock policy after unlock)"
           log "service: TIMEOUT: timeout unblock triggered — stop flag set, loop exiting"
         else
@@ -1083,26 +1057,24 @@
     [ "$v4_blocked" = "1" ] && [ "$v4_released" = "0" ] && _v4_complete=0
     [ "$v6_blocked" = "1" ] && [ "$v6_released" = "0" ] && _v6_complete=0
 
-    # Log once if family blocks are released but transport restore is still pending.
-    if [ "$_v4_complete" = "1" ] && [ "$_v6_complete" = "1" ] && \
-       { [ "$wifi_done" = "0" ] || [ "$mobile_done" = "0" ]; } && \
-       [ "$_family_handoff_logged" = "0" ]; then
-      log "service: family handoff complete but transport restore still pending (wifi=${wifi_done} mobile=${mobile_done})"
-      _family_handoff_logged=1
-    fi
+    if [ "$_v4_complete" = "1" ] && [ "$_v6_complete" = "1" ]; then
+      if [ "$wifi_done" = "0" ] || [ "$mobile_done" = "0" ]; then
+        log "service: family handoff complete; transport gates not fully satisfied (wifi=${wifi_done} mobile=${mobile_done})"
+      else
+        log "service: handoff complete (v4=${v4_path:-skipped} v6=${v6_path:-skipped} wifi=done mobile=done)"
+      fi
 
-    if [ "$_v4_complete" = "1" ] && [ "$_v6_complete" = "1" ] && \
-       [ "$wifi_done" = "1" ] && [ "$mobile_done" = "1" ]; then
-      log "service: handoff complete (v4=${v4_path:-skipped} v6=${v6_path:-skipped} wifi=done mobile=done)"
-      rm -f "${STATE_DIR}/block_installed" 2>/dev/null || true
-      clear_blackout_active
+      # Finalize in verified mode: remove module-owned blocks first, then use
+      # verified lowlevel restore helpers (with retry loop) so we do not clear
+      # markers on command-ack alone.
+      if [ "$_finalize_cleanup_done" = "0" ]; then
+        clear_blackout_active
+        rm -f "${STATE_DIR}/block_installed" "${STATE_DIR}/radio_off_pending" 2>/dev/null || true
+        remove_block
+        cleanup_legacy "service-finalize"
+        _finalize_cleanup_done=1
+      fi
 
-      # Stage E: restore remaining lower-layer state not yet restored by
-      # transport-specific helpers.
-      # Wi-Fi and mobile data are restored here for the case where transport
-      # gating was bypassed (AFWALL_GATE=0 or service not suppressed) — the
-      # transport-specific helper calls inside _check_transport_readiness would
-      # have been skipped if wifi_done/mobile_done started as 1.
       lowlevel_restore_wifi_if_allowed || \
         debug_log "service: Wi-Fi restore not yet confirmed at finalize"
       lowlevel_restore_mobile_data_if_allowed || \
@@ -1112,7 +1084,7 @@
         _ll_state_exists "wifi_was_enabled" && _wifi_marker=1
         _ll_state_exists "data_was_enabled" && _mobile_marker=1
         if [ "$_finalize_defer_logged" = "0" ]; then
-          log "service: finalization deferred: restore markers remain (wifi=${_wifi_marker} mobile=${_mobile_marker})"
+          log "service: finalization deferred: verified restore pending (wifi=${_wifi_marker} mobile=${_mobile_marker})"
           _finalize_defer_logged=1
         else
           debug_log "service: finalization still deferred (wifi=${_wifi_marker} mobile=${_mobile_marker})"

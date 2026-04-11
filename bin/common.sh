@@ -10,6 +10,7 @@ MODULE_DATA="/data/adb/${MODULE_ID}"
 LOG_DIR="${MODULE_DATA}/logs"
 LOG_FILE="${LOG_DIR}/boot.log"
 STATE_DIR="${MODULE_DATA}/state"
+SERVICE_PID_FILE="${STATE_DIR}/aba_service.pid"
 
 # ── Module-owned chain names ───────────────────────────────────────────────────
 # Each traffic direction gets its own named chain so ownership is unambiguous.
@@ -51,9 +52,28 @@ debug_log() {
 # ── Command discovery ──────────────────────────────────────────────────────────
 # Returns the full path of a command, checking PATH first then known locations.
 _find_cmd() {
-  local name="$1" p
+  local name="$1" p _cache_key _cached
+  # Command names used in this module are simple tool identifiers; guard to
+  # avoid unsafe eval variable construction for unexpected input.
+  case "$name" in
+    *[!A-Za-z0-9_+-]*|'') ;;
+    *)
+      _cache_key="_CMD_CACHE_${name}"
+      eval "_cached=\${${_cache_key}:-}"
+      if [ -n "$_cached" ] && [ -x "$_cached" ]; then
+        printf '%s' "$_cached"
+        return 0
+      fi
+      ;;
+  esac
+
   if command -v "$name" >/dev/null 2>&1; then
-    command -v "$name"
+    p="$(command -v "$name")"
+    case "$name" in
+      *[!A-Za-z0-9_+-]*|'') ;;
+      *) eval "${_cache_key}=\"\$p\"" ;;
+    esac
+    printf '%s' "$p"
     return 0
   fi
   for p in \
@@ -63,6 +83,10 @@ _find_cmd() {
     "/data/adb/magisk/${name}" \
     "/data/adb/ksu/bin/${name}"; do
     if [ -x "$p" ]; then
+      case "$name" in
+        *[!A-Za-z0-9_+-]*|'') ;;
+        *) eval "${_cache_key}=\"\$p\"" ;;
+      esac
       printf '%s' "$p"
       return 0
     fi
@@ -79,6 +103,10 @@ has_cmd() { _find_cmd "$1" >/dev/null 2>&1; }
 # persistent override at MODULE_DATA/config.sh takes precedence over defaults
 # and survives module updates.
 load_config() {
+  # Config is static for a given boot/session. Avoid repeated filesystem reads
+  # in hot paths (post-fs-data/service loops) by loading once per process.
+  [ "${_MODULE_CFG_LOADED:-0}" = "1" ] && return 0
+
   local cfg loaded=0
   # Load built-in defaults from the module directory first.
   cfg="${MODDIR:-}/config.sh"
@@ -95,6 +123,7 @@ load_config() {
     loaded=1
   fi
   [ "$loaded" = "0" ] && debug_log "config: no config files found; using built-in defaults"
+  _MODULE_CFG_LOADED=1
   return 0
 }
 
@@ -1539,8 +1568,8 @@ radio_off_pending() {
 #   the next reboot (cleared by post-fs-data.sh).  Tells service.sh to stop the
 #   main loop and not repair blackout state.
 # stop_requested: written alongside manual_override; service.sh stops on either.
-# service.pid:    written by service.sh at startup; cleared on clean exit or by
-#   action.sh after signalling the process.
+# aba_service.pid: module-unique PID marker written by service.sh at startup;
+#   cleared on clean exit or by action.sh after ownership-validated signalling.
 
 write_manual_override() {
   _init_dirs
@@ -1557,13 +1586,14 @@ write_stop_requested() {
 write_service_pid() {
   local pid="${1:-$$}"
   _init_dirs
-  printf '%s' "$pid" > "${STATE_DIR}/service.pid" 2>/dev/null || true
+  # Write module-unique pid marker.
+  printf '%s' "$pid" > "$SERVICE_PID_FILE" 2>/dev/null || true
   debug_log "write_service_pid: pid=$pid written"
 }
 
 remove_service_pid() {
-  rm -f "${STATE_DIR}/service.pid" 2>/dev/null || true
-  debug_log "remove_service_pid: service.pid removed"
+  rm -f "$SERVICE_PID_FILE" 2>/dev/null || true
+  debug_log "remove_service_pid: pid marker removed"
 }
 
 manual_override_active() {
@@ -1574,7 +1604,71 @@ stop_requested_active() {
   [ -f "${STATE_DIR}/stop_requested" ]
 }
 
-# Remove manual_override and stop_requested markers (not service.pid).
+# ── Shared connectivity recovery helpers ──────────────────────────────────────
+# Used by action.sh (manual recovery) and service.sh (automatic final restore)
+# to avoid divergent cleanup behavior.
+#
+# recover_stop_service_loop:
+#   Best-effort stop of the background service loop using module PID markers.
+#   Safe to call multiple times.
+recover_stop_service_loop() {
+  local _svc_pid _cmdline
+  [ -s "$SERVICE_PID_FILE" ] || return 0
+
+  _svc_pid="$(cat "$SERVICE_PID_FILE" 2>/dev/null)"
+  if [ -z "$_svc_pid" ]; then
+    log "recover_stop_service_loop: PID file empty/unreadable ($SERVICE_PID_FILE)"
+    return 0
+  fi
+
+  # Ownership validation: only signal when cmdline indicates this module's
+  # service loop. This prevents killing unrelated processes if PID is reused.
+  kill -0 "$_svc_pid" 2>/dev/null || {
+    log "recover_stop_service_loop: PID not running (pid=${_svc_pid})"
+    return 0
+  }
+  _cmdline="$(tr '\0' ' ' < "/proc/${_svc_pid}/cmdline" 2>/dev/null)"
+  case "$_cmdline" in
+    *"/AFWall-Boot-AntiLeak/service.sh"*|*"${MODDIR}/service.sh"*)
+      kill "$_svc_pid" 2>/dev/null || true
+      log "recover_stop_service_loop: service pid ${_svc_pid} signalled (owner-confirmed)"
+      # Remove pid markers only after ownership is confirmed.
+      rm -f "$SERVICE_PID_FILE" 2>/dev/null || true
+      ;;
+    *)
+      log "recover_stop_service_loop: PID ownership mismatch (pid=${_svc_pid} file=$SERVICE_PID_FILE cmdline='${_cmdline:-unreadable}') — not signalling"
+      ;;
+  esac
+}
+
+# recover_connectivity:
+#   Canonical connectivity restoration path.
+#   Arguments:
+#     $1 origin label for logs (e.g. "action", "service-finalize")
+#     $2 manual_mode: 1 => latch manual override markers, 0 => do not
+recover_connectivity() {
+  local origin="${1:-unknown}" manual_mode="${2:-0}"
+
+  if [ "$manual_mode" = "1" ]; then
+    write_manual_override
+    write_stop_requested
+    log "recover_connectivity[$origin]: manual override latched"
+  fi
+
+  clear_blackout_active
+  rm -f "${STATE_DIR}/block_installed" "${STATE_DIR}/radio_off_pending" 2>/dev/null || true
+
+  # Remove all module-owned firewall protections (idempotent).
+  remove_block
+  # Use the proven emergency restore path so recovery behavior is identical
+  # between manual action and automatic paths.
+  lowlevel_emergency_restore
+  cleanup_legacy "$origin"
+
+  log "recover_connectivity[$origin]: complete"
+}
+
+# Remove manual_override and stop_requested markers (not PID markers).
 # Called by post-fs-data.sh on boot start to clear stale state from a previous
 # boot where the user may have triggered manual recovery.
 clear_override_markers() {
