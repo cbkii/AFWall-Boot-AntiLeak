@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v3.0.1 - Lower-layer suppression subsystem
+# AFWall Boot AntiLeak v3.1.0 - Lower-layer suppression subsystem
 # POSIX/ash compatible. No bashisms. Sourced by common.sh; do not execute directly.
 #
 # PURPOSE
