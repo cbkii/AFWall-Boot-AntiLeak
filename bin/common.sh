@@ -1,11 +1,11 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v2.6 - Common library
+# AFWall Boot AntiLeak v3.0.1 - Common library
 # POSIX/ash compatible. No bashisms. Sourced by all module scripts; do not
 # execute directly.
 
 # ── Module identity ────────────────────────────────────────────────────────────
 MODULE_ID="AFWall-Boot-AntiLeak"
-MODULE_VERSION="v2.6"
+MODULE_VERSION="v3.0.1"
 MODULE_DATA="/data/adb/${MODULE_ID}"
 LOG_DIR="${MODULE_DATA}/logs"
 LOG_FILE="${LOG_DIR}/boot.log"
@@ -26,19 +26,24 @@ CHAIN_FWD_V6="MOD_PRE_AFW_FWD_V6"
 CHAIN_IN_V4="MOD_PRE_AFW_IN"
 CHAIN_IN_V6="MOD_PRE_AFW_IN_V6"
 
-# Backward-compatibility aliases used by legacy cleanup paths
-CHAIN_V4="MOD_PRE_AFW"
-CHAIN_V6="MOD_PRE_AFW_V6"
-
 # ── Directory bootstrap ────────────────────────────────────────────────────────
+_DIRS_INIT=0
 _init_dirs() {
+  [ "$_DIRS_INIT" = "1" ] && return 0
   mkdir -p "$LOG_DIR" "$STATE_DIR" 2>/dev/null || true
   chmod 700 "$MODULE_DATA" "$LOG_DIR" "$STATE_DIR" 2>/dev/null || true
+  _DIRS_INIT=1
 }
 
 # ── Logging ────────────────────────────────────────────────────────────────────
+_LOG_FILE_INIT=0
 log() {
   _init_dirs
+  if [ "$_LOG_FILE_INIT" = "0" ]; then
+    touch "$LOG_FILE" 2>/dev/null || true
+    chmod 600 "$LOG_FILE" 2>/dev/null || true
+    _LOG_FILE_INIT=1
+  fi
   printf '[%s] %s\n' \
     "$(date +'%F %T' 2>/dev/null || printf 'unknown-time')" \
     "$*" >> "$LOG_FILE" 2>/dev/null || true
@@ -53,10 +58,10 @@ debug_log() {
 # Returns the full path of a command, checking PATH first then known locations.
 _find_cmd() {
   local name="$1" p _cache_key _cached
-  # Command names used in this module are simple tool identifiers; guard to
-  # avoid unsafe eval variable construction for unexpected input.
+  # Variable names may only contain [A-Za-z0-9_]; guard to prevent eval
+  # constructing syntactically invalid variable names (e.g. with - or +).
   case "$name" in
-    *[!A-Za-z0-9_+-]*|'') ;;
+    *[!A-Za-z0-9_]*|'') ;;
     *)
       _cache_key="_CMD_CACHE_${name}"
       eval "_cached=\${${_cache_key}:-}"
@@ -70,7 +75,7 @@ _find_cmd() {
   if command -v "$name" >/dev/null 2>&1; then
     p="$(command -v "$name")"
     case "$name" in
-      *[!A-Za-z0-9_+-]*|'') ;;
+      *[!A-Za-z0-9_]*|'') ;;
       *) eval "${_cache_key}=\"\$p\"" ;;
     esac
     printf '%s' "$p"
@@ -84,7 +89,7 @@ _find_cmd() {
     "/data/adb/ksu/bin/${name}"; do
     if [ -x "$p" ]; then
       case "$name" in
-        *[!A-Za-z0-9_+-]*|'') ;;
+        *[!A-Za-z0-9_]*|'') ;;
         *) eval "${_cache_key}=\"\$p\"" ;;
       esac
       printf '%s' "$p"
@@ -794,65 +799,6 @@ resolve_afwall_pkg() {
   return 1
 }
 
-# Check that AFWall's main 'afwall' chain exists AND is jumped to from OUTPUT.
-# This is the documented signal that AFWall has fully applied its rules.
-# Once OUTPUT is confirmed, AFWall has also installed any FORWARD/INPUT rules
-# it needs based on user configuration (tether, LAN, VPN, roaming controls).
-# The settle delay in service.sh gives additional time for all per-app rules.
-afwall_rules_present_v4() {
-  local ipt
-  ipt="$(_find_cmd iptables)" || return 1
-  "$ipt" -S 2>/dev/null | grep -qE "^-N ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
-  "$ipt" -S OUTPUT 2>/dev/null | grep -qE "^-A OUTPUT .*-j ${AFWALL_CHAIN_MAIN}"'($| )'
-}
-
-afwall_rules_present_v6() {
-  local ip6t
-  ip6t="$(_find_cmd ip6tables)" || return 1
-  "$ip6t" -S 2>/dev/null | grep -qE "^-N ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
-  "$ip6t" -S OUTPUT 2>/dev/null | grep -qE "^-A OUTPUT .*-j ${AFWALL_CHAIN_MAIN}"'($| )'
-}
-
-afwall_rules_present() {
-  afwall_rules_present_v4 && return 0
-  afwall_rules_present_v6 && return 0
-  return 1
-}
-
-# ── Stronger per-family takeover detection ─────────────────────────────────────
-# These functions are stricter than afwall_rules_present_v4/v6: they additionally
-# verify that the afwall chain is explicitly in the filter table (not raw), that
-# the OUTPUT hook uses the filter table, and that the afwall chain contains at
-# least one rule (non-trivial — not just a bare chain creation).
-#
-# Why stronger detection matters:
-#   - Custom scripts may create partial chains that do not constitute full takeover.
-#   - Stale/mid-apply state produces a chain but no rules yet.
-#   - Requiring at least one rule guards against a chain-only intermediate state.
-#   - The stability window in service.sh then ensures the rule graph is settled.
-afwall_takeover_present_v4() {
-  local ipt count
-  ipt="$(_find_cmd iptables)" || return 1
-  # Chain must exist in filter table (AFWall's primary table for app rules).
-  _chain_exists "$ipt" filter "$AFWALL_CHAIN_MAIN" || return 1
-  # OUTPUT must hook into the main chain in the filter table.
-  "$ipt" -t filter -S OUTPUT 2>/dev/null | grep -qE "^-A OUTPUT .*-j ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
-  # Chain must contain at least one rule — guards against bare chain creation.
-  count="$("$ipt" -t filter -S "$AFWALL_CHAIN_MAIN" 2>/dev/null | grep -c '^-A ')" || count=0
-  [ "${count:-0}" -ge 1 ] || return 1
-  return 0
-}
-
-afwall_takeover_present_v6() {
-  local ip6t count
-  ip6t="$(_find_cmd ip6tables)" || return 1
-  _chain_exists "$ip6t" filter "$AFWALL_CHAIN_MAIN" || return 1
-  "$ip6t" -t filter -S OUTPUT 2>/dev/null | grep -qE "^-A OUTPUT .*-j ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
-  count="$("$ip6t" -t filter -S "$AFWALL_CHAIN_MAIN" 2>/dev/null | grep -c '^-A ')" || count=0
-  [ "${count:-0}" -ge 1 ] || return 1
-  return 0
-}
-
 # ── Coherent filter-table snapshot capture ────────────────────────────────────
 # Captures the entire filter table as a single consistent string by reading it
 # in one operation.  All subsequent per-poll checks derive from this snapshot
@@ -997,57 +943,6 @@ afwall_prefix_reachable_from_snapshot() {
     | grep -qE "^-A afwall[^ ]* .*-j ${prefix}" 2>/dev/null
 }
 
-# ── Full AFWall graph fingerprint signatures (snapshot-backed wrappers) ────────
-# These replace the old weak "rule_count:chain_count" signatures with full
-# graph fingerprints derived from coherent per-call snapshots.  They are kept
-# as convenience wrappers for callers that do not manage their own snapshots
-# (e.g. diagnostic tools, action.sh).  The service.sh hot path captures its
-# own snapshot and calls afwall_graph_fingerprint_from_snapshot() directly.
-afwall_takeover_signature_v4() {
-  local snap
-  snap="$(capture_filter_snapshot_v4 2>/dev/null)" || { printf 'na'; return 1; }
-  afwall_graph_fingerprint_from_snapshot "$snap"
-}
-
-afwall_takeover_signature_v6() {
-  local snap
-  snap="$(capture_filter_snapshot_v6 2>/dev/null)" || { printf 'na'; return 1; }
-  afwall_graph_fingerprint_from_snapshot "$snap"
-}
-
-# ── AFWall rule-graph stability signatures ────────────────────────────────────
-# NOTE: These transport signature helpers are retained for external callers.
-# The service.sh hot path uses afwall_transport_fingerprint_from_snapshot().
-
-_afwall_transport_signature() {
-  local snap="$1" prefix="$2"
-  afwall_transport_fingerprint_from_snapshot "$snap" "$prefix"
-}
-
-afwall_wifi_signature_v4() {
-  local snap
-  snap="$(capture_filter_snapshot_v4 2>/dev/null)" || { printf 'na'; return 1; }
-  afwall_transport_fingerprint_from_snapshot "$snap" "$AFWALL_CHAIN_WIFI"
-}
-
-afwall_wifi_signature_v6() {
-  local snap
-  snap="$(capture_filter_snapshot_v6 2>/dev/null)" || { printf 'na'; return 1; }
-  afwall_transport_fingerprint_from_snapshot "$snap" "$AFWALL_CHAIN_WIFI"
-}
-
-afwall_mobile_signature_v4() {
-  local snap
-  snap="$(capture_filter_snapshot_v4 2>/dev/null)" || { printf 'na'; return 1; }
-  afwall_transport_fingerprint_from_snapshot "$snap" "$AFWALL_CHAIN_MOBILE"
-}
-
-afwall_mobile_signature_v6() {
-  local snap
-  snap="$(capture_filter_snapshot_v6 2>/dev/null)" || { printf 'na'; return 1; }
-  afwall_transport_fingerprint_from_snapshot "$snap" "$AFWALL_CHAIN_MOBILE"
-}
-
 # ── Boot-completion probes ────────────────────────────────────────────────────
 # These helpers expose fast, property-based signals that indicate the Android
 # framework has reached a well-known boot milestone.  They are intentionally
@@ -1070,32 +965,6 @@ sys_boot_completed() {
 
 boot_animation_stopped() {
   [ "$(getprop init.svc.bootanim 2>/dev/null)" = "stopped" ]
-}
-
-# ── AFWall rule-density heuristic ─────────────────────────────────────────────
-# Returns 0 (success) when the afwall filter chain contains at least MIN rules.
-# A "dense" chain provides stronger evidence that AFWall has completed a full
-# rule application cycle (not just created the chain or added a single default
-# rule).  Combined with sys.boot_completed, this is used as an independent
-# confirmation path that does not require observing the AFWall process.
-#
-# min: minimum rule count (caller supplies; defaults to 3 when called without
-#      an argument — three rules is a conservative minimum that rules out bare
-#      chain creation and partial initialisation states).
-afwall_rules_dense_v4() {
-  local min="${1:-3}" ipt count
-  ipt="$(_find_cmd iptables)" || return 1
-  _chain_exists "$ipt" filter "$AFWALL_CHAIN_MAIN" || return 1
-  count="$("$ipt" -t filter -S "$AFWALL_CHAIN_MAIN" 2>/dev/null | grep -c '^-A ')" || count=0
-  [ "${count:-0}" -ge "$min" ]
-}
-
-afwall_rules_dense_v6() {
-  local min="${1:-3}" ip6t count
-  ip6t="$(_find_cmd ip6tables)" || return 1
-  _chain_exists "$ip6t" filter "$AFWALL_CHAIN_MAIN" || return 1
-  count="$("$ip6t" -t filter -S "$AFWALL_CHAIN_MAIN" 2>/dev/null | grep -c '^-A ')" || count=0
-  [ "${count:-0}" -ge "$min" ]
 }
 
 # ── Snapshot-based rule density check ────────────────────────────────────────
@@ -1170,7 +1039,7 @@ afwall_secondary_evidence_present() {
     # the reference — AFWall updates these dirs when applying rules.
     for subdir in "shared_prefs" "databases"; do
       [ -d "${dir}/${subdir}" ] || continue
-      find "${dir}/${subdir}" -newer "$ref" 2>/dev/null | grep -q '.' && return 0
+      find "${dir}/${subdir}" -newer "$ref" 2>/dev/null | head -c1 | grep -q '.' && return 0
     done
   done
   return 1
@@ -1230,24 +1099,6 @@ log_transition_snapshot() {
   log "snapshot[$phase]: $family mod_out=$chain_out mod_fwd=$chain_fwd mod_in=$chain_in afw_chain=$afw_chain afw_hook=$afw_hook afw_rules=$afw_rules"
 }
 
-# Supplementary diagnostic: check whether AFWall has set up its FORWARD hook.
-# Returns 0 if AFWall's FORWARD -j afwall jump exists (tether control active).
-# Not used as a release gate; informational only.
-afwall_forward_hook_present() {
-  local ipt
-  ipt="$(_find_cmd iptables)" || return 1
-  "$ipt" -t filter -S FORWARD 2>/dev/null | grep -qE "^-A FORWARD .*-j ${AFWALL_CHAIN_MAIN}"'($| )'
-}
-
-# Supplementary diagnostic: check whether AFWall has set up its INPUT hook.
-# Returns 0 if AFWall's INPUT -j afwall jump exists (INPUT chain control active).
-# Not used as a release gate; informational only.
-afwall_input_hook_present() {
-  local ipt
-  ipt="$(_find_cmd iptables)" || return 1
-  "$ipt" -t filter -S INPUT 2>/dev/null | grep -qE "^-A INPUT .*-j ${AFWALL_CHAIN_MAIN}"'($| )'
-}
-
 # Detect AFWall's built-in startup leak protection (the "Fix Startup Data Leak"
 # preference, stored as fixLeak=true in AFWall prefs).
 #
@@ -1262,11 +1113,9 @@ afwall_input_hook_present() {
 #     protection; all its chains live in the filter table and are installed
 #     only when FirewallService applies rules (after Zygote and framework start)
 #
-# This function returns 0 if evidence of AFWall's startup script is found.
-# It also returns 0 if AFWall's filter-table chains are already present,
-# which indicates AFWall is currently running (relevant for service.sh context).
-afwall_startup_protection_active() {
-  # Primary check: look for an afwallstart script that is NOT module-owned.
+# Returns 0 if an AFWall-owned afwallstart script is found in any checked path.
+# Used only during post-fs-data (install-time) to decide integration mode.
+afwall_has_startup_script() {
   local f
   for f in \
     "/etc/init.d/afwallstart" \
@@ -1278,25 +1127,12 @@ afwall_startup_protection_active() {
     # Do not count our own legacy artifact as AFWall protection.
     if grep -qE 'AFW-ANTILEAK|AFWall-?Boot-?AntiLeak|sys\.afw\.policy\.drop' \
         "$f" 2>/dev/null; then
-      debug_log "afwall_startup_protection: skipping module-owned $f"
+      debug_log "afwall_has_startup_script: skipping module-owned $f"
       continue
     fi
-    debug_log "afwall_startup_protection: found afwallstart script at $f"
+    debug_log "afwall_has_startup_script: found afwallstart script at $f"
     return 0
   done
-
-  # Secondary check: AFWall's filter-table chains (indicates AFWall is running).
-  # Useful when called from service.sh context after AFWall has started.
-  local cmd t c
-  for cmd in iptables ip6tables; do
-    c="$(_find_cmd "$cmd" 2>/dev/null)" || continue
-    if _table_available "$c" filter && \
-       "$c" -t filter -S 2>/dev/null | grep -qE "^-N ${AFWALL_CHAIN_MAIN}"'($| )'; then
-      debug_log "afwall_startup_protection: found afwall filter chain ($cmd)"
-      return 0
-    fi
-  done
-
   return 1
 }
 
@@ -1347,7 +1183,7 @@ afwall_process_present() {
 #
 # Integration mode behaviour during post-fs-data:
 #   At post-fs-data stage iptables is clean (flushed on reboot).  AFWall's
-#   filter chains do NOT exist yet, so afwall_startup_protection_active() can
+#   filter chains do NOT exist yet, so afwall_has_startup_script() can
 #   only detect AFWall's afwallstart init.d/su.d scripts (rare on Android 8+).
 #   Because of this, prefer_afwall will DEFER only when an AFWall-owned
 #   afwallstart script is present; otherwise it installs the module block just
@@ -1374,19 +1210,19 @@ setup_integration_mode() {
       printf 'off' > "${STATE_DIR}/integration_mode" 2>/dev/null || true
       ;;
     prefer_afwall)
-      if afwall_startup_protection_active; then
-        log "integration: prefer_afwall; AFWall startup chains detected; deferring to AFWall"
+      if afwall_has_startup_script; then
+        log "integration: prefer_afwall; AFWall startup script detected; deferring to AFWall"
         printf 'prefer_afwall_deferred' > "${STATE_DIR}/integration_mode" 2>/dev/null || true
       else
-        log "integration: prefer_afwall; no AFWall startup chains found; using module block"
+        log "integration: prefer_afwall; no AFWall startup script found; using module block"
         printf 'prefer_afwall' > "${STATE_DIR}/integration_mode" 2>/dev/null || true
       fi
       ;;
     auto)
-      if afwall_startup_protection_active; then
-        log "integration: auto; AFWall startup chains present; module block will supplement"
+      if afwall_has_startup_script; then
+        log "integration: auto; AFWall startup script present; module block will supplement"
       else
-        log "integration: auto; no AFWall startup chains; module block is sole protection"
+        log "integration: auto; no AFWall startup script; module block is sole protection"
       fi
       printf 'auto' > "${STATE_DIR}/integration_mode" 2>/dev/null || true
       ;;
@@ -1411,33 +1247,14 @@ should_install_block() {
 }
 
 # ── Legacy cleanup ─────────────────────────────────────────────────────────────
-# Remove hard-drop raw-table chains left by older module variants ONLY.
-# CRITICAL: Must NEVER remove the current active chain names:
-#   MOD_PRE_AFW, MOD_PRE_AFW_V6, MOD_PRE_AFW_FWD, MOD_PRE_AFW_FWD_V6,
-#   MOD_PRE_AFW_IN, MOD_PRE_AFW_IN_V6.
-#
-# These ARE the current blackout chains installed by post-fs-data and must not
-# be touched during the service phase.  Restrict this function to truly legacy
-# (retired) chain names from older module versions only.
-#
-# Note: No separate legacy chain names are currently known (the chain names
-# have been stable since v2.0).  The loop is intentionally empty so that no
-# current active chain can be silently removed by a legacy-cleanup call.
-# If a genuinely retired chain name is discovered in the future, add it here.
-remove_legacy_raw_drop() {
-  # No truly legacy (retired) chain names are currently known.  The current
-  # active chain names (MOD_PRE_AFW, MOD_PRE_AFW_V6, MOD_PRE_AFW_FWD,
-  # MOD_PRE_AFW_FWD_V6, MOD_PRE_AFW_IN, MOD_PRE_AFW_IN_V6) must NEVER appear
-  # here, as they are the live blackout chains installed by post-fs-data.
-  # If a genuinely retired chain name is discovered in the future, add a
-  # removal block for it here (and ONLY for names that are no longer created).
-  debug_log "remove_legacy_raw_drop: complete (no retired chain names to clean)"
-  return 0
-}
-
-# Remove legacy afwallstart scripts only if they carry a known module marker.
-# Covers every path that v1.x variants have been observed to use.
-remove_legacy_afwallstart() {
+# Remove legacy afwallstart scripts installed by v1.x variants, identified by
+# a known module marker.  Current active chain names (MOD_PRE_AFW*) are never
+# touched here — they are managed exclusively by post-fs-data and remove_block.
+# When called during the service phase (cleanup_legacy), iptables chains are
+# left untouched; scripts are the only thing removed.
+cleanup_legacy() {
+  local phase="${1:-unknown}"
+  log "cleanup_legacy: phase=$phase"
   local f
   for f in \
     "/data/adb/service.d/afwallstart" \
@@ -1453,23 +1270,8 @@ remove_legacy_afwallstart() {
   return 0
 }
 
-cleanup_legacy() {
-  local phase="${1:-unknown}"
-  log "cleanup_legacy: phase=$phase (chains + scripts)"
-  remove_legacy_raw_drop
-  remove_legacy_afwallstart
-  return 0
-}
-
-# Restricted legacy cleanup: remove only legacy startup scripts; never touches
-# any iptables chains.  Use this during the service phase so that the current
-# active OUTPUT blackout chains installed by post-fs-data are NOT disturbed.
-cleanup_legacy_scripts_only() {
-  local phase="${1:-unknown}"
-  log "cleanup_legacy_scripts_only: phase=$phase (scripts only; chains untouched)"
-  remove_legacy_afwallstart
-  return 0
-}
+# Alias kept for callers that previously used the scripts-only variant.
+cleanup_legacy_scripts_only() { cleanup_legacy "$1"; }
 
 # ── Transport-specific AFWall chain detection ──────────────────────────────────
 # AFWall+ creates dedicated sub-chains for each transport type:
@@ -1477,9 +1279,9 @@ cleanup_legacy_scripts_only() {
 #   afwall-3g     — mobile data rules
 # These are created only when AFWall has been configured with per-transport rules.
 #
-# The snapshot-based helpers below are the authoritative readiness checks used
-# by the service.sh hot path.  The legacy _afwall_transport_chain_ready() is
-# preserved only for external callers that do not manage their own snapshot.
+# _afwall_transport_chain_ready_from_snapshot() is the authoritative readiness
+# check used by the service.sh hot path.  It derives from the per-poll coherent
+# snapshot captured once per loop iteration.
 
 # Generic snapshot-based transport readiness: chain exists with at least one
 # rule AND is reachable from the active AFWall graph.  Existence alone is not
@@ -1497,47 +1299,6 @@ _afwall_transport_chain_ready_from_snapshot() {
   return 0
 }
 
-# Legacy single-call helper (captures own snapshot; less efficient).
-# Retained for external callers (e.g., action.sh) and diagnostic use.
-_afwall_transport_chain_ready() {
-  local cmd="$1" chain="$2" snap
-  [ -x "$cmd" ] || return 1
-  # Derive family from cmd path to call the right snapshot function.
-  case "$cmd" in
-    *ip6tables*) snap="$(capture_filter_snapshot_v6 2>/dev/null)" ;;
-    *)           snap="$(capture_filter_snapshot_v4 2>/dev/null)" ;;
-  esac
-  _afwall_transport_chain_ready_from_snapshot "$snap" "$chain"
-}
-
-# Wi-Fi transport chain present and reachable (IPv4)
-afwall_wifi_chain_present_v4() {
-  local snap
-  snap="$(capture_filter_snapshot_v4 2>/dev/null)" || return 1
-  _afwall_transport_chain_ready_from_snapshot "$snap" "$AFWALL_CHAIN_WIFI"
-}
-
-# Wi-Fi transport chain present and reachable (IPv6)
-afwall_wifi_chain_present_v6() {
-  local snap
-  snap="$(capture_filter_snapshot_v6 2>/dev/null)" || return 1
-  _afwall_transport_chain_ready_from_snapshot "$snap" "$AFWALL_CHAIN_WIFI"
-}
-
-# Mobile data transport chain present and reachable (IPv4)
-afwall_mobile_chain_present_v4() {
-  local snap
-  snap="$(capture_filter_snapshot_v4 2>/dev/null)" || return 1
-  _afwall_transport_chain_ready_from_snapshot "$snap" "$AFWALL_CHAIN_MOBILE"
-}
-
-# Mobile data transport chain present and reachable (IPv6)
-afwall_mobile_chain_present_v6() {
-  local snap
-  snap="$(capture_filter_snapshot_v6 2>/dev/null)" || return 1
-  _afwall_transport_chain_ready_from_snapshot "$snap" "$AFWALL_CHAIN_MOBILE"
-}
-
 # ── Blackout-state persistence ─────────────────────────────────────────────────
 # State files used to communicate between post-fs-data and service phases.
 # ${STATE_DIR}/blackout_active    — written by post-fs-data; cleared after handoff
@@ -1553,14 +1314,6 @@ mark_blackout_active() {
 clear_blackout_active() {
   rm -f "${STATE_DIR}/blackout_active" "${STATE_DIR}/radio_off_pending" 2>/dev/null || true
   debug_log "clear_blackout_active: blackout state cleared"
-}
-
-blackout_is_active() {
-  [ -f "${STATE_DIR}/blackout_active" ]
-}
-
-radio_off_pending() {
-  [ -f "${STATE_DIR}/radio_off_pending" ]
 }
 
 # ── Manual override / service stop state ──────────────────────────────────────
