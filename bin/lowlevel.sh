@@ -278,7 +278,7 @@ lowlevel_disable_wifi() {
 lowlevel_restore_wifi() {
   _ll_state_exists "wifi_was_enabled" || return 0
 
-  local restored=0
+  local restored=0 verified_on=0 val wl_state wl_iface
   if has_cmd cmd && cmd wifi set-wifi-enabled enabled >/dev/null 2>&1; then
     restored=1
     log "lowlevel: Wi-Fi re-enabled via cmd wifi"
@@ -291,8 +291,34 @@ lowlevel_restore_wifi() {
   fi
   if [ "$restored" = "0" ]; then
     log "lowlevel: WARN: could not re-enable Wi-Fi; manual recovery may be needed"
+    return 1
   fi
-  _ll_state_rm "wifi_was_enabled"
+
+  # Verify Wi-Fi is actually ON before clearing the marker so callers can retry
+  # automatically on the next poll if framework services lag behind command ack.
+  if has_cmd settings; then
+    val="$(settings get global wifi_on 2>/dev/null)"
+    [ "$val" = "1" ] && verified_on=$((verified_on + 1))
+  fi
+  if has_cmd cmd && cmd wifi status 2>/dev/null | grep -qi 'enabled\|Wifi is on'; then
+    verified_on=$((verified_on + 1))
+  fi
+  for wl_iface in wlan0 wlan1 swlan0 swlan1; do
+    [ -f "/sys/class/net/${wl_iface}/operstate" ] || continue
+    wl_state="$(cat "/sys/class/net/${wl_iface}/operstate" 2>/dev/null)"
+    case "$wl_state" in
+      up|unknown) verified_on=$((verified_on + 1)); break ;;
+    esac
+  done
+
+  if [ "$verified_on" -ge 1 ]; then
+    log "lowlevel: Wi-Fi restore verified (probes_passed=$verified_on)"
+    _ll_state_rm "wifi_was_enabled"
+    return 0
+  fi
+
+  log "lowlevel: WARN: Wi-Fi enable sent but ON-state not yet verified; keeping marker for retry"
+  return 1
 }
 
 # ── Mobile data control ────────────────────────────────────────────────────────
@@ -385,7 +411,7 @@ lowlevel_disable_mobile_data() {
 lowlevel_restore_mobile_data() {
   _ll_state_exists "data_was_enabled" || return 0
 
-  local restored=0
+  local restored=0 verified_on=0 val ip_cmd rt_out
   if has_cmd cmd && cmd phone data enable >/dev/null 2>&1; then
     restored=1
     log "lowlevel: mobile data re-enabled via cmd phone"
@@ -398,8 +424,30 @@ lowlevel_restore_mobile_data() {
   fi
   if [ "$restored" = "0" ]; then
     log "lowlevel: WARN: could not re-enable mobile data; manual recovery may be needed"
+    return 1
   fi
-  _ll_state_rm "data_was_enabled"
+
+  # Verify mobile data is actually ON before clearing marker; this allows
+  # service.sh to retry automatically instead of requiring manual action.
+  if has_cmd settings; then
+    val="$(settings get global mobile_data 2>/dev/null)"
+    [ "$val" = "1" ] && verified_on=$((verified_on + 1))
+  fi
+  ip_cmd="$(_find_cmd ip 2>/dev/null)" || ip_cmd=""
+  if [ -n "$ip_cmd" ]; then
+    rt_out="$("$ip_cmd" route show default 2>/dev/null)" || rt_out=""
+    printf '%s' "$rt_out" | grep -qE 'rmnet|ccmni|pdp|wwan' && \
+      verified_on=$((verified_on + 1))
+  fi
+
+  if [ "$verified_on" -ge 1 ]; then
+    log "lowlevel: mobile data restore verified (probes_passed=$verified_on)"
+    _ll_state_rm "data_was_enabled"
+    return 0
+  fi
+
+  log "lowlevel: WARN: mobile data enable sent but ON-state not yet verified; keeping marker for retry"
+  return 1
 }
 
 # ── Bluetooth control ──────────────────────────────────────────────────────────

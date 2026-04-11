@@ -293,6 +293,19 @@ SLOW_STABLE_SECS=6
 #
 TRANSPORT_ABSENCE_STABLE_SECS=3
 
+# ── Transport inconclusive/oscillation guard ────────────────────────────────
+# After AFWall family handoff is complete, transport-specific subtree state can
+# still oscillate (for example, VPN-related chain churn toggling reachable /
+# unreachable views). To avoid very long deferred restore tails, the service
+# forces a verified restore attempt once a transport has remained unresolved for
+# this many seconds.
+#
+# This does NOT weaken startup fail-closed behavior:
+#   - family blackout release still requires AFWall main-graph readiness
+#   - restore still requires verification probes and retries if not confirmed
+#
+TRANSPORT_INCONCLUSIVE_SECS=20
+
 # ── Transport-absence stable window (post-boot) ───────────────────────────────
 # Shorter absence-stable window applied after sys.boot_completed=1 when
 # BOOT_COMPLETE_ACCELERATE=1.  If no transport-specific subtree has been seen
@@ -305,6 +318,10 @@ TRANSPORT_ABSENCE_STABLE_SECS=3
 # Default: 2 s  (shorter than the base 3 s for faster post-boot restore)
 #
 TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT=2
+
+# ── Post-boot inconclusive guard window ──────────────────────────────────────
+# Shorter threshold used for TRANSPORT_INCONCLUSIVE_SECS once sys.boot_completed=1.
+TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT=8
 
 # ── Boot-completion acceleration ──────────────────────────────────────────────
 # When set to 1 (default), the module uses sys.boot_completed=1 and related

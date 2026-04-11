@@ -64,6 +64,11 @@
   FAST_STABLE_SECS="${FAST_STABLE_SECS:-2}"
   SLOW_STABLE_SECS="${SLOW_STABLE_SECS:-6}"
   TRANSPORT_ABSENCE_STABLE_SECS="${TRANSPORT_ABSENCE_STABLE_SECS:-3}"
+  # Max time to tolerate transport-subtree oscillation/inconclusive state after
+  # AFWall family handoff before forcing a verified restore attempt anyway.
+  # This keeps strict fail-closed startup behavior, but avoids long "waiting"
+  # tails caused by VPN/transport chain churn once AFWall main takeover is done.
+  TRANSPORT_INCONCLUSIVE_SECS="${TRANSPORT_INCONCLUSIVE_SECS:-20}"
 
   # ── Boot-completion acceleration ───────────────────────────────────────────
   BOOT_COMPLETE_ACCELERATE="${BOOT_COMPLETE_ACCELERATE:-1}"
@@ -78,10 +83,11 @@
   # Must NOT be confused with TRANSPORT_WAIT_SECS_POST_BOOT (which gates a
   # different legacy detection wait path).
   TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT="${TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT:-2}"
+  TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT="${TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT:-8}"
 
   log "service: start ($MODULE_VERSION)"
   log "service: config: timeout=${TIMEOUT_SECS}s policy=${TIMEOUT_POLICY} auto_unblock=${AUTO_TIMEOUT_UNBLOCK} unlock_gated=${TIMEOUT_UNLOCK_GATED}"
-  log "service: config: poll=${POLL_INTERVAL_SECS}s fast=${FAST_STABLE_SECS}s slow=${SLOW_STABLE_SECS}s transport_absence=${TRANSPORT_ABSENCE_STABLE_SECS}s absence_pb=${TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT}s"
+  log "service: config: poll=${POLL_INTERVAL_SECS}s fast=${FAST_STABLE_SECS}s slow=${SLOW_STABLE_SECS}s transport_absence=${TRANSPORT_ABSENCE_STABLE_SECS}s absence_pb=${TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT}s transport_inconclusive=${TRANSPORT_INCONCLUSIVE_SECS}s inconclusive_pb=${TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT}s"
   log "service: config: fwd=${ENABLE_FORWARD_BLOCK:-1} in=${ENABLE_INPUT_BLOCK:-0} ll_mode=${LOWLEVEL_MODE:-safe}"
   log "service: config: wifi_gate=${WIFI_AFWALL_GATE} mobile_gate=${MOBILE_AFWALL_GATE} reassert=${RADIO_REASSERT_INTERVAL}s blackout_reassert=${BLACKOUT_REASSERT_INTERVAL}s"
   log "service: config: boot_accel=${BOOT_COMPLETE_ACCELERATE} density_min=${AFWALL_RULE_DENSITY_MIN} liveness_pb=${LIVENESS_SECS_POST_BOOT}s fallback_pb=${FALLBACK_SECS_POST_BOOT}s settle_pb=${SETTLE_SECS_POST_BOOT}s twait_pb=${TRANSPORT_WAIT_SECS_POST_BOOT}s"
@@ -232,7 +238,22 @@
       v4_blocked=1
       v6_blocked=1
     else
-      log "service: no OUTPUT blocks detected and block_installed not set — skipping handoff; restoring lower-layer"
+      log "service: no OUTPUT blocks detected and block_installed not set — skipping handoff"
+      if ! sys_boot_completed; then
+        log "service: deferring lower-layer restore until sys.boot_completed=1"
+        while :; do
+          if manual_override_active || stop_requested_active; then
+            log "service: stop/override detected while waiting for boot_complete"
+            clear_blackout_active
+            rm -f "${STATE_DIR}/block_installed" 2>/dev/null || true
+            remove_service_pid
+            exit 0
+          fi
+          sys_boot_completed && break
+          sleep 1
+        done
+      fi
+      log "service: boot_complete reached — restoring lower-layer"
       clear_blackout_active
       lowlevel_restore_changed_state
       remove_service_pid
@@ -294,10 +315,14 @@
   #                      0 means "not yet checked" or "subtree is present".
   wifi_last_fp="";   wifi_fp_stable_since=0;   wifi_absent_since=0
   mobile_last_fp=""; mobile_fp_stable_since=0; mobile_absent_since=0
+  wifi_pending_since=0; mobile_pending_since=0
 
   # One-time diagnostic flag: set when all family blocks are released but
   # transport restore is still pending, to avoid logging this every poll.
   _family_handoff_logged=0
+  _wifi_restore_logged=0
+  _mobile_restore_logged=0
+  _finalize_defer_logged=0
 
   # ── Unlock state for timeout gating ────────────────────────────────────────
   device_unlocked=0
@@ -350,6 +375,7 @@
 
     # ── Wi-Fi transport ─────────────────────────────────────────────────────
     if [ "$wifi_done" = "0" ]; then
+      [ "$wifi_pending_since" = "0" ] && [ "$now_ts" != "0" ] && wifi_pending_since="$now_ts"
       # Check both v4 and v6 snapshots for any afwall-wifi-prefixed subtree.
       local _wifi_in_snap=0 _wifi_reachable=0
       afwall_prefix_present_from_snapshot "$v4_snap" "$AFWALL_CHAIN_WIFI" && _wifi_in_snap=1
@@ -386,9 +412,17 @@
         local _wifi_settle="$SETTLE_SECS"
         [ "$_boot_complete_now" = "1" ] && _wifi_settle="$SETTLE_SECS_POST_BOOT"
         if [ "$_wifi_stable" -ge "$_wifi_settle" ]; then
-          wifi_done=1
-          log "service: wifi transport: subtree stable=${_wifi_stable}s fp=$wifi_last_fp — Wi-Fi ready"
-          lowlevel_restore_wifi_if_allowed
+          if [ "$_boot_complete_now" != "1" ]; then
+            debug_log "service: wifi transport stable but restore deferred until boot_complete"
+          else
+            log "service: wifi transport: subtree stable=${_wifi_stable}s fp=$wifi_last_fp — Wi-Fi ready; attempting restore"
+            if lowlevel_restore_wifi_if_allowed; then
+              wifi_done=1
+              wifi_pending_since=0
+            else
+              debug_log "service: wifi transport: restore not yet confirmed; will retry"
+            fi
+          fi
         fi
 
       else
@@ -409,13 +443,50 @@
           _w_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS"
           [ "$_boot_complete_now" = "1" ] && _w_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT"
           if [ "$_w_absent_elapsed" -ge "$_w_absent_threshold" ]; then
-            wifi_done=1
-            if [ "$_wifi_in_snap" = "1" ]; then
-              log "service: wifi transport accepted via unreachable-stable fallback after ${_w_absent_elapsed}s (subtree present but unreachable from AFWall graph)"
+            if [ "$_boot_complete_now" != "1" ]; then
+              debug_log "service: wifi fallback ready but restore deferred until boot_complete"
+            elif [ "$device_unlocked" != "1" ]; then
+              debug_log "service: wifi fallback ready but deferred until unlock (weak path)"
             else
-              log "service: wifi transport accepted via absence-stable fallback after ${_w_absent_elapsed}s (no wifi-prefixed subtree detected in snapshot)"
+              if [ "$_wifi_in_snap" = "1" ]; then
+                log "service: wifi transport accepted via unreachable-stable fallback after ${_w_absent_elapsed}s (subtree present but unreachable from AFWall graph); attempting restore"
+              else
+                log "service: wifi transport accepted via absence-stable fallback after ${_w_absent_elapsed}s (no wifi-prefixed subtree detected in snapshot); attempting restore"
+              fi
+              if lowlevel_restore_wifi_if_allowed; then
+                wifi_done=1
+                wifi_pending_since=0
+              else
+                debug_log "service: wifi transport fallback path: restore not yet confirmed; will retry"
+              fi
             fi
-            lowlevel_restore_wifi_if_allowed
+          fi
+        fi
+      fi
+
+      # Oscillation/inconclusive guard:
+      # If AFWall family handoff is done but transport subtree keeps drifting
+      # between usable/unusable states for too long (common with VPN churn),
+      # force a verified restore attempt instead of waiting indefinitely.
+      if [ "$wifi_done" = "0" ] && [ "$wifi_pending_since" != "0" ] && [ "$now_ts" != "0" ]; then
+        local _w_pending_elapsed _w_pending_threshold
+        _w_pending_elapsed=$((now_ts - wifi_pending_since))
+        _w_pending_threshold="$TRANSPORT_INCONCLUSIVE_SECS"
+        [ "$_boot_complete_now" = "1" ] && _w_pending_threshold="$TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT"
+        if [ "$_w_pending_elapsed" -ge "$_w_pending_threshold" ]; then
+          if [ "$_boot_complete_now" != "1" ]; then
+            debug_log "service: wifi inconclusive-time fallback deferred until boot_complete"
+          elif [ "$device_unlocked" != "1" ]; then
+            debug_log "service: wifi inconclusive-time fallback deferred until unlock (weak path)"
+          else
+            log "service: wifi transport inconclusive for ${_w_pending_elapsed}s (in_snap=${_wifi_in_snap} reachable=${_wifi_reachable}); forcing verified restore attempt"
+            if lowlevel_restore_wifi_if_allowed; then
+              wifi_done=1
+              wifi_pending_since=0
+              log "service: wifi transport resolved via inconclusive-time fallback"
+            else
+              debug_log "service: wifi inconclusive-time fallback restore not yet confirmed; continuing retries"
+            fi
           fi
         fi
       fi
@@ -423,6 +494,7 @@
 
     # ── Mobile data transport ───────────────────────────────────────────────
     if [ "$mobile_done" = "0" ]; then
+      [ "$mobile_pending_since" = "0" ] && [ "$now_ts" != "0" ] && mobile_pending_since="$now_ts"
       local _mobile_in_snap=0 _mobile_reachable=0
       afwall_prefix_present_from_snapshot "$v4_snap" "$AFWALL_CHAIN_MOBILE" && _mobile_in_snap=1
       afwall_prefix_present_from_snapshot "$v6_snap" "$AFWALL_CHAIN_MOBILE" && _mobile_in_snap=1
@@ -457,9 +529,17 @@
         local _mobile_settle="$SETTLE_SECS"
         [ "$_boot_complete_now" = "1" ] && _mobile_settle="$SETTLE_SECS_POST_BOOT"
         if [ "$_mobile_stable" -ge "$_mobile_settle" ]; then
-          mobile_done=1
-          log "service: mobile transport: subtree stable=${_mobile_stable}s fp=$mobile_last_fp — mobile ready"
-          lowlevel_restore_mobile_data_if_allowed
+          if [ "$_boot_complete_now" != "1" ]; then
+            debug_log "service: mobile transport stable but restore deferred until boot_complete"
+          else
+            log "service: mobile transport: subtree stable=${_mobile_stable}s fp=$mobile_last_fp — mobile ready; attempting restore"
+            if lowlevel_restore_mobile_data_if_allowed; then
+              mobile_done=1
+              mobile_pending_since=0
+            else
+              debug_log "service: mobile transport: restore not yet confirmed; will retry"
+            fi
+          fi
         fi
 
       else
@@ -478,13 +558,46 @@
           _m_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS"
           [ "$_boot_complete_now" = "1" ] && _m_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT"
           if [ "$_m_absent_elapsed" -ge "$_m_absent_threshold" ]; then
-            mobile_done=1
-            if [ "$_mobile_in_snap" = "1" ]; then
-              log "service: mobile transport accepted via unreachable-stable fallback after ${_m_absent_elapsed}s (subtree present but unreachable from AFWall graph)"
+            if [ "$_boot_complete_now" != "1" ]; then
+              debug_log "service: mobile fallback ready but restore deferred until boot_complete"
+            elif [ "$device_unlocked" != "1" ]; then
+              debug_log "service: mobile fallback ready but deferred until unlock (weak path)"
             else
-              log "service: mobile transport accepted via absence-stable fallback after ${_m_absent_elapsed}s (no mobile-prefixed subtree detected in snapshot)"
+              if [ "$_mobile_in_snap" = "1" ]; then
+                log "service: mobile transport accepted via unreachable-stable fallback after ${_m_absent_elapsed}s (subtree present but unreachable from AFWall graph); attempting restore"
+              else
+                log "service: mobile transport accepted via absence-stable fallback after ${_m_absent_elapsed}s (no mobile-prefixed subtree detected in snapshot); attempting restore"
+              fi
+              if lowlevel_restore_mobile_data_if_allowed; then
+                mobile_done=1
+                mobile_pending_since=0
+              else
+                debug_log "service: mobile transport fallback path: restore not yet confirmed; will retry"
+              fi
             fi
-            lowlevel_restore_mobile_data_if_allowed
+          fi
+        fi
+      fi
+
+      if [ "$mobile_done" = "0" ] && [ "$mobile_pending_since" != "0" ] && [ "$now_ts" != "0" ]; then
+        local _m_pending_elapsed _m_pending_threshold
+        _m_pending_elapsed=$((now_ts - mobile_pending_since))
+        _m_pending_threshold="$TRANSPORT_INCONCLUSIVE_SECS"
+        [ "$_boot_complete_now" = "1" ] && _m_pending_threshold="$TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT"
+        if [ "$_m_pending_elapsed" -ge "$_m_pending_threshold" ]; then
+          if [ "$_boot_complete_now" != "1" ]; then
+            debug_log "service: mobile inconclusive-time fallback deferred until boot_complete"
+          elif [ "$device_unlocked" != "1" ]; then
+            debug_log "service: mobile inconclusive-time fallback deferred until unlock (weak path)"
+          else
+            log "service: mobile transport inconclusive for ${_m_pending_elapsed}s (in_snap=${_mobile_in_snap} reachable=${_mobile_reachable}); forcing verified restore attempt"
+            if lowlevel_restore_mobile_data_if_allowed; then
+              mobile_done=1
+              mobile_pending_since=0
+              log "service: mobile transport resolved via inconclusive-time fallback"
+            else
+              debug_log "service: mobile inconclusive-time fallback restore not yet confirmed; continuing retries"
+            fi
           fi
         fi
       fi
@@ -735,9 +848,9 @@
         elif afwall_secondary_evidence_present "$AFW_PKG"; then
           _v4_corroborator="file_mtime"
         fi
-        [ "$_boot_complete_now" = "1" ] && \
-          afwall_rules_dense_from_snapshot "$v4_snap" "$AFWALL_RULE_DENSITY_MIN" && \
-          [ "$_v4_corroborator" = "none" ] && _v4_corroborator="boot_complete_dense"
+        afwall_rules_dense_from_snapshot "$v4_snap" "$AFWALL_RULE_DENSITY_MIN" && \
+          [ "$_v4_corroborator" = "none" ] && \
+          _v4_corroborator="$([ "$_boot_complete_now" = "1" ] && printf 'boot_complete_dense' || printf 'dense_graph')"
 
         # Select effective stability thresholds.
         _v4_fast_secs="$FAST_STABLE_SECS"
@@ -747,8 +860,17 @@
           _v4_slow_secs="$FALLBACK_SECS_POST_BOOT"
         fi
 
+        _v4_strong_corroboration=0
+        case "$_v4_corroborator" in
+          process|file_mtime|boot_complete_dense) _v4_strong_corroboration=1 ;;
+        esac
+
         # ── Fast path: corroboration + shorter stable window ──────────────
-        if [ "$_v4_corroborator" != "none" ] && \
+        if [ "$_boot_complete_now" != "1" ]; then
+          debug_log "service: v4 graph stable but handoff deferred until boot_complete"
+        elif [ "$device_unlocked" != "1" ] && [ "$_v4_strong_corroboration" != "1" ]; then
+          debug_log "service: v4 handoff deferred until unlock (corroboration=${_v4_corroborator})"
+        elif [ "$_v4_corroborator" != "none" ] && \
            [ "$_v4_stable" -ge "$_v4_fast_secs" ]; then
           v4_done=1; v4_path="fast"
           _v4_seen_elapsed=0
@@ -820,9 +942,9 @@
         elif afwall_secondary_evidence_present "$AFW_PKG"; then
           _v6_corroborator="file_mtime"
         fi
-        [ "$_boot_complete_now" = "1" ] && \
-          afwall_rules_dense_from_snapshot "$v6_snap" "$AFWALL_RULE_DENSITY_MIN" && \
-          [ "$_v6_corroborator" = "none" ] && _v6_corroborator="boot_complete_dense"
+        afwall_rules_dense_from_snapshot "$v6_snap" "$AFWALL_RULE_DENSITY_MIN" && \
+          [ "$_v6_corroborator" = "none" ] && \
+          _v6_corroborator="$([ "$_boot_complete_now" = "1" ] && printf 'boot_complete_dense' || printf 'dense_graph')"
 
         _v6_fast_secs="$FAST_STABLE_SECS"
         _v6_slow_secs="$SLOW_STABLE_SECS"
@@ -831,7 +953,16 @@
           _v6_slow_secs="$FALLBACK_SECS_POST_BOOT"
         fi
 
-        if [ "$_v6_corroborator" != "none" ] && \
+        _v6_strong_corroboration=0
+        case "$_v6_corroborator" in
+          process|file_mtime|boot_complete_dense) _v6_strong_corroboration=1 ;;
+        esac
+
+        if [ "$_boot_complete_now" != "1" ]; then
+          debug_log "service: v6 graph stable but handoff deferred until boot_complete"
+        elif [ "$device_unlocked" != "1" ] && [ "$_v6_strong_corroboration" != "1" ]; then
+          debug_log "service: v6 handoff deferred until unlock (corroboration=${_v6_corroborator})"
+        elif [ "$_v6_corroborator" != "none" ] && \
            [ "$_v6_stable" -ge "$_v6_fast_secs" ]; then
           v6_done=1; v6_path="fast"
           _v6_seen_elapsed=0
@@ -878,6 +1009,28 @@
       if [ "$wifi_done" = "0" ] || [ "$mobile_done" = "0" ]; then
         _check_transport_readiness
       fi
+    fi
+
+    # If a transport gate was skipped but the module still has a restore marker
+    # (e.g. state carried across conservative boot order), retry restoration
+    # until verified instead of exiting and requiring manual action.
+    if [ "$_boot_complete_now" = "1" ] && [ "$wifi_done" = "1" ] && _ll_state_exists "wifi_was_enabled"; then
+      if [ "$_wifi_restore_logged" = "0" ]; then
+        log "service: wifi marker still present after done=1 — retrying Wi-Fi restore"
+        _wifi_restore_logged=1
+      fi
+      lowlevel_restore_wifi_if_allowed || debug_log "service: wifi retry restore not yet confirmed"
+    else
+      _wifi_restore_logged=0
+    fi
+    if [ "$_boot_complete_now" = "1" ] && [ "$mobile_done" = "1" ] && _ll_state_exists "data_was_enabled"; then
+      if [ "$_mobile_restore_logged" = "0" ]; then
+        log "service: mobile marker still present after done=1 — retrying mobile restore"
+        _mobile_restore_logged=1
+      fi
+      lowlevel_restore_mobile_data_if_allowed || debug_log "service: mobile retry restore not yet confirmed"
+    else
+      _mobile_restore_logged=0
     fi
 
     # ── Block release: remove blocks as soon as AFWall family handoff confirmed ─
@@ -951,9 +1104,23 @@
       # transport-specific helper calls inside _check_transport_readiness would
       # have been skipped if wifi_done/mobile_done started as 1.
       lowlevel_restore_wifi_if_allowed || \
-        log "service: WARN: Wi-Fi restore encountered an error"
+        debug_log "service: Wi-Fi restore not yet confirmed at finalize"
       lowlevel_restore_mobile_data_if_allowed || \
-        log "service: WARN: mobile-data restore encountered an error"
+        debug_log "service: mobile-data restore not yet confirmed at finalize"
+      if _ll_state_exists "wifi_was_enabled" || _ll_state_exists "data_was_enabled"; then
+        _wifi_marker=0; _mobile_marker=0
+        _ll_state_exists "wifi_was_enabled" && _wifi_marker=1
+        _ll_state_exists "data_was_enabled" && _mobile_marker=1
+        if [ "$_finalize_defer_logged" = "0" ]; then
+          log "service: finalization deferred: restore markers remain (wifi=${_wifi_marker} mobile=${_mobile_marker})"
+          _finalize_defer_logged=1
+        else
+          debug_log "service: finalization still deferred (wifi=${_wifi_marker} mobile=${_mobile_marker})"
+        fi
+        sleep "$POLL_INTERVAL_SECS"
+        continue
+      fi
+      _finalize_defer_logged=0
       lowlevel_restore_interfaces 2>/dev/null || true
       lowlevel_restore_bluetooth 2>/dev/null || true
       lowlevel_restore_tethering_note 2>/dev/null || true
