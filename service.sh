@@ -320,6 +320,8 @@
   # One-time diagnostic flag: set when all family blocks are released but
   # transport restore is still pending, to avoid logging this every poll.
   _family_handoff_logged=0
+  _wifi_restore_logged=0
+  _mobile_restore_logged=0
 
   # ── Unlock state for timeout gating ────────────────────────────────────────
   device_unlocked=0
@@ -1012,12 +1014,22 @@
     # (e.g. state carried across conservative boot order), retry restoration
     # until verified instead of exiting and requiring manual action.
     if [ "$_boot_complete_now" = "1" ] && [ "$wifi_done" = "1" ] && _ll_state_exists "wifi_was_enabled"; then
-      log "service: wifi marker still present after done=1 — retrying Wi-Fi restore"
-      lowlevel_restore_wifi_if_allowed || log "service: wifi retry restore not yet confirmed"
+      if [ "$_wifi_restore_logged" = "0" ]; then
+        log "service: wifi marker still present after done=1 — retrying Wi-Fi restore"
+        _wifi_restore_logged=1
+      fi
+      lowlevel_restore_wifi_if_allowed || debug_log "service: wifi retry restore not yet confirmed"
+    else
+      _wifi_restore_logged=0
     fi
     if [ "$_boot_complete_now" = "1" ] && [ "$mobile_done" = "1" ] && _ll_state_exists "data_was_enabled"; then
-      log "service: mobile marker still present after done=1 — retrying mobile restore"
-      lowlevel_restore_mobile_data_if_allowed || log "service: mobile retry restore not yet confirmed"
+      if [ "$_mobile_restore_logged" = "0" ]; then
+        log "service: mobile marker still present after done=1 — retrying mobile restore"
+        _mobile_restore_logged=1
+      fi
+      lowlevel_restore_mobile_data_if_allowed || debug_log "service: mobile retry restore not yet confirmed"
+    else
+      _mobile_restore_logged=0
     fi
 
     # ── Block release: remove blocks as soon as AFWall family handoff confirmed ─
