@@ -322,6 +322,7 @@
   _wifi_restore_logged=0
   _mobile_restore_logged=0
   _finalize_defer_logged=0
+  _finalize_cleanup_done=0
 
   # ── Unlock state for timeout gating ────────────────────────────────────────
   device_unlocked=0
@@ -1066,10 +1067,13 @@
       # Finalize in verified mode: remove module-owned blocks first, then use
       # verified lowlevel restore helpers (with retry loop) so we do not clear
       # markers on command-ack alone.
-      clear_blackout_active
-      rm -f "${STATE_DIR}/block_installed" "${STATE_DIR}/radio_off_pending" 2>/dev/null || true
-      remove_block
-      cleanup_legacy "service-finalize"
+      if [ "$_finalize_cleanup_done" = "0" ]; then
+        clear_blackout_active
+        rm -f "${STATE_DIR}/block_installed" "${STATE_DIR}/radio_off_pending" 2>/dev/null || true
+        remove_block
+        cleanup_legacy "service-finalize"
+        _finalize_cleanup_done=1
+      fi
 
       lowlevel_restore_wifi_if_allowed || \
         debug_log "service: Wi-Fi restore not yet confirmed at finalize"
