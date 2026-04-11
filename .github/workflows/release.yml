@@ -93,7 +93,10 @@ jobs:
             # Resolve to PR base (trusted repo ref), not PR head SHA from potential forks.
             REF="$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.base.ref')"
             # Extract optional tag from comment body via env var (avoids shell injection).
-            TAG_INPUT="$(printf '%s' "$COMMENT_BODY" | sed -nE 's#^/release[[:space:]]+([^[:space:]]+).*$#\1#p' | head -1)"
+            # Strip any characters outside the valid tag alphabet [a-zA-Z0-9._-] so
+            # the value is safe for downstream ${{ steps.resolve.outputs.tag_input }}
+            # interpolation in shell steps.
+            TAG_INPUT="$(printf '%s' "$COMMENT_BODY" | sed -nE 's#^/release[[:space:]]+([^[:space:]]+).*$#\1#p' | head -1 | tr -cd 'a-zA-Z0-9._-' | head -c 100)"
             DRAFT_INPUT="false"
             FORCE_RETAG_INPUT="false"
           fi
@@ -140,8 +143,10 @@ jobs:
 
       - name: Determine and validate release tag
         id: tag
+        env:
+          TAG_INPUT_RAW: ${{ steps.resolve.outputs.tag_input }}
         run: |
-          TAG_INPUT="${{ steps.resolve.outputs.tag_input }}"
+          TAG_INPUT="$TAG_INPUT_RAW"
           CURRENT_VERSION="${{ steps.meta.outputs.version }}"
           CURRENT_CODE="${{ steps.meta.outputs.version_code }}"
 
