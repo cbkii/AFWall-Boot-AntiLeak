@@ -147,6 +147,34 @@ LOWLEVEL_USE_BLUETOOTH_MANAGER=0
 #
 LOWLEVEL_USE_TETHER_STOP=1
 
+# ── VPN lockdown toggle during boot window ────────────────────────────────────
+# Controls Android's "block connections without VPN" (always-on VPN lockdown).
+#
+# When enabled (default), the module attempts to turn lockdown ON as early as
+# possible during boot for VPN providers it can detect (plus optional provider
+# packages listed below). This reduces leak risk before AFWall handoff.
+#
+# During restore, the module then turns lockdown OFF again for the active
+# provider and restores the pre-boot always-on baseline where possible.
+#
+VPN_LOCKDOWN_BOOT_ENFORCE=1
+
+# ── VPN lockdown release during restore ───────────────────────────────────────
+# When enabled (default), restore phase disables lockdown for the active VPN
+# provider after AFWall handoff and attempts to restore the original pre-boot
+# always-on VPN state.
+#
+VPN_LOCKDOWN_RELEASE_ON_RESTORE=1
+
+# ── Optional VPN provider package hints ───────────────────────────────────────
+# Optional space/comma-separated package list to supplement auto-discovery.
+# Leave empty for auto-detection only.
+#
+# Example:
+# VPN_LOCKDOWN_PROVIDER_PACKAGES="com.wireguard.android com.protonvpn.android"
+#
+VPN_LOCKDOWN_PROVIDER_PACKAGES=""
+
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── Timeout ───────────────────────────────────────────────────────────────────
