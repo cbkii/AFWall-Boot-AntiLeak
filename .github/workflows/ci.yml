@@ -28,7 +28,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get install -y --no-install-recommends shellcheck zip unzip
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends shellcheck zip unzip
 
       # ── Lint: module runtime scripts ────────────────────────────────────────
       # Checks the module's own shell scripts (not third-party MMT-Extended

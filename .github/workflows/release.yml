@@ -21,6 +21,11 @@ on:
         required: false
         type: boolean
         default: false
+      force_retag:
+        description: "Force-move the git tag to current HEAD if it already exists at a different commit. Use only when re-releasing the same version after post-release commits were pushed."
+        required: false
+        type: boolean
+        default: false
 
   issue_comment:
     types: [created]
@@ -29,6 +34,12 @@ permissions:
   contents: write
   issues: read
   pull-requests: read
+
+# Prevent two release runs from executing simultaneously (e.g., rapid re-dispatches).
+# cancel-in-progress: false means new runs queue rather than cancel the active one.
+concurrency:
+  group: release-${{ github.repository }}
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -64,11 +75,14 @@ jobs:
 
       - name: Resolve ref and optional tag input
         id: resolve
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             REF_INPUT="${{ inputs.ref }}"
             TAG_INPUT="${{ inputs.tag }}"
             DRAFT_INPUT="${{ inputs.draft }}"
+            FORCE_RETAG_INPUT="${{ inputs.force_retag }}"
             if [ -n "$REF_INPUT" ]; then
               REF="$REF_INPUT"
             else
@@ -78,14 +92,19 @@ jobs:
             PR_NUMBER="${{ github.event.issue.number }}"
             # Resolve to PR base (trusted repo ref), not PR head SHA from potential forks.
             REF="$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.base.ref')"
-            TAG_INPUT="$(printf '%s' "${{ github.event.comment.body }}" | sed -nE 's#^/release[[:space:]]+([^[:space:]]+).*$#\1#p' | head -1)"
+            # Extract optional tag from comment body via env var (avoids shell injection).
+            # Strip any characters outside the valid tag alphabet [a-zA-Z0-9._-] so
+            # the value is safe for downstream interpolation in shell steps.
+            TAG_INPUT="$(printf '%s' "$COMMENT_BODY" | sed -nE 's#^/release[[:space:]]+([^[:space:]]+).*$#\1#p' | head -1 | tr -cd 'a-zA-Z0-9._-' | head -c 100)"
             DRAFT_INPUT="false"
+            FORCE_RETAG_INPUT="false"
           fi
 
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
           echo "tag_input=$TAG_INPUT" >> "$GITHUB_OUTPUT"
           echo "draft_input=$DRAFT_INPUT" >> "$GITHUB_OUTPUT"
-          echo "Resolved ref=$REF tag_input=${TAG_INPUT:-<none>} draft=$DRAFT_INPUT"
+          echo "force_retag_input=$FORCE_RETAG_INPUT" >> "$GITHUB_OUTPUT"
+          echo "Resolved ref=$REF tag_input=${TAG_INPUT:-<none>} draft=$DRAFT_INPUT force_retag=$FORCE_RETAG_INPUT"
 
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -105,7 +124,7 @@ jobs:
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Install dependencies
-        run: sudo apt-get install -y --no-install-recommends zip unzip python3
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends zip unzip python3
 
       - name: Read version metadata from module.prop
         id: meta
@@ -123,8 +142,10 @@ jobs:
 
       - name: Determine and validate release tag
         id: tag
+        env:
+          TAG_INPUT_RAW: ${{ steps.resolve.outputs.tag_input }}
         run: |
-          TAG_INPUT="${{ steps.resolve.outputs.tag_input }}"
+          TAG_INPUT="$TAG_INPUT_RAW"
           CURRENT_VERSION="${{ steps.meta.outputs.version }}"
           CURRENT_CODE="${{ steps.meta.outputs.version_code }}"
 
@@ -175,8 +196,8 @@ jobs:
           if [ "$CURRENT_VERSION" = "$RELEASE_VERSION" ] && [ "$CURRENT_CODE" = "$RELEASE_TAG" ]; then
             NEEDS_BUMP=false
           else
-            if [ "$RELEASE_TAG" -le "$CURRENT_CODE" ]; then
-              echo "::error::Release tag/versionCode $RELEASE_TAG is not greater than current $CURRENT_CODE."
+            if [ "$RELEASE_TAG" -lt "$CURRENT_CODE" ]; then
+              echo "::error::Release tag/versionCode $RELEASE_TAG is less than current $CURRENT_CODE. Use a higher versionCode to publish a newer release."
               exit 1
             fi
             NEEDS_BUMP=true
@@ -215,7 +236,18 @@ jobs:
           p.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
           PY
 
-          git add module.prop update.json
+          # Keep version strings in embedded source files in sync with module.prop.
+          # Pattern targets only the module-header comment line and MODULE_VERSION variable;
+          # historical version references (e.g. "v2.2.0+" in comments) are not touched.
+          sed -E -i "s/(# AFWall Boot AntiLeak )v[0-9]+\.[0-9]+\.[0-9]+/\1${RELEASE_VERSION}/" bin/common.sh
+          sed -E -i "s/^MODULE_VERSION=.*/MODULE_VERSION=\"${RELEASE_VERSION}\"/" bin/common.sh
+          sed -E -i "s/(# AFWall Boot AntiLeak )v[0-9]+\.[0-9]+\.[0-9]+/\1${RELEASE_VERSION}/" bin/lowlevel.sh
+          sed -E -i "s/(# AFWall Boot AntiLeak )v[0-9]+\.[0-9]+\.[0-9]+/\1${RELEASE_VERSION}/" config.sh
+          # Update installer UI version strings (header banner and defaults note).
+          sed -E -i "s/(AFWall Boot AntiLeak[[:space:]]+)v[0-9]+\.[0-9]+\.[0-9]+/\1${RELEASE_VERSION}/" common/install.sh
+          sed -E -i "s/(\[DEFAULTS IN )v[0-9]+\.[0-9]+\.[0-9]+(\])/\1${RELEASE_VERSION}\2/" common/install.sh
+
+          git add module.prop update.json bin/common.sh bin/lowlevel.sh config.sh common/install.sh
           if git diff --cached --quiet; then
             echo "No metadata changes detected after bump logic; skipping commit/push."
           else
@@ -225,6 +257,7 @@ jobs:
 
       - name: Sync update.json version metadata from module.prop
         run: |
+          RELEASE_TAG="${{ steps.tag.outputs.release_tag }}"
           BRANCH="$(git symbolic-ref --short -q HEAD || true)"
           VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           VERSION_CODE="$(grep '^versionCode=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
@@ -243,13 +276,21 @@ jobs:
           if git diff --quiet -- update.json; then
             echo "update.json already in sync with module.prop."
           else
-            if [ -z "$BRANCH" ]; then
-              echo "::error::update.json changed but checkout is detached; cannot commit synced metadata."
-              exit 1
+            # Guard: if this tag was already pushed to origin in a prior run, pushing a
+            # new sync commit would advance HEAD past the existing tag, causing a
+            # tag/commit mismatch that fails the "Create tag" step.  Emit a warning
+            # instead and let the "Create tag" step handle the re-publish scenario.
+            if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+              echo "::warning::update.json is out of sync with module.prop but tag ${RELEASE_TAG} already exists on origin. Skipping sync commit to avoid advancing HEAD past the existing tag. Fix update.json manually if needed."
+            else
+              if [ -z "$BRANCH" ]; then
+                echo "::error::update.json changed but checkout is detached; cannot commit synced metadata."
+                exit 1
+              fi
+              git add update.json
+              git commit -m "chore: sync update.json version"
+              git push origin HEAD:"$BRANCH"
             fi
-            git add update.json
-            git commit -m "chore: sync update.json version"
-            git push origin HEAD:"$BRANCH"
           fi
 
       - name: Read final version metadata
@@ -288,17 +329,36 @@ jobs:
       - name: Create tag if missing
         run: |
           RELEASE_TAG="${{ steps.tag.outputs.release_tag }}"
-          TARGET_REF="${{ steps.resolve.outputs.ref }}"
-          TARGET_COMMIT="$(git rev-parse "$TARGET_REF")"
-          if git rev-parse "$RELEASE_TAG" >/dev/null 2>&1; then
-            TAG_COMMIT="$(git rev-parse "${RELEASE_TAG}^{commit}")"
-            if [ "$TAG_COMMIT" != "$TARGET_COMMIT" ]; then
-              echo "::error::Tag $RELEASE_TAG already exists pointing to $TAG_COMMIT, not $TARGET_COMMIT. Aborting."
+          VERSION="${{ steps.meta_final.outputs.version }}"
+          FORCE_RETAG="${{ steps.resolve.outputs.force_retag_input }}"
+          # Resolve HEAD after all bump/sync commits so the tag targets the exact
+          # commit that contains the released code.
+          TARGET_COMMIT="$(git rev-parse HEAD)"
+          # Use the full refs/tags/ path so a branch that happens to share the
+          # numeric tag name cannot produce a false positive.
+          if git rev-parse --verify "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            TAG_COMMIT="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
+            if [ "$TAG_COMMIT" = "$TARGET_COMMIT" ]; then
+              echo "Tag $RELEASE_TAG already exists and points to the correct commit ($TAG_COMMIT)."
+            elif [ "$FORCE_RETAG" = "true" ]; then
+              echo "::notice::force_retag=true: moving tag $RELEASE_TAG from $TAG_COMMIT to $TARGET_COMMIT."
+              git tag -fa "$RELEASE_TAG" "$TARGET_COMMIT" -m "Release $VERSION ($RELEASE_TAG)"
+              git push origin --force "$RELEASE_TAG"
+              echo "Force-moved tag $RELEASE_TAG -> $TARGET_COMMIT"
+            elif gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
+              # Tag exists at an older commit and a GitHub Release already exists.
+              # This typically happens when post-release commits were pushed without
+              # bumping the version.  Re-publish the release assets built from the
+              # current HEAD without moving the tag.
+              echo "::warning::Tag $RELEASE_TAG exists at $TAG_COMMIT but HEAD is $TARGET_COMMIT. A GitHub Release already exists; re-publishing assets from current HEAD without moving the tag. Use force_retag=true to move the tag, or bump the versionCode to create a new release."
+            else
+              # Tag exists at a different commit with no corresponding release —
+              # this is an unexpected state that requires manual investigation.
+              echo "::error::Tag $RELEASE_TAG already exists at $TAG_COMMIT, but HEAD is $TARGET_COMMIT and no GitHub Release was found for this tag. Bump the versionCode in module.prop to publish a new release, or use force_retag=true to retag the current HEAD."
               exit 1
             fi
-            echo "Tag $RELEASE_TAG already exists and points to the correct commit ($TAG_COMMIT)."
           else
-            git tag -a "$RELEASE_TAG" "$TARGET_COMMIT" -m "Release ${{ steps.meta_final.outputs.version }} ($RELEASE_TAG)"
+            git tag -a "$RELEASE_TAG" "$TARGET_COMMIT" -m "Release $VERSION ($RELEASE_TAG)"
             git push origin "$RELEASE_TAG"
             echo "Created and pushed tag $RELEASE_TAG -> $TARGET_COMMIT"
           fi
