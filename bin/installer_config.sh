@@ -59,6 +59,9 @@ ic_apply_defaults() {
     IC_LOWLEVEL_USE_PHONE_DATA_CMD="1"
     IC_LOWLEVEL_USE_BLUETOOTH_MANAGER="0"
     IC_LOWLEVEL_USE_TETHER_STOP="1"
+    IC_VPN_LOCKDOWN_BOOT_ENFORCE="1"
+    IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE="1"
+    IC_VPN_LOCKDOWN_PROVIDER_PACKAGES=""
     IC_TIMEOUT_SECS="120"
     IC_TIMEOUT_POLICY="fail_closed"
     IC_AUTO_TIMEOUT_UNBLOCK="0"
@@ -109,6 +112,18 @@ _ic_read_key() {
         | sed 's/[[:space:]]*#.*//' | tr -d '"'"'"'[:space:]'
 }
 
+# Read a KEY=value entry while preserving internal whitespace.
+# Trims inline comments, surrounding quotes, and surrounding whitespace only.
+_ic_read_key_preserve_ws() {
+    local key="$1" file="$2" raw
+    raw="$(grep "^${key}=" "$file" 2>/dev/null | tail -1 | cut -d= -f2-)"
+    [ -n "$raw" ] || { printf ''; return 0; }
+    raw="$(printf '%s' "$raw" | sed 's/[[:space:]]*#.*//')"
+    raw="$(printf '%s' "$raw" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+    raw="$(printf '%s' "$raw" | sed 's/^"//; s/"$//; s/^'\''//; s/'\''$//')"
+    printf '%s' "$raw"
+}
+
 # ── Load existing config ───────────────────────────────────────────────────────
 # Read recognized config keys from a config.sh file into IC_* variables.
 # Only overwrites an IC_* variable if the key is present in the file.
@@ -145,6 +160,15 @@ ic_load_existing_config() {
 
     val=$(_ic_read_key LOWLEVEL_USE_TETHER_STOP "$cfg_file")
     [ -n "$val" ] && IC_LOWLEVEL_USE_TETHER_STOP="$val"
+
+    val=$(_ic_read_key VPN_LOCKDOWN_BOOT_ENFORCE "$cfg_file")
+    [ -n "$val" ] && IC_VPN_LOCKDOWN_BOOT_ENFORCE="$val"
+
+    val=$(_ic_read_key VPN_LOCKDOWN_RELEASE_ON_RESTORE "$cfg_file")
+    [ -n "$val" ] && IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE="$val"
+
+    val=$(_ic_read_key_preserve_ws VPN_LOCKDOWN_PROVIDER_PACKAGES "$cfg_file")
+    [ -n "$val" ] && IC_VPN_LOCKDOWN_PROVIDER_PACKAGES="$val"
 
     val=$(_ic_read_key TIMEOUT_SECS "$cfg_file")
     [ -n "$val" ] && IC_TIMEOUT_SECS="$val"
@@ -691,12 +715,28 @@ _ic_select_custom() {
         IC_LOWLEVEL_USE_TETHER_STOP="$IC_BOOL_RESULT"
         _ic_print "  → tether_stop: $IC_LOWLEVEL_USE_TETHER_STOP"
         _ic_print ""
+
+        ic_select_bool \
+            "Enable VPN lockdown during boot? (block connections without VPN)" \
+            "${IC_VPN_LOCKDOWN_BOOT_ENFORCE:-1}"
+        IC_VPN_LOCKDOWN_BOOT_ENFORCE="$IC_BOOL_RESULT"
+        _ic_print "  → vpn_lockdown_boot_enforce: $IC_VPN_LOCKDOWN_BOOT_ENFORCE"
+        _ic_print ""
+
+        ic_select_bool \
+            "Release VPN lockdown during restore? (after AFWall handoff)" \
+            "${IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE:-1}"
+        IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE="$IC_BOOL_RESULT"
+        _ic_print "  → vpn_lockdown_release_on_restore: $IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE"
+        _ic_print ""
     else
         IC_LOWLEVEL_INTERFACE_QUIESCE="0"
         IC_LOWLEVEL_USE_WIFI_SERVICE="0"
         IC_LOWLEVEL_USE_PHONE_DATA_CMD="0"
         IC_LOWLEVEL_USE_BLUETOOTH_MANAGER="0"
         IC_LOWLEVEL_USE_TETHER_STOP="0"
+        IC_VPN_LOCKDOWN_BOOT_ENFORCE="0"
+        IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE="0"
     fi
 
     ic_select_bool \
@@ -728,6 +768,9 @@ ic_write_config() {
     printf 'LOWLEVEL_USE_PHONE_DATA_CMD=%s\n' "${IC_LOWLEVEL_USE_PHONE_DATA_CMD:-1}"    >> "$dest"
     printf 'LOWLEVEL_USE_BLUETOOTH_MANAGER=%s\n' "${IC_LOWLEVEL_USE_BLUETOOTH_MANAGER:-0}" >> "$dest"
     printf 'LOWLEVEL_USE_TETHER_STOP=%s\n'    "${IC_LOWLEVEL_USE_TETHER_STOP:-1}"       >> "$dest"
+    printf 'VPN_LOCKDOWN_BOOT_ENFORCE=%s\n'   "${IC_VPN_LOCKDOWN_BOOT_ENFORCE:-1}"      >> "$dest"
+    printf 'VPN_LOCKDOWN_RELEASE_ON_RESTORE=%s\n' "${IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE:-1}" >> "$dest"
+    printf 'VPN_LOCKDOWN_PROVIDER_PACKAGES=\"%s\"\n' "${IC_VPN_LOCKDOWN_PROVIDER_PACKAGES:-}" >> "$dest"
     printf 'TIMEOUT_SECS=%s\n'                "${IC_TIMEOUT_SECS:-120}"                >> "$dest"
     printf 'TIMEOUT_POLICY=%s\n'             "${IC_TIMEOUT_POLICY:-fail_closed}"       >> "$dest"
     printf 'AUTO_TIMEOUT_UNBLOCK=%s\n'       "${IC_AUTO_TIMEOUT_UNBLOCK:-0}"           >> "$dest"
@@ -752,7 +795,7 @@ ic_write_config() {
 
 ic_render_summary() {
     local fwd_str in_str quiesce_str wifi_str data_str bt_str teth_str dbg_str
-    local auto_unblock_str unlock_gate_str
+    local auto_unblock_str unlock_gate_str vpn_boot_str vpn_release_str
 
     [ "${IC_ENABLE_FORWARD_BLOCK:-1}" = "1" ]       && fwd_str="enabled"    || fwd_str="disabled"
     [ "${IC_ENABLE_INPUT_BLOCK:-0}" = "1" ]          && in_str="enabled"     || in_str="disabled"
@@ -764,6 +807,8 @@ ic_render_summary() {
     [ "${IC_DEBUG:-0}" = "1" ]                       && dbg_str="enabled"    || dbg_str="disabled"
     [ "${IC_AUTO_TIMEOUT_UNBLOCK:-0}" = "1" ]        && auto_unblock_str="enabled"  || auto_unblock_str="DISABLED (safe default)"
     [ "${IC_TIMEOUT_UNLOCK_GATED:-1}" = "1" ]        && unlock_gate_str="yes"       || unlock_gate_str="no"
+    [ "${IC_VPN_LOCKDOWN_BOOT_ENFORCE:-1}" = "1" ]   && vpn_boot_str="enabled" || vpn_boot_str="disabled"
+    [ "${IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE:-1}" = "1" ] && vpn_release_str="enabled" || vpn_release_str="disabled"
 
     _ic_print ""
     _ic_print "  ── Configuration Summary ───────────────────────────"
@@ -776,6 +821,8 @@ ic_render_summary() {
     _ic_print "  Mobile data:           $data_str"
     _ic_print "  Bluetooth:             $bt_str"
     _ic_print "  Tethering:             $teth_str"
+    _ic_print "  VPN lockdown on boot:  $vpn_boot_str"
+    _ic_print "  VPN release restore:   $vpn_release_str"
     _ic_print "  AFWall timeout:        ${IC_TIMEOUT_SECS:-120}s"
     _ic_print "  Timeout policy:        ${IC_TIMEOUT_POLICY:-fail_closed}"
     _ic_print "  Auto timeout unblock:  $auto_unblock_str"

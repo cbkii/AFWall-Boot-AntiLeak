@@ -571,6 +571,158 @@ lowlevel_restore_bluetooth() {
   _ll_state_rm "bt_was_enabled"
 }
 
+
+
+# ── VPN lockdown orchestration ("block connections without VPN") ─────────────
+# Best-effort handling for Android's always-on VPN lockdown switch.
+#
+# Behaviour:
+#   - During early/late boot suppression, enable lockdown for VPN provider
+#     packages (auto-discovered + optional config list) as early as possible.
+#   - During transport restore (after AFWall takeover), disable lockdown again
+#     for the currently active provider and restore pre-boot always-on state.
+#
+# Config:
+#   VPN_LOCKDOWN_BOOT_ENFORCE=1        # enable boot-time lockdown enforcement
+#   VPN_LOCKDOWN_RELEASE_ON_RESTORE=1  # release lockdown during restore
+#   VPN_LOCKDOWN_PROVIDER_PACKAGES=""  # optional space/comma-separated package list
+
+_ll_split_words() {
+  printf '%s' "$1" | tr ',;' '  ' | tr -s '[:space:]' '\n' | sed '/^$/d'
+}
+
+_ll_vpn_get_active_pkg() {
+  local v
+  if has_cmd settings; then
+    v="$(settings get secure always_on_vpn_app 2>/dev/null)"
+    [ -n "$v" ] && [ "$v" != "null" ] && [ "$v" != "(null)" ] && { printf '%s' "$v"; return 0; }
+  fi
+  printf ''
+}
+
+_ll_vpn_get_lockdown_state() {
+  local v
+  if has_cmd settings; then
+    v="$(settings get secure always_on_vpn_lockdown 2>/dev/null)"
+    case "$v" in
+      1) printf '1'; return 0 ;;
+      0) printf '0'; return 0 ;;
+    esac
+  fi
+  printf 'unknown'
+}
+
+_ll_vpn_discover_providers() {
+  local out
+  # Android command surfaces differ by version; try several probes.
+  if has_cmd cmd; then
+    out="$(cmd package query-intent-services -a android.net.VpnService 2>/dev/null)"
+    if [ -n "$out" ]; then
+      printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([^/[:space:]][^/]*\)\/.*/\1/p'
+      return 0
+    fi
+    out="$(cmd package query-services -a android.net.VpnService 2>/dev/null)"
+    if [ -n "$out" ]; then
+      printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([^/[:space:]][^/]*\)\/.*/\1/p'
+      return 0
+    fi
+  fi
+  if has_cmd pm; then
+    out="$(pm query-intent-services -a android.net.VpnService 2>/dev/null)"
+    if [ -n "$out" ]; then
+      printf '%s\n' "$out" | sed -n 's/^[[:space:]]*\([^/[:space:]][^/]*\)\/.*/\1/p'
+      return 0
+    fi
+  fi
+  return 1
+}
+
+lowlevel_vpn_lockdown_enforce() {
+  [ "${VPN_LOCKDOWN_BOOT_ENFORCE:-1}" = "1" ] || return 0
+  has_cmd cmd || { debug_log "vpn_lockdown: cmd not available; skipping enforce"; return 0; }
+
+  _ll_init_dirs
+
+  # Snapshot pre-boot state once.
+  if ! _ll_state_exists "vpn_pre_active_pkg"; then
+    _ll_state_set "vpn_pre_active_pkg" "$(_ll_vpn_get_active_pkg)"
+    _ll_state_set "vpn_pre_lockdown" "$(_ll_vpn_get_lockdown_state)"
+    debug_log "vpn_lockdown: snapshot pre-state active='$(_ll_state_get vpn_pre_active_pkg)' lockdown='$(_ll_state_get vpn_pre_lockdown)'"
+  fi
+
+  local pkgs pkg active
+  pkgs=""
+  active="$(_ll_vpn_get_active_pkg)"
+  [ -n "$active" ] && pkgs="$pkgs $active"
+
+  if [ -n "${VPN_LOCKDOWN_PROVIDER_PACKAGES:-}" ]; then
+    while IFS= read -r pkg; do
+      [ -n "$pkg" ] && pkgs="$pkgs $pkg"
+    done <<EOF
+$(_ll_split_words "${VPN_LOCKDOWN_PROVIDER_PACKAGES}")
+EOF
+  fi
+
+  while IFS= read -r pkg; do
+    [ -n "$pkg" ] && pkgs="$pkgs $pkg"
+  done <<EOF
+$(_ll_vpn_discover_providers 2>/dev/null)
+EOF
+
+  # Deduplicate and enforce lockdown where possible.
+  local seen=" " ok=0
+  for pkg in $pkgs; do
+    case "$seen" in *" $pkg "*) continue ;; esac
+    seen="$seen$pkg "
+    if cmd connectivity set-always-on-vpn "$pkg" true >/dev/null 2>&1; then
+      log "vpn_lockdown: enabled 'block connections without VPN' for provider $pkg"
+      ok=1
+    else
+      debug_log "vpn_lockdown: provider $pkg could not be set always-on+lockdown"
+    fi
+  done
+
+  if [ "$ok" = "0" ]; then
+    debug_log "vpn_lockdown: no provider accepted lockdown command"
+  fi
+}
+
+lowlevel_vpn_lockdown_release_if_needed() {
+  [ "${VPN_LOCKDOWN_RELEASE_ON_RESTORE:-1}" = "1" ] || return 0
+  has_cmd cmd || return 0
+
+  # Avoid repeated release attempts once done.
+  if _ll_state_exists "vpn_lockdown_released"; then
+    return 0
+  fi
+
+  local active pre_pkg pre_lock
+  active="$(_ll_vpn_get_active_pkg)"
+  pre_pkg="$(_ll_state_get vpn_pre_active_pkg)"
+  pre_lock="$(_ll_state_get vpn_pre_lockdown)"
+
+  if [ -n "$active" ]; then
+    if cmd connectivity set-always-on-vpn "$active" false >/dev/null 2>&1; then
+      log "vpn_lockdown: disabled lockdown for active provider $active during restore"
+    else
+      debug_log "vpn_lockdown: could not disable lockdown for active provider $active"
+    fi
+  fi
+
+  # Restore pre-boot always-on baseline where available.
+  if [ -n "$pre_pkg" ] && [ "$pre_pkg" != "null" ]; then
+    case "$pre_lock" in
+      1|0)
+        if cmd connectivity set-always-on-vpn "$pre_pkg" "$pre_lock" >/dev/null 2>&1; then
+          log "vpn_lockdown: restored pre-boot always-on baseline for $pre_pkg (lockdown=$pre_lock)"
+        fi
+        ;;
+    esac
+  fi
+
+  _ll_state_rm "vpn_lockdown_enabled_pkgs"
+  _ll_state_set "vpn_lockdown_released" "1"
+}
 # ── Tethering control ──────────────────────────────────────────────────────────
 # Stops active tethering sessions.  Does NOT auto-restart tethering on restore
 # because tethering requires explicit user action to start; we do not want to
@@ -676,6 +828,8 @@ lowlevel_prepare_environment_early() {
 
   # Framework radio commands are NOT used here; defer to late phase.
   log "lowlevel_early: framework radio disable deferred to late phase (service.sh)"
+  # Best-effort earliest possible VPN lockdown arm (may no-op before framework).
+  lowlevel_vpn_lockdown_enforce
   log "lowlevel_early: done"
 }
 
@@ -714,6 +868,7 @@ lowlevel_prepare_environment_late() {
     if _ll_framework_ready; then
       lowlevel_disable_wifi
       lowlevel_disable_mobile_data
+      lowlevel_vpn_lockdown_enforce
       if [ "${LOWLEVEL_USE_BLUETOOTH_MANAGER:-0}" = "1" ]; then
         lowlevel_disable_bluetooth
       fi
@@ -867,6 +1022,7 @@ lowlevel_restore_wifi_if_allowed() {
     debug_log "lowlevel_restore_wifi_if_allowed: wifi was not changed by module; skipping"
     return 0
   }
+  lowlevel_vpn_lockdown_release_if_needed
   lowlevel_restore_wifi
 }
 
@@ -875,6 +1031,7 @@ lowlevel_restore_mobile_data_if_allowed() {
     debug_log "lowlevel_restore_mobile_data_if_allowed: mobile data was not changed by module; skipping"
     return 0
   }
+  lowlevel_vpn_lockdown_release_if_needed
   lowlevel_restore_mobile_data
 }
 
@@ -905,6 +1062,8 @@ lowlevel_prepare_environment() {
   _ll_state_rm "tether_was_active"
   _ll_state_rm "tether_ifaces_down"
   _ll_state_rm "ifaces_down"
+  _ll_state_rm "vpn_lockdown_enabled_pkgs"
+  _ll_state_rm "vpn_lockdown_released"
 
   _ll_state_set "mode" "$mode"
   log "lowlevel_prepare_environment: start (mode=$mode)"
@@ -923,6 +1082,7 @@ lowlevel_restore_changed_state() {
 
   log "lowlevel_restore_changed_state: start"
   lowlevel_restore_interfaces
+  lowlevel_vpn_lockdown_release_if_needed
   lowlevel_restore_wifi
   lowlevel_restore_mobile_data
   lowlevel_restore_bluetooth
@@ -963,6 +1123,8 @@ lowlevel_emergency_restore() {
     fi
     _ll_state_rm "ifaces_down"
   fi
+
+  lowlevel_vpn_lockdown_release_if_needed
 
   # ── Re-enable Wi-Fi ─────────────────────────────────────────────────────────
   if _ll_state_exists "wifi_was_enabled"; then

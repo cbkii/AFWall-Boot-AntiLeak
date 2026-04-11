@@ -128,6 +128,8 @@ Most users only need to know these options:
 | `WIFI_AFWALL_GATE` | `1` | Wi-Fi restore uses extra checks |
 | `MOBILE_AFWALL_GATE` | `1` | mobile-data restore uses extra checks |
 | `LOWLEVEL_MODE` | `safe` | lower-layer suppression mode |
+| `VPN_LOCKDOWN_BOOT_ENFORCE` | `1` | turn on Android "block connections without VPN" during boot wait |
+| `VPN_LOCKDOWN_RELEASE_ON_RESTORE` | `1` | turn VPN lockdown back off during restore after AFWall handoff |
 | `DEBUG` | `0` | verbose logging |
 
 If you are not sure, leave the defaults alone.
