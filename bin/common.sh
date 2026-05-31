@@ -114,10 +114,7 @@ _ipt() {
 }
 
 _ipt_out() {
-  local cmd="$1"
-  shift
-  [ -x "$cmd" ] || return 127
-  "$cmd" -w "$@" 2>/dev/null || "$cmd" "$@" 2>/dev/null
+  _ipt "$@"
 }
 
 
@@ -218,12 +215,32 @@ _ensure_loopback_return() {
 }
 
 _chain_block_intact() {
-  local cmd="$1" table="$2" chain="$3" parent_chain="$4"
-  _chain_exists "$cmd" "$table" "$chain" || return 1
-  _drop_exists "$cmd" "$table" "$chain" || return 1
-  _jump_exists "$cmd" "$table" "$parent_chain" "$chain" || return 1
-  _loopback_return_exists "$cmd" "$table" "$chain" "$parent_chain" || return 1
-  return 0
+  local cmd="$1" table="$2" chain="$3" parent_chain="$4" rules=""
+
+  # Hot-path integrity check: read the table once, then inspect the captured
+  # rules in memory.  This avoids several iptables/ip6tables forks per polling
+  # cycle while preserving the same chain+DROP+parent-jump+loopback semantics.
+  rules="$(_ipt "$cmd" -t "$table" -S 2>/dev/null)" || return 1
+
+  printf '%s\n' "$rules" | grep -qE "^-N ${chain}( |$)" || return 1
+  printf '%s\n' "$rules" | grep -qE "^-A ${chain}( .*| )-j DROP$|^-A ${chain}( .*| )-j DROP " || return 1
+  printf '%s\n' "$rules" | grep -qE "^-A ${parent_chain}( .*| )-j ${chain}$|^-A ${parent_chain}( .*| )-j ${chain} " || return 1
+
+  case "$parent_chain" in
+    OUTPUT)
+      printf '%s\n' "$rules" | grep -qE "^-A ${chain}( .*| )-o lo( .*| )-j RETURN$|^-A ${chain}( .*| )-o lo( .*| )-j RETURN " && return 0
+      case "$(basename "$cmd"):$table" in
+        ip6tables*:raw)
+          printf '%s\n' "$rules" | grep -qE "^-A ${chain}( .*| )-d ::1/128( .*| )-j RETURN$|^-A ${chain}( .*| )-d ::1/128( .*| )-j RETURN " && return 0
+          ;;
+      esac
+      ;;
+    INPUT|FORWARD)
+      printf '%s\n' "$rules" | grep -qE "^-A ${chain}( .*| )-i lo( .*| )-j RETURN$|^-A ${chain}( .*| )-i lo( .*| )-j RETURN " && return 0
+      ;;
+  esac
+
+  return 1
 }
 
 # ── Block installation ─────────────────────────────────────────────────────────
@@ -882,11 +899,13 @@ resolve_afwall_pkg() {
     fi
   done
   if has_cmd dumpsys; then
-    found="$(dumpsys package 2>/dev/null       | sed -n 's/.*Package \[\(dev\.ukanth\.ufirewall\.donate\|dev\.ukanth\.ufirewall\|com\.ukanth\.ufirewall\)\].*/\1/p'       | head -n1)"
-    if [ -n "$found" ]; then
-      printf '%s' "$found"
-      return 0
-    fi
+    found="$(dumpsys package 2>/dev/null)" || found=""
+    for c in dev.ukanth.ufirewall.donate dev.ukanth.ufirewall com.ukanth.ufirewall; do
+      if printf '%s\n' "$found" | grep -F "Package [$c]" >/dev/null 2>&1; then
+        printf '%s' "$c"
+        return 0
+      fi
+    done
   fi
   return 1
 }

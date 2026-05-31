@@ -1,4 +1,4 @@
-#!/system/bin/sh
+#!/bin/sh
 # Lightweight host-side logic tests. These do not require Android; they use
 # source/grep-level checks and fake settings shims for installer decisions.
 set -eu
@@ -38,6 +38,7 @@ pass "per-boot VPN cleanup"
 
 # Installer always-on VPN auto-config with fake settings command.
 TMP="${TMPDIR:-/tmp}/aba-test-$$"
+trap 'rm -rf "$TMP"' EXIT INT TERM
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/settings" <<'SH'
 #!/bin/sh
@@ -79,5 +80,4 @@ ic_apply_wifi_data_off_consistency >/dev/null
 [ "$IC_LOWLEVEL_USE_PHONE_DATA_CMD" = 1 ] || fail "wifi/data off did not enable data service"
 pass "Wi-Fi/data OFF consistency"
 
-rm -rf "$TMP"
 echo "All mock logic tests passed."

@@ -114,6 +114,7 @@
   AFW_PKG=""
   _afwall_pkg_last_log=""
   _refresh_afwall_pkg() {
+    [ -n "$AFW_PKG" ] && return 0
     local reason="${1:-poll}" new_pkg=""
     new_pkg="$(resolve_afwall_pkg 2>/dev/null)" || new_pkg=""
     if [ -n "$new_pkg" ]; then
