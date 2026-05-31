@@ -87,14 +87,24 @@ ENABLE_INPUT_BLOCK=0
 
 # ── Lower-layer mode ──────────────────────────────────────────────────────────
 #
-#   off    - No lower-layer suppression.  Firewall-only mode (v2.1.0 behaviour).
-#   safe   - Interface quiesce + service suppression. Uses individual flags
-#            below to control which services are disabled. (default)
+#   off    - No lower-layer suppression. Firewall-only fast reconnect mode. (default)
+#   safe   - Interface quiesce + optional service suppression. Uses individual flags
+#            below to control which services are disabled.
 #   strict - Same as safe; individual flags still apply, but this mode signals
 #            intent to enable maximum suppression.  Upgrade path: set all
 #            LOWLEVEL_USE_* flags to 1 and set mode to strict.
 #
-LOWLEVEL_MODE=safe
+LOWLEVEL_MODE=off
+
+# ── Wi-Fi/mobile-data OFF mode ───────────────────────────────────────────────
+# 0 = fast reconnect mode: leave Wi-Fi/mobile-data framework state alone and
+#     rely on the early netfilter hard block until AFWall is ready. Recommended
+#     for Pixel-style devices where radio/service toggles slow reconnect.
+# 1 = aggressive radio suppression: disable Wi-Fi/mobile data during the boot
+#     anti-leak window, then restore only if this module changed them.
+# WARNING: aggressive mode can substantially slow reconnect/release after boot
+# and unlock because Android must re-associate/revalidate networks afterwards.
+LOWLEVEL_WIFI_DATA_OFF=0
 
 # ── Interface quiesce ─────────────────────────────────────────────────────────
 # When enabled, the module brings non-loopback network interfaces DOWN during
@@ -111,21 +121,21 @@ LOWLEVEL_MODE=safe
 # Set to 0 if you experience boot-time issues with Wi-Fi or network management
 # reacting to interface state changes.
 #
-LOWLEVEL_INTERFACE_QUIESCE=1
+LOWLEVEL_INTERFACE_QUIESCE=0
 
 # ── Wi-Fi service suppression ─────────────────────────────────────────────────
 # Disables Wi-Fi via Android service commands (cmd wifi / svc wifi).
 # Tracks pre-boot Wi-Fi state; only re-enables if the module disabled it.
 # Enabled by default (best-effort; requires framework to be up).
 #
-LOWLEVEL_USE_WIFI_SERVICE=1
+LOWLEVEL_USE_WIFI_SERVICE=0
 
 # ── Mobile data suppression ───────────────────────────────────────────────────
 # Disables mobile data via Android service commands (cmd phone / svc data).
 # Tracks pre-boot data state; only re-enables if the module disabled it.
 # Enabled by default (best-effort; requires framework to be up).
 #
-LOWLEVEL_USE_PHONE_DATA_CMD=1
+LOWLEVEL_USE_PHONE_DATA_CMD=0
 
 # ── Bluetooth suppression ─────────────────────────────────────────────────────
 # Disables Bluetooth via cmd bluetooth_manager / svc bluetooth.
@@ -145,7 +155,7 @@ LOWLEVEL_USE_BLUETOOTH_MANAGER=0
 # Enabled by default.  Note: tethering is NOT auto-restarted after boot
 # because it requires explicit user action; this is intentional.
 #
-LOWLEVEL_USE_TETHER_STOP=1
+LOWLEVEL_USE_TETHER_STOP=0
 
 # ── VPN lockdown toggle during boot window ────────────────────────────────────
 # Controls Android's "block connections without VPN" (always-on VPN lockdown).
@@ -157,14 +167,14 @@ LOWLEVEL_USE_TETHER_STOP=1
 # During restore, the module then turns lockdown OFF again for the active
 # provider and restores the pre-boot always-on baseline where possible.
 #
-VPN_LOCKDOWN_BOOT_ENFORCE=1
+VPN_LOCKDOWN_BOOT_ENFORCE=0
 
 # ── VPN lockdown release during restore ───────────────────────────────────────
 # When enabled (default), restore phase disables lockdown for the active VPN
 # provider after AFWall handoff and attempts to restore the original pre-boot
 # always-on VPN state.
 #
-VPN_LOCKDOWN_RELEASE_ON_RESTORE=1
+VPN_LOCKDOWN_RELEASE_ON_RESTORE=0
 
 # ── Optional VPN provider package hints ───────────────────────────────────────
 # Optional space/comma-separated package list to supplement auto-discovery.
@@ -177,10 +187,24 @@ VPN_LOCKDOWN_PROVIDER_PACKAGES=""
 
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ── AFWall readiness gate ────────────────────────────────────────────────────
+# Keep the module hard block active, but skip expensive AFWall rule-graph checks
+# until Android has reached the stage where AFWall+ can realistically apply
+# rules.  On Pixel 9a / Android 16 diagnostics, AFWall+ was never ready inside
+# the first 8 seconds after unlock.
+AFWALL_READY_REQUIRE_BOOT_COMPLETED=1
+AFWALL_READY_REQUIRE_UNLOCK=1
+AFWALL_READY_MIN_POST_UNLOCK_SECS=8
+
+# When enabled, TIMEOUT_SECS starts when the AFWall readiness gate opens, not
+# at raw boot or raw unlock time.  This prevents the intentional unlock grace
+# window from consuming timeout budget.
+TIMEOUT_START_AFTER_READY_GATE=1
+
 # ── Timeout ───────────────────────────────────────────────────────────────────
 # Maximum seconds to wait for AFWall rules before the timeout action fires.
 # Increase on very slow devices. Conservative default: 120 s.
-TIMEOUT_SECS=120
+TIMEOUT_SECS=90
 
 # ── Timeout policy ────────────────────────────────────────────────────────────
 # Controls what happens when TIMEOUT_SECS is reached for a family that has not
@@ -236,7 +260,7 @@ TIMEOUT_UNLOCK_GATED=1
 #
 # Default: 1 (enabled)
 #
-WIFI_AFWALL_GATE=1
+WIFI_AFWALL_GATE=0
 
 # ── Transport-aware mobile-data gating ───────────────────────────────────────
 # When set to 1 (default), mobile data is not restored until AFWall's mobile
@@ -245,7 +269,7 @@ WIFI_AFWALL_GATE=1
 #
 # Default: 1 (enabled)
 #
-MOBILE_AFWALL_GATE=1
+MOBILE_AFWALL_GATE=0
 
 # ── Radio-off reassertion interval ───────────────────────────────────────────
 # While waiting for AFWall transport readiness, the module periodically

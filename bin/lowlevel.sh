@@ -637,6 +637,18 @@ _ll_vpn_discover_providers() {
   return 1
 }
 
+lowlevel_clear_stale_vpn_state() {
+  _ll_init_dirs
+  local cleared=0 f
+  for f in       vpn_pre_active_pkg       vpn_pre_lockdown       vpn_lockdown_enabled_pkgs       vpn_lockdown_released; do
+    if _ll_state_exists "$f"; then
+      _ll_state_rm "$f"
+      cleared=1
+    fi
+  done
+  [ "$cleared" = "1" ] && log "vpn_lockdown: cleared stale per-boot VPN state markers"
+}
+
 lowlevel_vpn_lockdown_enforce() {
   [ "${VPN_LOCKDOWN_BOOT_ENFORCE:-1}" = "1" ] || return 0
   has_cmd cmd || { debug_log "vpn_lockdown: cmd not available; skipping enforce"; return 0; }
@@ -783,9 +795,15 @@ lowlevel_restore_tethering_note() {
 # Only kernel-space operations and /sys interactions are performed.
 # Persists blackout state so service.sh knows to enforce radio-off on startup.
 lowlevel_prepare_environment_early() {
-  local mode="${LOWLEVEL_MODE:-safe}"
+  local mode="${LOWLEVEL_MODE:-off}"
+  _ll_init_dirs
+  lowlevel_clear_stale_vpn_state
+  lowlevel_vpn_lockdown_enforce
   case "$mode" in
-    off) return 0 ;;
+    off)
+      debug_log "lowlevel_early: LOWLEVEL_MODE=off; lower-layer suppression disabled"
+      return 0
+      ;;
     safe|strict) ;;
     *)
       log "lowlevel_early: unknown LOWLEVEL_MODE='$mode'; treating as off"
@@ -793,7 +811,6 @@ lowlevel_prepare_environment_early() {
       ;;
   esac
 
-  _ll_init_dirs
   _ll_state_set "mode" "$mode"
   log "lowlevel_early: start (mode=$mode)"
 
@@ -806,7 +823,9 @@ lowlevel_prepare_environment_early() {
   # The main purpose is to catch any interface that appeared unusually early.
   local ip_cmd
   ip_cmd="$(_find_cmd ip 2>/dev/null)" || ip_cmd=""
-  if [ -n "$ip_cmd" ] && [ -d "/sys/class/net" ]; then
+  if [ "${LOWLEVEL_INTERFACE_QUIESCE:-0}" != "1" ]; then
+    debug_log "lowlevel_early: interface quiesce disabled"
+  elif [ -n "$ip_cmd" ] && [ -d "/sys/class/net" ]; then
     local iface operstate
     for iface in /sys/class/net/*/; do
       iface="${iface%/}"; iface="${iface##*/}"
@@ -859,34 +878,33 @@ lowlevel_prepare_environment_late() {
 
   log "lowlevel_late: start (mode=$mode)"
 
-  # Interface quiesce: bring down any remaining UP interfaces.
-  lowlevel_quiesce_interfaces
+  # Interface quiesce: bring down any remaining UP interfaces only when explicitly enabled.
+  if [ "${LOWLEVEL_INTERFACE_QUIESCE:-0}" = "1" ]; then
+    lowlevel_quiesce_interfaces
+  else
+    debug_log "lowlevel_late: interface quiesce disabled"
+  fi
 
-  # Service-level suppression: retry until framework is ready.
-  local attempt=0 max_attempts=5
-  while [ "$attempt" -lt "$max_attempts" ]; do
-    if _ll_framework_ready; then
+  # Service-level suppression is opportunistic and non-blocking.  Do not wait
+  # repeatedly here: the iptables hard block is authoritative and the main
+  # service loop must start tracking unlock/readiness immediately.
+  if _ll_framework_ready; then
+    if [ "${LOWLEVEL_WIFI_DATA_OFF:-0}" = "1" ]; then
       lowlevel_disable_wifi
       lowlevel_disable_mobile_data
-      lowlevel_vpn_lockdown_enforce
-      if [ "${LOWLEVEL_USE_BLUETOOTH_MANAGER:-0}" = "1" ]; then
-        lowlevel_disable_bluetooth
-      fi
-      if [ "${LOWLEVEL_USE_TETHER_STOP:-1}" = "1" ]; then
-        lowlevel_stop_tethering
-      fi
-      log "lowlevel_late: service suppression done"
-      break
+    else
+      log "lowlevel_late: fast reconnect mode; Wi-Fi/mobile-data left unchanged behind netfilter hard block"
     fi
-    attempt=$((attempt + 1))
-    if [ "$attempt" -lt "$max_attempts" ]; then
-      debug_log "lowlevel: framework not ready (attempt $attempt/${max_attempts}); retrying in 3s"
-      sleep 3
+    lowlevel_vpn_lockdown_enforce
+    if [ "${LOWLEVEL_USE_BLUETOOTH_MANAGER:-0}" = "1" ]; then
+      lowlevel_disable_bluetooth
     fi
-  done
-
-  if [ "$attempt" -ge "$max_attempts" ]; then
-    log "lowlevel_late: WARN: framework not ready after ${max_attempts} attempts; service suppression skipped (iptables hard block remains)"
+    if [ "${LOWLEVEL_USE_TETHER_STOP:-0}" = "1" ]; then
+      lowlevel_stop_tethering
+    fi
+    log "lowlevel_late: opportunistic service suppression done"
+  else
+    log "lowlevel_late: framework not ready; skipping service suppression this pass (iptables hard block remains)"
   fi
 
   _ll_state_rm "radio_off_pending_early"
@@ -898,8 +916,9 @@ lowlevel_prepare_environment_late() {
 # Re-verifies Wi-Fi and mobile data off-state; re-applies if needed.
 lowlevel_reassert_radios_off() {
   local mode
-  mode="${LOWLEVEL_MODE:-safe}"
+  mode="${LOWLEVEL_MODE:-off}"
   [ "$mode" = "off" ] && return 0
+  [ "${LOWLEVEL_WIFI_DATA_OFF:-0}" = "1" ] || return 0
 
   # Wi-Fi reassertion
   if [ "${LOWLEVEL_USE_WIFI_SERVICE:-1}" = "1" ] && _ll_state_exists "wifi_was_enabled"; then
@@ -1040,17 +1059,21 @@ lowlevel_restore_mobile_data_if_allowed() {
 # Redirects to the late phase; early phase is now called from post-fs-data.sh.
 # Clears stale ll state from a previous unclean boot before starting.
 lowlevel_prepare_environment() {
-  local mode="${LOWLEVEL_MODE:-safe}"
+  local mode="${LOWLEVEL_MODE:-off}"
+  _ll_init_dirs
+  lowlevel_clear_stale_vpn_state
+  lowlevel_vpn_lockdown_enforce
   case "$mode" in
-    off) return 0 ;;
+    off)
+      debug_log "lowlevel_prepare_environment: LOWLEVEL_MODE=off; lower-layer suppression disabled"
+      return 0
+      ;;
     safe|strict) ;;
     *)
       log "lowlevel: unknown LOWLEVEL_MODE='$mode'; treating as off"
       return 0
       ;;
   esac
-
-  _ll_init_dirs
 
   # Clear any stale ll state from a previous unclean boot, but preserve
   # early-phase data written during this boot's post-fs-data stage.
