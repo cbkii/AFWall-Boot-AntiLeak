@@ -24,10 +24,13 @@ Use that first for install, first boot, quick recovery, and basic settings.
 The module is built around a staged handoff model:
 
 1. install a kernel-level blackout as early as possible,
-2. suppress lower-layer connectivity once framework services exist,
-3. prove AFWall is actually ready,
-4. release the family blackout, then
-5. restore Wi-Fi and mobile when their own restore criteria are satisfied.
+2. maintain and repair that blackout during `service.sh`,
+3. wait for the configured readiness gate (`sys.boot_completed`, unlock, and post-unlock grace),
+4. prove AFWall is actually ready using its iptables graph,
+5. release the family blackout, then
+6. optionally restore lower-layer state that the module changed itself.
+
+On Pixel-style fast reconnect profiles, lower-layer Wi-Fi/mobile-data toggles are disabled by default. The netfilter block is authoritative; framework radio toggles are optional and secondary.
 
 ### Stage A — `post-fs-data.sh`
 
@@ -51,11 +54,13 @@ What it does:
 - writes `service.pid` so manual recovery can stop the loop,
 - verifies the Stage A blackout is still intact,
 - repairs it immediately if state says it should exist but live integrity checks fail,
-- disables Wi-Fi and mobile data with framework commands when configured,
-- optionally quiesces interfaces and stops tethering,
-- periodically reasserts both blackout integrity and radio-off state while waiting.
+- tracks boot-complete/unlock/readiness-gate timing cheaply,
+- only starts AFWall graph parsing after the readiness gate opens,
+- optionally disables Wi-Fi/mobile-data if aggressive radio suppression is configured,
+- optionally quiesces interfaces, stops tethering, or manages VPN lockdown,
+- periodically reasserts blackout integrity while waiting.
 
-This stage is why the module is not relying on the raw `iptables` blackout alone. Lower-layer suppression is a second line of protection, not a replacement. See [Configuration reference](#configuration-reference).
+This stage does not depend on radio toggles for protection. Lower-layer suppression is a second line of protection, not a replacement. See [Configuration reference](#configuration-reference).
 
 ### Stage C — AFWall takeover detection
 
@@ -88,6 +93,22 @@ After family release, the service loop continues until Wi-Fi and mobile restorat
 Transport decisions are based on AFWall transport subtrees such as `afwall-wifi` and `afwall-3g`, including reachability and stable absence fallbacks. See [Transport-aware restore logic](#transport-aware-restore-logic).
 
 ## AFWall readiness and handoff
+
+### Readiness gate before graph checks
+
+AFWall process presence is insufficient. The module does not release because a package exists or because an AFWall process is visible; final handoff is based on the AFWall iptables graph.
+
+By default, heavy AFWall graph checks are skipped until:
+
+```sh
+sys.boot_completed=1
+device unlocked
+AFWALL_READY_MIN_POST_UNLOCK_SECS=8 elapsed after unlock
+```
+
+This prevents useless early graph polling on devices where AFWall+ cannot realistically apply rules immediately after unlock. While the gate is closed, the service loop only performs cheap fail-closed maintenance: override/stop checks, blackout integrity checks, and boot/unlock timing.
+
+When `TIMEOUT_START_AFTER_READY_GATE=1`, `TIMEOUT_SECS` starts at readiness-gate open time, not at raw boot or raw unlock. The intentional post-unlock grace window does not consume timeout budget.
 
 ### Coherent per-poll snapshots
 
@@ -207,10 +228,12 @@ The shipped defaults are conservative:
 - `TIMEOUT_POLICY=fail_closed`
 - `AUTO_TIMEOUT_UNBLOCK=0`
 - `TIMEOUT_UNLOCK_GATED=1`
+- `TIMEOUT_START_AFTER_READY_GATE=1`
 
 That means:
 
-- timeout countdown does not start before device unlock,
+- timeout countdown does not start before the readiness gate opens,
+- the post-unlock grace window does not consume timeout budget,
 - timeout never auto-unblocks unless you explicitly opt into it,
 - on unresolved families the module keeps the blackout by default.
 
@@ -244,6 +267,49 @@ Persistent user overrides live at:
 ```
 
 Built-in defaults ship in [`config.sh`](config.sh). Edit the persistent file, then reboot.
+
+
+### Fast Pixel-style profile
+
+Recommended fast reconnect settings for Pixel 9a / Android 16 diagnostics:
+
+```sh
+LOWLEVEL_MODE=off
+LOWLEVEL_WIFI_DATA_OFF=0
+LOWLEVEL_INTERFACE_QUIESCE=0
+LOWLEVEL_USE_WIFI_SERVICE=0
+LOWLEVEL_USE_PHONE_DATA_CMD=0
+LOWLEVEL_USE_BLUETOOTH_MANAGER=0
+LOWLEVEL_USE_TETHER_STOP=0
+WIFI_AFWALL_GATE=0
+MOBILE_AFWALL_GATE=0
+AFWALL_READY_REQUIRE_BOOT_COMPLETED=1
+AFWALL_READY_REQUIRE_UNLOCK=1
+AFWALL_READY_MIN_POST_UNLOCK_SECS=8
+TIMEOUT_START_AFTER_READY_GATE=1
+TIMEOUT_SECS=90
+```
+
+This leaves radios/framework state alone and relies on the early netfilter block until AFWall graph readiness is proven.
+
+### Aggressive Wi-Fi/mobile-data OFF mode
+
+Set `LOWLEVEL_WIFI_DATA_OFF=1` to disable Wi-Fi and mobile data during the anti-leak window. The installer/reconfigure flow warns that this can slow reconnect/release because Android must reconnect and revalidate networks after restore. The runtime restores only state that the module changed itself.
+
+### VPN always-on install/update detection
+
+During install/update, `installer_config.sh` reads Android secure settings:
+
+```sh
+settings get secure always_on_vpn_app
+settings get secure always_on_vpn_lockdown
+```
+
+If an always-on VPN app is configured and the module VPN options are not explicitly present in existing config or installer.cfg, the installer enables `VPN_LOCKDOWN_BOOT_ENFORCE=1` and `VPN_LOCKDOWN_RELEASE_ON_RESTORE=1`. If no always-on VPN is configured, VPN lockdown integration remains off by default. Explicit user config is preserved. Runtime VPN state is per-boot only; stale VPN restore markers are cleared at boot initialisation.
+
+### FORWARD and IPv6 raw integrity
+
+FORWARD protection is active only when the module chain exists, the DROP rule exists, the parent `FORWARD` jump exists, and loopback exemption is present. Orphaned FORWARD chains are degraded and repaired while configured active. IPv6 raw OUTPUT is also required to have loopback exemption before being considered healthy.
 
 ### Integration mode
 

@@ -102,6 +102,22 @@ _find_cmd() {
 
 has_cmd() { _find_cmd "$1" >/dev/null 2>&1; }
 
+# ── iptables/ip6tables wrapper ────────────────────────────────────────────────
+# Android builds and backends differ in xtables lock support.  Prefer -w to
+# avoid racing AFWall+ while it applies rules, then fall back cleanly for older
+# binaries that reject -w.  Keep all arguments after the binary path unchanged.
+_ipt() {
+  local cmd="$1"
+  shift
+  [ -x "$cmd" ] || return 127
+  "$cmd" -w "$@" 2>/dev/null || "$cmd" "$@" 2>/dev/null
+}
+
+_ipt_out() {
+  _ipt "$@"
+}
+
+
 # ── Config loading ─────────────────────────────────────────────────────────────
 # Sources config.sh from the module directory (built-in defaults), then from the
 # persistent data directory (user override). Both files are loaded so the
@@ -135,21 +151,96 @@ load_config() {
 # ── IPTables low-level helpers ─────────────────────────────────────────────────
 _table_available() {
   local cmd="$1" table="$2"
-  [ -x "$cmd" ] || return 1
-  "$cmd" -t "$table" -S >/dev/null 2>&1
+  _ipt "$cmd" -t "$table" -S >/dev/null 2>&1
 }
 
 _chain_exists() {
   local cmd="$1" table="$2" chain="$3"
-  [ -x "$cmd" ] || return 1
-  "$cmd" -t "$table" -S "$chain" >/dev/null 2>&1
+  _ipt "$cmd" -t "$table" -S "$chain" >/dev/null 2>&1
 }
 
 # Check whether a plain jump rule (-j TARGET) already exists in CHAIN.
 _jump_exists() {
   local cmd="$1" table="$2" chain="$3" target="$4"
-  [ -x "$cmd" ] || return 1
-  "$cmd" -t "$table" -C "$chain" -j "$target" 2>/dev/null
+  _ipt "$cmd" -t "$table" -C "$chain" -j "$target" >/dev/null 2>&1
+}
+
+_drop_exists() {
+  local cmd="$1" table="$2" chain="$3"
+  _ipt "$cmd" -t "$table" -C "$chain" -j DROP >/dev/null 2>&1
+}
+
+_loopback_return_exists() {
+  local cmd="$1" table="$2" chain="$3" parent_chain="$4"
+  case "$parent_chain" in
+    OUTPUT)
+      _ipt "$cmd" -t "$table" -C "$chain" -o lo -j RETURN >/dev/null 2>&1 && return 0
+      # IPv6 raw fallback for backends that reject -o lo in raw checks.
+      case "$(basename "$cmd"):$table" in
+        ip6tables*:raw)
+          _ipt "$cmd" -t "$table" -C "$chain" -d ::1/128 -j RETURN >/dev/null 2>&1 && return 0
+          ;;
+      esac
+      ;;
+    INPUT|FORWARD)
+      _ipt "$cmd" -t "$table" -C "$chain" -i lo -j RETURN >/dev/null 2>&1 && return 0
+      ;;
+  esac
+  return 1
+}
+
+_ensure_loopback_return() {
+  local cmd="$1" table="$2" chain="$3" parent_chain="$4"
+  _loopback_return_exists "$cmd" "$table" "$chain" "$parent_chain" && return 0
+  case "$parent_chain" in
+    OUTPUT)
+      if _ipt "$cmd" -t "$table" -I "$chain" 1 -o lo -j RETURN >/dev/null 2>&1; then
+        return 0
+      fi
+      case "$(basename "$cmd"):$table" in
+        ip6tables*:raw)
+          if _ipt "$cmd" -t "$table" -I "$chain" 1 -d ::1/128 -j RETURN >/dev/null 2>&1; then
+            log "_ensure_loopback_return: used IPv6 ::1 raw fallback for $chain"
+            return 0
+          fi
+          ;;
+      esac
+      ;;
+    INPUT|FORWARD)
+      _ipt "$cmd" -t "$table" -I "$chain" 1 -i lo -j RETURN >/dev/null 2>&1 && return 0
+      ;;
+  esac
+  log "_ensure_loopback_return: WARN: could not add loopback RETURN to $chain in $table/$(basename "$cmd")"
+  return 1
+}
+
+_chain_block_intact() {
+  local cmd="$1" table="$2" chain="$3" parent_chain="$4" rules=""
+
+  # Hot-path integrity check: read the table once, then inspect the captured
+  # rules in memory.  This avoids several iptables/ip6tables forks per polling
+  # cycle while preserving the same chain+DROP+parent-jump+loopback semantics.
+  rules="$(_ipt "$cmd" -t "$table" -S 2>/dev/null)" || return 1
+
+  printf '%s\n' "$rules" | grep -qE "^-N ${chain}( |$)" || return 1
+  printf '%s\n' "$rules" | grep -qE "^-A ${chain}( .*| )-j DROP$|^-A ${chain}( .*| )-j DROP " || return 1
+  printf '%s\n' "$rules" | grep -qE "^-A ${parent_chain}( .*| )-j ${chain}$|^-A ${parent_chain}( .*| )-j ${chain} " || return 1
+
+  case "$parent_chain" in
+    OUTPUT)
+      printf '%s\n' "$rules" | grep -qE "^-A ${chain}( .*| )-o lo( .*| )-j RETURN$|^-A ${chain}( .*| )-o lo( .*| )-j RETURN " && return 0
+      case "$(basename "$cmd"):$table" in
+        ip6tables*:raw)
+          printf '%s\n' "$rules" | grep -qE "^-A ${chain}( .*| )-d ::1/128( .*| )-j RETURN$|^-A ${chain}( .*| )-d ::1/128( .*| )-j RETURN " && return 0
+          ;;
+      esac
+      ;;
+    INPUT|FORWARD)
+      printf '%s\n' "$rules" | grep -qE "^-A ${chain}( .*| )-i lo( .*| )-j RETURN$|^-A ${chain}( .*| )-i lo( .*| )-j RETURN " && return 0
+      ;;
+  esac
+
+  return 1
 }
 
 # ── Block installation ─────────────────────────────────────────────────────────
@@ -165,60 +256,46 @@ _install_chain_block_table() {
     return 1
   fi
 
-  # Verify the parent built-in chain exists in this table (guard against
-  # calling e.g. FORWARD in the raw table which only has PREROUTING/OUTPUT).
-  if ! "$cmd" -t "$table" -S "$parent_chain" >/dev/null 2>&1; then
+  if ! _ipt "$cmd" -t "$table" -S "$parent_chain" >/dev/null 2>&1; then
     debug_log "_install_chain_block_table: $parent_chain not in $table ($(basename "$cmd"))"
     return 1
   fi
 
-  # Create chain if it does not yet exist.
   if ! _chain_exists "$cmd" "$table" "$chain"; then
-    if ! "$cmd" -t "$table" -N "$chain" 2>/dev/null; then
+    if ! _ipt "$cmd" -t "$table" -N "$chain" >/dev/null 2>&1; then
       log "_install_chain_block_table: failed to create $chain in $table"
       return 1
     fi
     debug_log "_install_chain_block_table: created $chain in $table"
   fi
 
-  # Loopback exemption — direction depends on parent chain.
-  # OUTPUT: exempt packets leaving on loopback (-o lo).
-  # INPUT/FORWARD: exempt packets arriving on loopback (-i lo) to avoid
-  # breaking local IPC and preventing kernel health traffic from being dropped.
-  case "$parent_chain" in
-    OUTPUT)
-      if ! "$cmd" -t "$table" -C "$chain" -o lo -j RETURN 2>/dev/null; then
-        "$cmd" -t "$table" -A "$chain" -o lo -j RETURN 2>/dev/null || true
-      fi
-      ;;
-    INPUT|FORWARD)
-      if ! "$cmd" -t "$table" -C "$chain" -i lo -j RETURN 2>/dev/null; then
-        "$cmd" -t "$table" -A "$chain" -i lo -j RETURN 2>/dev/null || true
-      fi
-      ;;
-  esac
+  # Loopback exemption must be inserted before DROP.  A stale chain may already
+  # contain DROP, so append is not safe here.
+  _ensure_loopback_return "$cmd" "$table" "$chain" "$parent_chain" || true
 
-  # Add DROP rule to the chain (idempotent check).
-  if ! "$cmd" -t "$table" -C "$chain" -j DROP 2>/dev/null; then
-    if ! "$cmd" -t "$table" -A "$chain" -j DROP 2>/dev/null; then
+  if ! _drop_exists "$cmd" "$table" "$chain"; then
+    if ! _ipt "$cmd" -t "$table" -A "$chain" -j DROP >/dev/null 2>&1; then
       log "_install_chain_block_table: failed to add DROP to $chain in $table"
-      # Roll back the chain so it is not left half-configured.
-      "$cmd" -t "$table" -F "$chain" 2>/dev/null || true
-      "$cmd" -t "$table" -X "$chain" 2>/dev/null || true
+      _ipt "$cmd" -t "$table" -F "$chain" >/dev/null 2>&1 || true
+      _ipt "$cmd" -t "$table" -X "$chain" >/dev/null 2>&1 || true
       return 1
     fi
   fi
 
-  # Insert jump at position 1 in parent_chain (idempotent).
   if ! _jump_exists "$cmd" "$table" "$parent_chain" "$chain"; then
-    if ! "$cmd" -t "$table" -I "$parent_chain" 1 -j "$chain" 2>/dev/null; then
-      log "_install_chain_block_table: failed to insert $parent_chain jump to $chain in $table"
-      # Do not abort; chain + DROP are still in place and will block if a
-      # jump already exists from a previous invocation.
+    if _ipt "$cmd" -t "$table" -I "$parent_chain" 1 -j "$chain" >/dev/null 2>&1; then
+      log "_install_chain_block_table: inserted $parent_chain -> $chain in $table"
+    else
+      log "_install_chain_block_table: WARN: failed to insert $parent_chain jump to $chain in $table"
     fi
   fi
 
-  return 0
+  if _chain_block_intact "$cmd" "$table" "$chain" "$parent_chain"; then
+    return 0
+  fi
+
+  log "_install_chain_block_table: DEGRADED $table/$parent_chain->$chain (chain/drop/jump/loopback not all verified)"
+  return 1
 }
 
 # Backward-compatible alias used internally (OUTPUT direction, any table).
@@ -317,13 +394,18 @@ install_forward_block_v4() {
   }
   _init_dirs
 
-  if _install_chain_block_table "$ipt" filter "$CHAIN_FWD_V4" FORWARD; then
+  if _install_chain_block_table "$ipt" filter "$CHAIN_FWD_V4" FORWARD && forward_block_intact_v4; then
     printf '1' > "${STATE_DIR}/ipv4_fwd_active" 2>/dev/null || true
-    log "install_forward_block_v4: installed in filter table"
+    log "install_forward_block_v4: active in filter table (chain+DROP+FORWARD jump+loopback verified)"
     return 0
   fi
 
-  log "install_forward_block_v4: WARN: could not install IPv4 FORWARD block; tethered-client traffic unprotected"
+  rm -f "${STATE_DIR}/ipv4_fwd_active" 2>/dev/null || true
+  if _chain_exists "$ipt" filter "$CHAIN_FWD_V4"; then
+    log "install_forward_block_v4: DEGRADED/orphaned; not marking active"
+  else
+    log "install_forward_block_v4: WARN: could not install IPv4 FORWARD block; tethered-client traffic unprotected"
+  fi
   return 1
 }
 
@@ -335,14 +417,31 @@ install_forward_block_v6() {
   }
   _init_dirs
 
-  if _install_chain_block_table "$ip6t" filter "$CHAIN_FWD_V6" FORWARD; then
+  if _install_chain_block_table "$ip6t" filter "$CHAIN_FWD_V6" FORWARD && forward_block_intact_v6; then
     printf '1' > "${STATE_DIR}/ipv6_fwd_active" 2>/dev/null || true
-    log "install_forward_block_v6: installed in filter table"
+    log "install_forward_block_v6: active in filter table (chain+DROP+FORWARD jump+loopback verified)"
     return 0
   fi
 
-  log "install_forward_block_v6: WARN: could not install IPv6 FORWARD block; reduced tether coverage"
+  rm -f "${STATE_DIR}/ipv6_fwd_active" 2>/dev/null || true
+  if _chain_exists "$ip6t" filter "$CHAIN_FWD_V6"; then
+    log "install_forward_block_v6: DEGRADED/orphaned; not marking active"
+  else
+    log "install_forward_block_v6: WARN: could not install IPv6 FORWARD block; reduced tether coverage"
+  fi
   return 1
+}
+
+repair_forward_block_v4() {
+  [ "${ENABLE_FORWARD_BLOCK:-1}" = "0" ] && return 0
+  log "repair_forward_block_v4: verifying/repairing IPv4 FORWARD block"
+  install_forward_block_v4
+}
+
+repair_forward_block_v6() {
+  [ "${ENABLE_FORWARD_BLOCK:-1}" = "0" ] && return 0
+  log "repair_forward_block_v6: verifying/repairing IPv6 FORWARD block"
+  install_forward_block_v6
 }
 
 # ── INPUT block (optional: inbound traffic hardening) ─────────────────────────
@@ -435,9 +534,8 @@ _remove_chain_block_table() {
   [ -x "$cmd" ] || return 0
   _table_available "$cmd" "$table" || return 0
 
-  # Remove all jump rules from parent_chain pointing at our chain.
   while _jump_exists "$cmd" "$table" "$parent_chain" "$chain"; do
-    "$cmd" -t "$table" -D "$parent_chain" -j "$chain" 2>/dev/null || break
+    _ipt "$cmd" -t "$table" -D "$parent_chain" -j "$chain" >/dev/null 2>&1 || break
     n=$((n + 1))
     if [ "$n" -gt 10 ]; then
       log "_remove_chain_block_table: loop-guard hit removing $parent_chain jump ($chain $table)"
@@ -445,10 +543,9 @@ _remove_chain_block_table() {
     fi
   done
 
-  # Flush and delete the chain if it still exists.
   if _chain_exists "$cmd" "$table" "$chain"; then
-    "$cmd" -t "$table" -F "$chain" 2>/dev/null || true
-    "$cmd" -t "$table" -X "$chain" 2>/dev/null || true
+    _ipt "$cmd" -t "$table" -F "$chain" >/dev/null 2>&1 || true
+    _ipt "$cmd" -t "$table" -X "$chain" >/dev/null 2>&1 || true
     debug_log "_remove_chain_block_table: removed $chain from $table ($parent_chain)"
   fi
   return 0
@@ -569,18 +666,35 @@ output_block_present_v6() {
 
 # FORWARD and INPUT chains live exclusively in the filter table; no table hint
 # needed — just check for chain/jump existence in filter.
-forward_block_present_v4() {
+forward_block_intact_v4() {
   local ipt
   ipt="$(_find_cmd iptables 2>/dev/null)" || return 1
-  _chain_exists "$ipt" filter "$CHAIN_FWD_V4" && return 0
-  return 1
+  _chain_block_intact "$ipt" filter "$CHAIN_FWD_V4" FORWARD
 }
 
-forward_block_present_v6() {
+forward_block_intact_v6() {
   local ip6t
   ip6t="$(_find_cmd ip6tables 2>/dev/null)" || return 1
-  _chain_exists "$ip6t" filter "$CHAIN_FWD_V6" && return 0
-  return 1
+  _chain_block_intact "$ip6t" filter "$CHAIN_FWD_V6" FORWARD
+}
+
+forward_block_present_v4() { forward_block_intact_v4; }
+forward_block_present_v6() { forward_block_intact_v6; }
+
+forward_block_degraded_v4() {
+  local ipt
+  ipt="$(_find_cmd iptables 2>/dev/null)" || return 1
+  _chain_exists "$ipt" filter "$CHAIN_FWD_V4" || return 1
+  forward_block_intact_v4 && return 1
+  return 0
+}
+
+forward_block_degraded_v6() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables 2>/dev/null)" || return 1
+  _chain_exists "$ip6t" filter "$CHAIN_FWD_V6" || return 1
+  forward_block_intact_v6 && return 1
+  return 0
 }
 
 input_block_present_v4() {
@@ -660,36 +774,28 @@ output_drop_rule_present_v6_filter() {
 _output_block_intact_v4_raw() {
   local ipt
   ipt="$(_find_cmd iptables 2>/dev/null)" || return 1
-  _chain_exists "$ipt" raw "$CHAIN_OUT_V4" || return 1
-  "$ipt" -t raw -C "$CHAIN_OUT_V4" -j DROP 2>/dev/null || return 1
-  _jump_exists "$ipt" raw OUTPUT "$CHAIN_OUT_V4"
+  _chain_block_intact "$ipt" raw "$CHAIN_OUT_V4" OUTPUT
 }
 
 # Returns 0 if the v4 OUTPUT block is fully intact in the filter table.
 _output_block_intact_v4_filter() {
   local ipt
   ipt="$(_find_cmd iptables 2>/dev/null)" || return 1
-  _chain_exists "$ipt" filter "$CHAIN_OUT_V4" || return 1
-  "$ipt" -t filter -C "$CHAIN_OUT_V4" -j DROP 2>/dev/null || return 1
-  _jump_exists "$ipt" filter OUTPUT "$CHAIN_OUT_V4"
+  _chain_block_intact "$ipt" filter "$CHAIN_OUT_V4" OUTPUT
 }
 
 # Returns 0 if the v6 OUTPUT block is fully intact in the raw table.
 _output_block_intact_v6_raw() {
   local ip6t
   ip6t="$(_find_cmd ip6tables 2>/dev/null)" || return 1
-  _chain_exists "$ip6t" raw "$CHAIN_OUT_V6" || return 1
-  "$ip6t" -t raw -C "$CHAIN_OUT_V6" -j DROP 2>/dev/null || return 1
-  _jump_exists "$ip6t" raw OUTPUT "$CHAIN_OUT_V6"
+  _chain_block_intact "$ip6t" raw "$CHAIN_OUT_V6" OUTPUT
 }
 
 # Returns 0 if the v6 OUTPUT block is fully intact in the filter table.
 _output_block_intact_v6_filter() {
   local ip6t
   ip6t="$(_find_cmd ip6tables 2>/dev/null)" || return 1
-  _chain_exists "$ip6t" filter "$CHAIN_OUT_V6" || return 1
-  "$ip6t" -t filter -C "$CHAIN_OUT_V6" -j DROP 2>/dev/null || return 1
-  _jump_exists "$ip6t" filter OUTPUT "$CHAIN_OUT_V6"
+  _chain_block_intact "$ip6t" filter "$CHAIN_OUT_V6" OUTPUT
 }
 
 # output_block_intact_v4: returns 0 only when at least one full layer (chain +
@@ -716,8 +822,8 @@ output_block_intact_v6() {
 # dual-layer OUTPUT blackout for a family. Used at key decision points.
 log_blackout_integrity() {
   local family="$1" label="${2:-check}"
-  local raw_chain=0 raw_drop=0 raw_jump=0
-  local flt_chain=0 flt_drop=0 flt_jump=0
+  local raw_chain=0 raw_drop=0 raw_jump=0 raw_lo=0
+  local flt_chain=0 flt_drop=0 flt_jump=0 flt_lo=0
   local cmd chain
 
   if [ "$family" = "v4" ]; then
@@ -731,13 +837,15 @@ log_blackout_integrity() {
   if [ -n "$cmd" ]; then
     _chain_exists "$cmd" raw    "$chain" && raw_chain=1
     _chain_exists "$cmd" filter "$chain" && flt_chain=1
-    [ "$raw_chain" = "1" ] && "$cmd" -t raw    -C "$chain" -j DROP 2>/dev/null && raw_drop=1
-    [ "$flt_chain" = "1" ] && "$cmd" -t filter -C "$chain" -j DROP 2>/dev/null && flt_drop=1
-    [ "$raw_chain" = "1" ] && _jump_exists "$cmd" raw    OUTPUT "$chain" && raw_jump=1
+    [ "$raw_chain" = "1" ] && _drop_exists "$cmd" raw "$chain" && raw_drop=1
+    [ "$flt_chain" = "1" ] && _drop_exists "$cmd" filter "$chain" && flt_drop=1
+    [ "$raw_chain" = "1" ] && _jump_exists "$cmd" raw OUTPUT "$chain" && raw_jump=1
     [ "$flt_chain" = "1" ] && _jump_exists "$cmd" filter OUTPUT "$chain" && flt_jump=1
+    [ "$raw_chain" = "1" ] && _loopback_return_exists "$cmd" raw "$chain" OUTPUT && raw_lo=1
+    [ "$flt_chain" = "1" ] && _loopback_return_exists "$cmd" filter "$chain" OUTPUT && flt_lo=1
   fi
 
-  log "blackout_integrity[$label]: ${family} raw(chain=${raw_chain} drop=${raw_drop} jump=${raw_jump}) filter(chain=${flt_chain} drop=${flt_drop} jump=${flt_jump})"
+  log "blackout_integrity[$label]: ${family} raw(chain=${raw_chain} drop=${raw_drop} jump=${raw_jump} lo=${raw_lo}) filter(chain=${flt_chain} drop=${flt_drop} jump=${flt_jump} lo=${flt_lo})"
 }
 
 # ── Self-healing OUTPUT block repair ──────────────────────────────────────────
@@ -780,21 +888,24 @@ AFWALL_CHAIN_MOBILE="afwall-3g"  # mobile data transport sub-chain
 # Prefer donate package; fall back to free package; then dumpsys scan.
 resolve_afwall_pkg() {
   local c found
-  for c in dev.ukanth.ufirewall.donate dev.ukanth.ufirewall; do
+  for c in dev.ukanth.ufirewall.donate dev.ukanth.ufirewall com.ukanth.ufirewall; do
     if has_cmd cmd && cmd package path "$c" >/dev/null 2>&1; then
+      printf '%s' "$c"
+      return 0
+    fi
+    if has_cmd pm && pm path "$c" >/dev/null 2>&1; then
       printf '%s' "$c"
       return 0
     fi
   done
   if has_cmd dumpsys; then
-    found="$(dumpsys package 2>/dev/null \
-      | grep -E 'Package \[dev\.ukanth\.ufirewall(\.donate)?\]' \
-      | sed -nE 's/.*Package \[(dev\.ukanth\.ufirewall(\.donate)?)\].*/\1/p' \
-      | head -n1)"
-    if [ -n "$found" ] && has_cmd cmd && cmd package path "$found" >/dev/null 2>&1; then
-      printf '%s' "$found"
-      return 0
-    fi
+    found="$(dumpsys package 2>/dev/null)" || found=""
+    for c in dev.ukanth.ufirewall.donate dev.ukanth.ufirewall com.ukanth.ufirewall; do
+      if printf '%s\n' "$found" | grep -F "Package [$c]" >/dev/null 2>&1; then
+        printf '%s' "$c"
+        return 0
+      fi
+    done
   fi
   return 1
 }
@@ -814,13 +925,13 @@ resolve_afwall_pkg() {
 capture_filter_snapshot_v4() {
   local cmd
   cmd="$(_find_cmd iptables 2>/dev/null)" || return 1
-  "$cmd" -t filter -S 2>/dev/null
+  _ipt_out "$cmd" -t filter -S 2>/dev/null
 }
 
 capture_filter_snapshot_v6() {
   local cmd
   cmd="$(_find_cmd ip6tables 2>/dev/null)" || return 1
-  "$cmd" -t filter -S 2>/dev/null
+  _ipt_out "$cmd" -t filter -S 2>/dev/null
 }
 
 # ── Snapshot-derived graph presence ───────────────────────────────────────────

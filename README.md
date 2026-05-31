@@ -89,14 +89,17 @@ If the installer cannot read input, it falls back to a saved installer config, t
 
 ## What happens on first boot
 
-A normal boot usually looks like this:
+A normal boot now looks like this:
 
-1. the module installs an early blackout,
-2. Android continues booting,
-3. AFWall loads and applies its rules,
-4. the module waits for AFWall to look stable,
-5. the module removes its own blackout,
-6. Wi-Fi and mobile data return when their restore checks pass.
+1. `post-fs-data.sh` installs an early netfilter hard block,
+2. `service.sh` maintains and repairs that block,
+3. Android reaches `sys.boot_completed=1`,
+4. the user unlocks the device,
+5. the module waits the configured post-unlock grace period, default `8` seconds,
+6. only then does the module begin AFWall rule-graph readiness checks,
+7. the module removes its own block once the AFWall graph is valid and stable.
+
+The default profile leaves Wi-Fi/mobile-data alone for faster reconnect; traffic is still blocked by the early netfilter hard block until AFWall is proven ready. Aggressive Wi-Fi/mobile-data OFF mode is available, but it can slow reconnect/release after boot and unlock.
 
 If the device stays offline, go to [Recovery and common problems](#recovery-and-common-problems).
 For the detailed boot model, see [ADVANCED.md → Boot flow](ADVANCED.md#boot-flow).
@@ -121,19 +124,33 @@ Most users only need to know these options:
 
 | Setting | Default | What it means |
 |---|---:|---|
-| `TIMEOUT_SECS` | `120` | how long the module can wait before timeout handling |
+| `AFWALL_READY_MIN_POST_UNLOCK_SECS` | `8` | skip AFWall readiness checks until this many seconds after unlock |
+| `TIMEOUT_START_AFTER_READY_GATE` | `1` | timeout starts after the readiness gate opens |
+| `TIMEOUT_SECS` | `90` | how long the module can wait after the readiness gate before timeout handling |
 | `TIMEOUT_POLICY` | `fail_closed` | keep blocking by default if AFWall never becomes ready |
 | `AUTO_TIMEOUT_UNBLOCK` | `0` | timeout does not auto-unblock unless you enable it |
-| `TIMEOUT_UNLOCK_GATED` | `1` | timeout starts after device unlock |
-| `WIFI_AFWALL_GATE` | `1` | Wi-Fi restore uses extra checks |
-| `MOBILE_AFWALL_GATE` | `1` | mobile-data restore uses extra checks |
-| `LOWLEVEL_MODE` | `safe` | lower-layer suppression mode |
-| `VPN_LOCKDOWN_BOOT_ENFORCE` | `1` | turn on Android "block connections without VPN" during boot wait |
-| `VPN_LOCKDOWN_RELEASE_ON_RESTORE` | `1` | turn VPN lockdown back off during restore after AFWall handoff |
+| `TIMEOUT_UNLOCK_GATED` | `1` | timeout remains tied to unlock/gate semantics |
+| `LOWLEVEL_MODE` | `off` | lower-layer suppression mode; default is fast reconnect |
+| `LOWLEVEL_WIFI_DATA_OFF` | `0` | set `1` for aggressive Wi-Fi/mobile-data OFF mode; slower reconnect possible |
+| `WIFI_AFWALL_GATE` | `0` | Wi-Fi transport-gate restore checks; off in fast reconnect mode |
+| `MOBILE_AFWALL_GATE` | `0` | mobile-data transport-gate restore checks; off in fast reconnect mode |
+| `VPN_LOCKDOWN_BOOT_ENFORCE` | `0` | enabled automatically during install/update only when Android always-on VPN is detected and no explicit config exists |
+| `VPN_LOCKDOWN_RELEASE_ON_RESTORE` | `0` | paired restore handling for the module VPN lockdown integration |
 | `DEBUG` | `0` | verbose logging |
 
 If you are not sure, leave the defaults alone.
 For every option and the trade-offs, see [ADVANCED.md → Configuration reference](ADVANCED.md#configuration-reference).
+
+### Fast reconnect versus Wi-Fi/data OFF
+
+The standard profile is **fast reconnect**: Wi-Fi and mobile-data framework state are left alone, while the module-owned netfilter block prevents traffic until AFWall is ready. This matched Pixel 9a diagnostics where Wi-Fi was already connected before AFWall was ready, but traffic still could not leak through the module block.
+
+Aggressive mode is controlled by `LOWLEVEL_WIFI_DATA_OFF=1`. It disables Wi-Fi/mobile-data during the boot anti-leak window and restores only state the module changed itself. This can be useful on devices with unreliable iptables behaviour, but it can also slow reconnect after unlock because Android must re-associate and revalidate networks.
+
+### VPN always-on install/update detection
+
+During install/update, the module checks Android's `always_on_vpn_app` and `always_on_vpn_lockdown` secure settings. If an always-on VPN app is configured and the module VPN options were not already explicitly configured, installer config enables the module VPN lockdown integration. Existing explicit user config is preserved.
+
 
 ## Recovery and common problems
 

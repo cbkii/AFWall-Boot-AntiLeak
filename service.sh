@@ -49,6 +49,10 @@
   RADIO_REASSERT_INTERVAL="${RADIO_REASSERT_INTERVAL:-10}"
   BLACKOUT_REASSERT_INTERVAL="${BLACKOUT_REASSERT_INTERVAL:-5}"
   UNLOCK_POLL_INTERVAL="${UNLOCK_POLL_INTERVAL:-5}"
+  AFWALL_READY_REQUIRE_BOOT_COMPLETED="${AFWALL_READY_REQUIRE_BOOT_COMPLETED:-1}"
+  AFWALL_READY_REQUIRE_UNLOCK="${AFWALL_READY_REQUIRE_UNLOCK:-1}"
+  AFWALL_READY_MIN_POST_UNLOCK_SECS="${AFWALL_READY_MIN_POST_UNLOCK_SECS:-8}"
+  TIMEOUT_START_AFTER_READY_GATE="${TIMEOUT_START_AFTER_READY_GATE:-1}"
 
   # ── Composite-readiness timing ─────────────────────────────────────────────
   # POLL_INTERVAL_SECS: how often the loop iterates (1s default → faster reaction).
@@ -79,7 +83,8 @@
   TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT="${TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT:-8}"
 
   log "service: start ($MODULE_VERSION)"
-  log "service: config: timeout=${TIMEOUT_SECS}s policy=${TIMEOUT_POLICY} auto_unblock=${AUTO_TIMEOUT_UNBLOCK} unlock_gated=${TIMEOUT_UNLOCK_GATED}"
+  log "service: config: timeout=${TIMEOUT_SECS}s policy=${TIMEOUT_POLICY} auto_unblock=${AUTO_TIMEOUT_UNBLOCK} unlock_gated=${TIMEOUT_UNLOCK_GATED} timeout_after_gate=${TIMEOUT_START_AFTER_READY_GATE}"
+  log "service: config: readiness_gate boot_completed=${AFWALL_READY_REQUIRE_BOOT_COMPLETED} unlock=${AFWALL_READY_REQUIRE_UNLOCK} post_unlock=${AFWALL_READY_MIN_POST_UNLOCK_SECS}s"
   log "service: config: poll=${POLL_INTERVAL_SECS}s fast=${FAST_STABLE_SECS}s slow=${SLOW_STABLE_SECS}s transport_absence=${TRANSPORT_ABSENCE_STABLE_SECS}s absence_pb=${TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT}s transport_inconclusive=${TRANSPORT_INCONCLUSIVE_SECS}s inconclusive_pb=${TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT}s"
   log "service: config: fwd=${ENABLE_FORWARD_BLOCK:-1} in=${ENABLE_INPUT_BLOCK:-0} ll_mode=${LOWLEVEL_MODE:-safe}"
   log "service: config: wifi_gate=${WIFI_AFWALL_GATE} mobile_gate=${MOBILE_AFWALL_GATE} reassert=${RADIO_REASSERT_INTERVAL}s blackout_reassert=${BLACKOUT_REASSERT_INTERVAL}s"
@@ -105,13 +110,31 @@
     log "service: WARN: TIMEOUT_POLICY=unblock but AUTO_TIMEOUT_UNBLOCK=0; timeout will NOT unblock (set AUTO_TIMEOUT_UNBLOCK=1 to enable)"
   fi
 
-  # ── Detect AFWall package ───────────────────────────────────────────────────
-  AFW_PKG="$(resolve_afwall_pkg 2>/dev/null)" || AFW_PKG=""
-  if [ -n "$AFW_PKG" ]; then
-    log "service: AFWall pkg=$AFW_PKG"
-  else
-    log "service: AFWall package not found — liveness checks disabled; rule-detection only"
-  fi
+  # ── Lazy AFWall package detection ─────────────────────────────────────────────
+  AFW_PKG=""
+  _afwall_pkg_last_log=""
+  _refresh_afwall_pkg() {
+    [ -n "$AFW_PKG" ] && return 0
+    local reason="${1:-poll}" new_pkg=""
+    new_pkg="$(resolve_afwall_pkg 2>/dev/null)" || new_pkg=""
+    if [ -n "$new_pkg" ]; then
+      if [ "$new_pkg" != "$AFW_PKG" ]; then
+        if [ -n "$AFW_PKG" ]; then
+          log "service: AFWall package changed/resolved later: old=$AFW_PKG new=$new_pkg reason=$reason"
+        else
+          log "service: AFWall package resolved: $new_pkg reason=$reason"
+        fi
+        AFW_PKG="$new_pkg"
+      fi
+      return 0
+    fi
+    if [ -z "$AFW_PKG" ] && [ "$_afwall_pkg_last_log" != "$reason" ]; then
+      log "service: AFWall package unresolved at $reason; will retry later (rule graph remains authoritative)"
+      _afwall_pkg_last_log="$reason"
+    fi
+    return 1
+  }
+  _refresh_afwall_pkg "service_start" || true
 
   # ── A) Legacy cleanup (scripts only) ────────────────────────────────────────
   # Only remove legacy afwallstart scripts; never touch current active
@@ -163,7 +186,7 @@
   fi
 
   # ── Determine which families are blocked ────────────────────────────────────
-  v4_blocked=0; v6_blocked=0
+  v4_blocked=0; v6_blocked=0; v4_fwd_blocked=0; v6_fwd_blocked=0
   _v4_table="$(cat "${STATE_DIR}/ipv4_out_table" 2>/dev/null || cat "${STATE_DIR}/ipv4_table" 2>/dev/null || printf '')"
   _v6_table="$(cat "${STATE_DIR}/ipv6_out_table" 2>/dev/null || cat "${STATE_DIR}/ipv6_table" 2>/dev/null || printf '')"
   # _v4_state_exists / _v6_state_exists: per-family indicators that a block was
@@ -204,11 +227,35 @@
     log "service: v6 OUTPUT block not detected — no v6 handoff needed"
   fi
 
-  if forward_block_present_v4 || [ -f "${STATE_DIR}/ipv4_fwd_active" ]; then
-    log "service: v4 FORWARD block active"
+  if forward_block_intact_v4; then
+    v4_fwd_blocked=1
+    printf '1' > "${STATE_DIR}/ipv4_fwd_active" 2>/dev/null || true
+    log "service: v4 FORWARD block active (verified parent jump)"
+  elif forward_block_degraded_v4 || [ -f "${STATE_DIR}/ipv4_fwd_active" ]; then
+    rm -f "${STATE_DIR}/ipv4_fwd_active" 2>/dev/null || true
+    log "service: v4 FORWARD block degraded/orphaned — repairing"
+    if repair_forward_block_v4 && forward_block_intact_v4; then
+      v4_fwd_blocked=1
+      printf '1' > "${STATE_DIR}/ipv4_fwd_active" 2>/dev/null || true
+      log "service: v4 FORWARD startup repair restored parent jump"
+    else
+      log "service: v4 FORWARD startup repair FAILED"
+    fi
   fi
-  if forward_block_present_v6 || [ -f "${STATE_DIR}/ipv6_fwd_active" ]; then
-    log "service: v6 FORWARD block active"
+  if forward_block_intact_v6; then
+    v6_fwd_blocked=1
+    printf '1' > "${STATE_DIR}/ipv6_fwd_active" 2>/dev/null || true
+    log "service: v6 FORWARD block active (verified parent jump)"
+  elif forward_block_degraded_v6 || [ -f "${STATE_DIR}/ipv6_fwd_active" ]; then
+    rm -f "${STATE_DIR}/ipv6_fwd_active" 2>/dev/null || true
+    log "service: v6 FORWARD block degraded/orphaned — repairing"
+    if repair_forward_block_v6 && forward_block_intact_v6; then
+      v6_fwd_blocked=1
+      printf '1' > "${STATE_DIR}/ipv6_fwd_active" 2>/dev/null || true
+      log "service: v6 FORWARD startup repair restored parent jump"
+    else
+      log "service: v6 FORWARD startup repair FAILED"
+    fi
   fi
   if input_block_present_v4 || [ -f "${STATE_DIR}/ipv4_in_active" ]; then
     log "service: v4 INPUT block active"
@@ -321,7 +368,70 @@
   device_unlocked=0
   unlock_ts=0
   timeout_start_ts=0  # timestamp when timeout countdown began (0 = not started)
+  timeout_deadline_ts=0
+  readiness_gate_open=0
+  readiness_gate_ts=0
+  readiness_gate_last_log_ts=0
+  boot_complete_logged=0
   last_unlock_poll_ts=0  # timestamp of last lowlevel_device_is_unlocked probe
+
+  _poll_unlock_state() {
+    [ "$device_unlocked" = "1" ] && return 0
+    [ "$NOW" = "0" ] && return 1
+    local _do_unlock_probe=0 _unlock_elapsed=0
+    if [ "$last_unlock_poll_ts" = "0" ]; then
+      _do_unlock_probe=1
+    elif [ $((NOW - last_unlock_poll_ts)) -ge "$UNLOCK_POLL_INTERVAL" ]; then
+      _do_unlock_probe=1
+    fi
+    [ "$_do_unlock_probe" = "1" ] || return 1
+    last_unlock_poll_ts="$NOW"
+    if lowlevel_device_is_unlocked; then
+      device_unlocked=1
+      unlock_ts="$NOW"
+      [ "$START_TS" != "0" ] && _unlock_elapsed=$((NOW - START_TS))
+      log "service: device unlock detected (elapsed=${_unlock_elapsed}s from service start; uptime_gate_grace=${AFWALL_READY_MIN_POST_UNLOCK_SECS}s)"
+      _refresh_afwall_pkg "unlock" || true
+      return 0
+    fi
+    debug_log "service: device not yet unlocked — readiness/timeout gates active"
+    return 1
+  }
+
+  _update_readiness_gate() {
+    [ "$readiness_gate_open" = "1" ] && return 0
+    local _boot_ok=1 _unlock_ok=1 _grace_ok=1 _grace_elapsed=0 _reason=""
+
+    if [ "$AFWALL_READY_REQUIRE_BOOT_COMPLETED" = "1" ] && [ "$_boot_complete_now" != "1" ]; then
+      _boot_ok=0
+      _reason="${_reason} boot_completed"
+    fi
+    if [ "$AFWALL_READY_REQUIRE_UNLOCK" = "1" ] && [ "$device_unlocked" != "1" ]; then
+      _unlock_ok=0
+      _reason="${_reason} unlock"
+    fi
+    if [ "$AFWALL_READY_REQUIRE_UNLOCK" = "1" ] && [ "$device_unlocked" = "1" ]; then
+      [ "$unlock_ts" != "0" ] && _grace_elapsed=$((NOW - unlock_ts))
+      if [ "$_grace_elapsed" -lt "$AFWALL_READY_MIN_POST_UNLOCK_SECS" ]; then
+        _grace_ok=0
+        _reason="${_reason} post_unlock_grace(${_grace_elapsed}/${AFWALL_READY_MIN_POST_UNLOCK_SECS}s)"
+      fi
+    fi
+
+    if [ "$_boot_ok" = "1" ] && [ "$_unlock_ok" = "1" ] && [ "$_grace_ok" = "1" ]; then
+      readiness_gate_open=1
+      readiness_gate_ts="$NOW"
+      log "service: AFWall readiness gate OPEN at epoch=${readiness_gate_ts} (boot_completed=${_boot_complete_now} unlocked=${device_unlocked} unlock_ts=${unlock_ts} grace=${AFWALL_READY_MIN_POST_UNLOCK_SECS}s)"
+      _refresh_afwall_pkg "readiness_gate_open" || true
+      return 0
+    fi
+
+    if [ "$NOW" != "0" ] && { [ "$readiness_gate_last_log_ts" = "0" ] || [ $((NOW - readiness_gate_last_log_ts)) -ge 10 ]; }; then
+      readiness_gate_last_log_ts="$NOW"
+      debug_log "service: AFWall readiness gate closed; waiting for:${_reason}"
+    fi
+    return 1
+  }
 
   # ── Pre-removal integrity log helpers ────────────────────────────────────────
   # Called immediately before a block is removed to confirm it is still present.
@@ -621,28 +731,35 @@
       exit 0
     fi
 
-    # Cache sys.boot_completed result once per iteration to avoid repeated
-    # getprop calls across all the boot-completion acceleration checks below.
+    # Cache sys.boot_completed result once per iteration.
     _boot_complete_now=0
-    if [ "$BOOT_COMPLETE_ACCELERATE" = "1" ] && sys_boot_completed; then
+    if sys_boot_completed; then
       _boot_complete_now=1
+      if [ "$boot_complete_logged" = "0" ]; then
+        log "service: sys.boot_completed=1 detected"
+        boot_complete_logged=1
+        _refresh_afwall_pkg "boot_completed" || true
+      fi
     fi
 
+    # Cheap unlock/gate tracking happens before any heavy AFWall graph reads.
+    _poll_unlock_state || true
+    _update_readiness_gate || true
+
     # ── Capture coherent per-poll filter-table snapshots ────────────────────
-    # One consistent read of the filter table per family per iteration.
-    # All presence / fingerprint / reachability checks below use these
-    # variables — none of them call iptables independently.
+    # Do not parse AFWall graphs before the boot/unlock/post-unlock gate opens.
     v4_snap=""; v6_snap=""
-    if [ "$v4_blocked" = "1" ] && [ "$v4_done" = "0" ]; then
-      v4_snap="$(capture_filter_snapshot_v4 2>/dev/null)" || v4_snap=""
-    fi
-    if [ "$v6_blocked" = "1" ] && [ "$v6_done" = "0" ]; then
-      v6_snap="$(capture_filter_snapshot_v6 2>/dev/null)" || v6_snap=""
-    fi
-    # Transport checks also need snapshots even after family is confirmed.
-    if [ "$wifi_done" = "0" ] || [ "$mobile_done" = "0" ]; then
-      [ -z "$v4_snap" ] && v4_snap="$(capture_filter_snapshot_v4 2>/dev/null)"
-      [ -z "$v6_snap" ] && v6_snap="$(capture_filter_snapshot_v6 2>/dev/null)"
+    if [ "$readiness_gate_open" = "1" ]; then
+      if [ "$v4_blocked" = "1" ] && [ "$v4_done" = "0" ]; then
+        v4_snap="$(capture_filter_snapshot_v4 2>/dev/null)" || v4_snap=""
+      fi
+      if [ "$v6_blocked" = "1" ] && [ "$v6_done" = "0" ]; then
+        v6_snap="$(capture_filter_snapshot_v6 2>/dev/null)" || v6_snap=""
+      fi
+      if [ "$wifi_done" = "0" ] || [ "$mobile_done" = "0" ]; then
+        [ -z "$v4_snap" ] && v4_snap="$(capture_filter_snapshot_v4 2>/dev/null)"
+        [ -z "$v6_snap" ] && v6_snap="$(capture_filter_snapshot_v6 2>/dev/null)"
+      fi
     fi
 
     # ── Radio reassertion ───────────────────────────────────────────────────
@@ -689,47 +806,41 @@
             debug_log "service: blackout_reassert v6: intact"
           fi
         fi
-      fi
-    fi
-
-    # ── Unlock detection ────────────────────────────────────────────────────
-    # Determine if the device has been unlocked; used for timeout gating.
-    # Probe only when the configured UNLOCK_POLL_INTERVAL has elapsed.
-    if [ "$device_unlocked" = "0" ] && [ "$NOW" != "0" ]; then
-      _do_unlock_probe=0
-      if [ "$last_unlock_poll_ts" = "0" ]; then
-        _do_unlock_probe=1
-      elif [ $((NOW - last_unlock_poll_ts)) -ge "$UNLOCK_POLL_INTERVAL" ]; then
-        _do_unlock_probe=1
-      fi
-      if [ "$_do_unlock_probe" = "1" ]; then
-        last_unlock_poll_ts="$NOW"
-        if lowlevel_device_is_unlocked; then
-          device_unlocked=1
-          unlock_ts="$NOW"
-          _unlock_elapsed=0
-          [ "$START_TS" != "0" ] && _unlock_elapsed=$((NOW - START_TS))
-          log "service: device unlock detected (elapsed=${_unlock_elapsed}s from start)"
-        else
-          debug_log "service: device not yet unlocked — timeout gate active"
+        if [ "${ENABLE_FORWARD_BLOCK:-1}" != "0" ]; then
+          if [ "$v4_fwd_blocked" = "1" ] && ! forward_block_intact_v4; then
+            log "service: INTEGRITY REPAIR v4: FORWARD block degraded/orphaned — repairing"
+            repair_forward_block_v4 || log "service: v4 FORWARD periodic repair FAILED"
+          fi
+          if [ "$v6_fwd_blocked" = "1" ] && ! forward_block_intact_v6; then
+            log "service: INTEGRITY REPAIR v6: FORWARD block degraded/orphaned — repairing"
+            repair_forward_block_v6 || log "service: v6 FORWARD periodic repair FAILED"
+          fi
         fi
       fi
     fi
+
+    # Unlock/readiness gate was already polled before snapshot capture.
 
     # ── Timeout countdown and timeout start ─────────────────────────────────
-    # Timeout only starts after unlock (when TIMEOUT_UNLOCK_GATED=1).
     if [ "$timeout_start_ts" = "0" ]; then
-      if [ "$TIMEOUT_UNLOCK_GATED" = "1" ]; then
+      if [ "$TIMEOUT_START_AFTER_READY_GATE" = "1" ]; then
+        if [ "$readiness_gate_open" = "1" ]; then
+          timeout_start_ts="$readiness_gate_ts"
+          [ "$timeout_start_ts" = "0" ] && timeout_start_ts="$NOW"
+          timeout_deadline_ts=$((timeout_start_ts + TIMEOUT_SECS))
+          log "service: timeout countdown started at readiness gate (start=${timeout_start_ts} deadline=${timeout_deadline_ts} timeout=${TIMEOUT_SECS}s)"
+        fi
+      elif [ "$TIMEOUT_UNLOCK_GATED" = "1" ]; then
         if [ "$device_unlocked" = "1" ]; then
           timeout_start_ts="$NOW"
-          log "service: timeout countdown started after unlock (timeout=${TIMEOUT_SECS}s)"
+          timeout_deadline_ts=$((timeout_start_ts + TIMEOUT_SECS))
+          log "service: timeout countdown started after unlock (start=${timeout_start_ts} deadline=${timeout_deadline_ts} timeout=${TIMEOUT_SECS}s)"
         fi
-        # else: waiting for unlock; do not start timeout
       else
-        # Not gated by unlock: start counting from service.sh start.
-        # Use START_TS if it is a valid (non-zero) timestamp; fall back to NOW.
         timeout_start_ts="$START_TS"
         [ "$timeout_start_ts" = "0" ] && timeout_start_ts="$NOW"
+        timeout_deadline_ts=$((timeout_start_ts + TIMEOUT_SECS))
+        log "service: timeout countdown started at service start (start=${timeout_start_ts} deadline=${timeout_deadline_ts} timeout=${TIMEOUT_SECS}s)"
       fi
     fi
 
@@ -775,6 +886,11 @@
       fi
     fi
 
+    if [ "$readiness_gate_open" != "1" ]; then
+      sleep "$POLL_INTERVAL_SECS"
+      continue
+    fi
+
     # ── Boot-completion diagnostic ──────────────────────────────────────────
     if [ "$_boot_complete_now" = "1" ]; then
       debug_log "service: sys.boot_completed=1 boot_accel=${BOOT_COMPLETE_ACCELERATE} v4_done=$v4_done v6_done=$v6_done wifi_done=$wifi_done mobile_done=$mobile_done"
@@ -786,6 +902,7 @@
       if afwall_graph_present_from_snapshot "$v4_snap" && \
          afwall_graph_nontrivial_from_snapshot "$v4_snap"; then
 
+        [ -z "$AFW_PKG" ] && _refresh_afwall_pkg "v4_graph_evidence" || true
         # Compute full AFWall graph fingerprint from this poll's snapshot.
         _new_v4_fp="$(afwall_graph_fingerprint_from_snapshot "$v4_snap")"
 

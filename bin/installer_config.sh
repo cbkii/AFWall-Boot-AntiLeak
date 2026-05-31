@@ -53,25 +53,40 @@ ic_apply_defaults() {
     IC_INTEGRATION_MODE="auto"
     IC_ENABLE_FORWARD_BLOCK="1"
     IC_ENABLE_INPUT_BLOCK="0"
-    IC_LOWLEVEL_MODE="safe"
-    IC_LOWLEVEL_INTERFACE_QUIESCE="1"
-    IC_LOWLEVEL_USE_WIFI_SERVICE="1"
-    IC_LOWLEVEL_USE_PHONE_DATA_CMD="1"
+    IC_LOWLEVEL_MODE="off"
+    IC_LOWLEVEL_WIFI_DATA_OFF="0"
+    IC_LOWLEVEL_INTERFACE_QUIESCE="0"
+    IC_LOWLEVEL_USE_WIFI_SERVICE="0"
+    IC_LOWLEVEL_USE_PHONE_DATA_CMD="0"
     IC_LOWLEVEL_USE_BLUETOOTH_MANAGER="0"
-    IC_LOWLEVEL_USE_TETHER_STOP="1"
-    IC_VPN_LOCKDOWN_BOOT_ENFORCE="1"
-    IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE="1"
+    IC_LOWLEVEL_USE_TETHER_STOP="0"
+    IC_VPN_LOCKDOWN_BOOT_ENFORCE="0"
+    IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE="0"
     IC_VPN_LOCKDOWN_PROVIDER_PACKAGES=""
-    IC_TIMEOUT_SECS="120"
+    IC_AFWALL_READY_REQUIRE_BOOT_COMPLETED="1"
+    IC_AFWALL_READY_REQUIRE_UNLOCK="1"
+    IC_AFWALL_READY_MIN_POST_UNLOCK_SECS="8"
+    IC_TIMEOUT_START_AFTER_READY_GATE="1"
+    IC_TIMEOUT_SECS="90"
     IC_TIMEOUT_POLICY="fail_closed"
     IC_AUTO_TIMEOUT_UNBLOCK="0"
     IC_TIMEOUT_UNLOCK_GATED="1"
-    IC_WIFI_AFWALL_GATE="1"
-    IC_MOBILE_AFWALL_GATE="1"
+    IC_WIFI_AFWALL_GATE="0"
+    IC_MOBILE_AFWALL_GATE="0"
     IC_RADIO_REASSERT_INTERVAL="10"
     IC_UNLOCK_POLL_INTERVAL="5"
+    IC_POLL_INTERVAL_SECS="1"
+    IC_FAST_STABLE_SECS="2"
+    IC_SLOW_STABLE_SECS="6"
+    IC_BOOT_COMPLETE_ACCELERATE="1"
+    IC_AFWALL_RULE_DENSITY_MIN="3"
     IC_SETTLE_SECS="5"
     IC_DEBUG="0"
+
+    # Tracks whether install/update inputs explicitly set sensitive options.
+    IC_EXPLICIT_VPN_LOCKDOWN_BOOT_ENFORCE="0"
+    IC_EXPLICIT_VPN_LOCKDOWN_RELEASE_ON_RESTORE="0"
+    IC_EXPLICIT_LOWLEVEL_WIFI_DATA_OFF="0"
 }
 
 # ── Profile application ───────────────────────────────────────────────────────
@@ -85,6 +100,7 @@ ic_apply_profile() {
     case "$profile" in
         minimal)
             IC_LOWLEVEL_MODE="off"
+            IC_LOWLEVEL_WIFI_DATA_OFF="0"
             IC_LOWLEVEL_INTERFACE_QUIESCE="0"
             IC_LOWLEVEL_USE_WIFI_SERVICE="0"
             IC_LOWLEVEL_USE_PHONE_DATA_CMD="0"
@@ -92,12 +108,22 @@ ic_apply_profile() {
             ;;
         strict)
             IC_LOWLEVEL_MODE="strict"
+            IC_LOWLEVEL_WIFI_DATA_OFF="1"
             IC_ENABLE_INPUT_BLOCK="1"
+            IC_LOWLEVEL_INTERFACE_QUIESCE="1"
+            IC_LOWLEVEL_USE_WIFI_SERVICE="1"
+            IC_LOWLEVEL_USE_PHONE_DATA_CMD="1"
             IC_LOWLEVEL_USE_BLUETOOTH_MANAGER="1"
+            IC_LOWLEVEL_USE_TETHER_STOP="1"
             IC_TIMEOUT_POLICY="fail_closed"
             IC_AUTO_TIMEOUT_UNBLOCK="0"
             ;;
-        standard) ;;
+        standard)
+            # Fast reconnect profile: early netfilter hard block does the leak
+            # protection; Android Wi-Fi/mobile-data state is left alone.
+            IC_LOWLEVEL_MODE="off"
+            IC_LOWLEVEL_WIFI_DATA_OFF="0"
+            ;;
     esac
 }
 
@@ -124,6 +150,71 @@ _ic_read_key_preserve_ws() {
     printf '%s' "$raw"
 }
 
+_ic_key_exists() {
+    local key="$1" file="$2"
+    grep "^${key}=" "$file" >/dev/null 2>&1
+}
+
+_ic_settings_get_secure() {
+    local key="$1"
+    settings get secure "$key" 2>/dev/null | tr -d '
+' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+_ic_value_is_set() {
+    case "$1" in
+        ""|null|NULL|none|None|0) return 1 ;;
+    esac
+    return 0
+}
+
+ic_detect_always_on_vpn() {
+    IC_DETECTED_ALWAYS_ON_VPN_APP="$(_ic_settings_get_secure always_on_vpn_app)"
+    IC_DETECTED_ALWAYS_ON_VPN_LOCKDOWN="$(_ic_settings_get_secure always_on_vpn_lockdown)"
+    if _ic_value_is_set "$IC_DETECTED_ALWAYS_ON_VPN_APP"; then
+        IC_HAS_ALWAYS_ON_VPN="1"
+    else
+        IC_HAS_ALWAYS_ON_VPN="0"
+    fi
+}
+
+ic_apply_auto_vpn_defaults() {
+    ic_detect_always_on_vpn
+    if [ "${IC_HAS_ALWAYS_ON_VPN:-0}" != "1" ]; then
+        _ic_print "  [vpn] Android always-on VPN not detected; module VPN lockdown remains ${IC_VPN_LOCKDOWN_BOOT_ENFORCE:-0}."
+        return 0
+    fi
+
+    _ic_print "  [vpn] Android always-on VPN detected: ${IC_DETECTED_ALWAYS_ON_VPN_APP}"
+    _ic_print "  [vpn] Android lockdown setting: ${IC_DETECTED_ALWAYS_ON_VPN_LOCKDOWN:-<unset>}"
+
+    if [ "${IC_EXPLICIT_VPN_LOCKDOWN_BOOT_ENFORCE:-0}" != "1" ]; then
+        IC_VPN_LOCKDOWN_BOOT_ENFORCE="1"
+        _ic_print "  [vpn] Enabling module VPN lockdown integration because no explicit module config was present."
+    else
+        _ic_print "  [vpn] Preserving explicit VPN_LOCKDOWN_BOOT_ENFORCE=${IC_VPN_LOCKDOWN_BOOT_ENFORCE}."
+    fi
+
+    if [ "${IC_EXPLICIT_VPN_LOCKDOWN_RELEASE_ON_RESTORE:-0}" != "1" ]; then
+        IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE="1"
+        _ic_print "  [vpn] Enabling VPN lockdown restore handling because no explicit module config was present."
+    else
+        _ic_print "  [vpn] Preserving explicit VPN_LOCKDOWN_RELEASE_ON_RESTORE=${IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE}."
+    fi
+}
+
+ic_apply_wifi_data_off_consistency() {
+    if [ "${IC_LOWLEVEL_WIFI_DATA_OFF:-0}" = "1" ]; then
+        [ "${IC_LOWLEVEL_MODE:-off}" = "off" ] && IC_LOWLEVEL_MODE="safe"
+        IC_LOWLEVEL_USE_WIFI_SERVICE="1"
+        IC_LOWLEVEL_USE_PHONE_DATA_CMD="1"
+        _ic_print "  [radio] Aggressive Wi-Fi/mobile-data OFF mode is ENABLED."
+        _ic_print "  [radio] WARNING: this can slow reconnect/release after boot/unlock while Android re-associates and revalidates networks."
+    else
+        _ic_print "  [radio] Fast reconnect mode: Wi-Fi/mobile-data are left alone; early netfilter hard block remains the leak protection."
+    fi
+}
+
 # ── Load existing config ───────────────────────────────────────────────────────
 # Read recognized config keys from a config.sh file into IC_* variables.
 # Only overwrites an IC_* variable if the key is present in the file.
@@ -146,6 +237,12 @@ ic_load_existing_config() {
     val=$(_ic_read_key LOWLEVEL_MODE "$cfg_file")
     [ -n "$val" ] && IC_LOWLEVEL_MODE="$val"
 
+    if _ic_key_exists LOWLEVEL_WIFI_DATA_OFF "$cfg_file"; then
+        val=$(_ic_read_key LOWLEVEL_WIFI_DATA_OFF "$cfg_file")
+        [ -n "$val" ] && IC_LOWLEVEL_WIFI_DATA_OFF="$val"
+        IC_EXPLICIT_LOWLEVEL_WIFI_DATA_OFF="1"
+    fi
+
     val=$(_ic_read_key LOWLEVEL_INTERFACE_QUIESCE "$cfg_file")
     [ -n "$val" ] && IC_LOWLEVEL_INTERFACE_QUIESCE="$val"
 
@@ -161,14 +258,32 @@ ic_load_existing_config() {
     val=$(_ic_read_key LOWLEVEL_USE_TETHER_STOP "$cfg_file")
     [ -n "$val" ] && IC_LOWLEVEL_USE_TETHER_STOP="$val"
 
-    val=$(_ic_read_key VPN_LOCKDOWN_BOOT_ENFORCE "$cfg_file")
-    [ -n "$val" ] && IC_VPN_LOCKDOWN_BOOT_ENFORCE="$val"
+    if _ic_key_exists VPN_LOCKDOWN_BOOT_ENFORCE "$cfg_file"; then
+        val=$(_ic_read_key VPN_LOCKDOWN_BOOT_ENFORCE "$cfg_file")
+        [ -n "$val" ] && IC_VPN_LOCKDOWN_BOOT_ENFORCE="$val"
+        IC_EXPLICIT_VPN_LOCKDOWN_BOOT_ENFORCE="1"
+    fi
 
-    val=$(_ic_read_key VPN_LOCKDOWN_RELEASE_ON_RESTORE "$cfg_file")
-    [ -n "$val" ] && IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE="$val"
+    if _ic_key_exists VPN_LOCKDOWN_RELEASE_ON_RESTORE "$cfg_file"; then
+        val=$(_ic_read_key VPN_LOCKDOWN_RELEASE_ON_RESTORE "$cfg_file")
+        [ -n "$val" ] && IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE="$val"
+        IC_EXPLICIT_VPN_LOCKDOWN_RELEASE_ON_RESTORE="1"
+    fi
 
     val=$(_ic_read_key_preserve_ws VPN_LOCKDOWN_PROVIDER_PACKAGES "$cfg_file")
     [ -n "$val" ] && IC_VPN_LOCKDOWN_PROVIDER_PACKAGES="$val"
+
+    val=$(_ic_read_key AFWALL_READY_REQUIRE_BOOT_COMPLETED "$cfg_file")
+    [ -n "$val" ] && IC_AFWALL_READY_REQUIRE_BOOT_COMPLETED="$val"
+
+    val=$(_ic_read_key AFWALL_READY_REQUIRE_UNLOCK "$cfg_file")
+    [ -n "$val" ] && IC_AFWALL_READY_REQUIRE_UNLOCK="$val"
+
+    val=$(_ic_read_key AFWALL_READY_MIN_POST_UNLOCK_SECS "$cfg_file")
+    [ -n "$val" ] && IC_AFWALL_READY_MIN_POST_UNLOCK_SECS="$val"
+
+    val=$(_ic_read_key TIMEOUT_START_AFTER_READY_GATE "$cfg_file")
+    [ -n "$val" ] && IC_TIMEOUT_START_AFTER_READY_GATE="$val"
 
     val=$(_ic_read_key TIMEOUT_SECS "$cfg_file")
     [ -n "$val" ] && IC_TIMEOUT_SECS="$val"
@@ -193,6 +308,21 @@ ic_load_existing_config() {
 
     val=$(_ic_read_key UNLOCK_POLL_INTERVAL "$cfg_file")
     [ -n "$val" ] && IC_UNLOCK_POLL_INTERVAL="$val"
+
+    val=$(_ic_read_key POLL_INTERVAL_SECS "$cfg_file")
+    [ -n "$val" ] && IC_POLL_INTERVAL_SECS="$val"
+
+    val=$(_ic_read_key FAST_STABLE_SECS "$cfg_file")
+    [ -n "$val" ] && IC_FAST_STABLE_SECS="$val"
+
+    val=$(_ic_read_key SLOW_STABLE_SECS "$cfg_file")
+    [ -n "$val" ] && IC_SLOW_STABLE_SECS="$val"
+
+    val=$(_ic_read_key BOOT_COMPLETE_ACCELERATE "$cfg_file")
+    [ -n "$val" ] && IC_BOOT_COMPLETE_ACCELERATE="$val"
+
+    val=$(_ic_read_key AFWALL_RULE_DENSITY_MIN "$cfg_file")
+    [ -n "$val" ] && IC_AFWALL_RULE_DENSITY_MIN="$val"
 
     val=$(_ic_read_key SETTLE_SECS "$cfg_file")
     [ -n "$val" ] && IC_SETTLE_SECS="$val"
@@ -576,7 +706,9 @@ ic_select_enum() {
 
     local opt count total idx current_opt
     count=0
-    total=$(printf '%s\n' $options | wc -l | tr -d '[:space:]')
+    # shellcheck disable=SC2086 # options is an internal space-separated enum list.
+    set -- $options
+    total=$#
 
     _ic_flush_events
     _ic_print "  $question"
@@ -647,9 +779,9 @@ ic_select_enum() {
 _ic_select_profile() {
     _ic_print ""
     _ic_print "  ── Protection Profile ──────────────────────────────"
-    _ic_print "  standard — full protection, recommended (default)"
-    _ic_print "  minimal  — iptables firewall only, no lower-layer"
-    _ic_print "  strict   — maximum protection, all features on"
+    _ic_print "  standard — fast reconnect: netfilter block, no Wi-Fi/data toggle (default)"
+    _ic_print "  minimal  — same firewall-only fast path, fewer optional blocks"
+    _ic_print "  strict   — maximum protection, includes Wi-Fi/data OFF warning"
     _ic_print "  custom   — configure each option individually"
     _ic_print "  ───────────────────────────────────────────────────"
     ic_select_enum \
@@ -751,13 +883,14 @@ _ic_select_custom() {
         _ic_print "  → vpn_lockdown_release_on_restore: $IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE"
         _ic_print ""
     else
+        IC_LOWLEVEL_WIFI_DATA_OFF="0"
         IC_LOWLEVEL_INTERFACE_QUIESCE="0"
         IC_LOWLEVEL_USE_WIFI_SERVICE="0"
         IC_LOWLEVEL_USE_PHONE_DATA_CMD="0"
         IC_LOWLEVEL_USE_BLUETOOTH_MANAGER="0"
         IC_LOWLEVEL_USE_TETHER_STOP="0"
-        IC_VPN_LOCKDOWN_BOOT_ENFORCE="0"
-        IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE="0"
+        # Keep VPN choices independent of lower-layer mode; install/update may
+        # auto-enable them when Android always-on VPN is already configured.
     fi
 
     ic_select_bool \
@@ -783,26 +916,36 @@ ic_write_config() {
     printf 'INTEGRATION_MODE=%s\n'            "${IC_INTEGRATION_MODE:-auto}"            >> "$dest"
     printf 'ENABLE_FORWARD_BLOCK=%s\n'        "${IC_ENABLE_FORWARD_BLOCK:-1}"           >> "$dest"
     printf 'ENABLE_INPUT_BLOCK=%s\n'          "${IC_ENABLE_INPUT_BLOCK:-0}"             >> "$dest"
-    printf 'LOWLEVEL_MODE=%s\n'               "${IC_LOWLEVEL_MODE:-safe}"               >> "$dest"
-    printf 'LOWLEVEL_INTERFACE_QUIESCE=%s\n'  "${IC_LOWLEVEL_INTERFACE_QUIESCE:-1}"     >> "$dest"
-    printf 'LOWLEVEL_USE_WIFI_SERVICE=%s\n'   "${IC_LOWLEVEL_USE_WIFI_SERVICE:-1}"      >> "$dest"
-    printf 'LOWLEVEL_USE_PHONE_DATA_CMD=%s\n' "${IC_LOWLEVEL_USE_PHONE_DATA_CMD:-1}"    >> "$dest"
+    printf 'LOWLEVEL_MODE=%s\n'               "${IC_LOWLEVEL_MODE:-off}"                >> "$dest"
+    printf 'LOWLEVEL_WIFI_DATA_OFF=%s\n'      "${IC_LOWLEVEL_WIFI_DATA_OFF:-0}"         >> "$dest"
+    printf 'LOWLEVEL_INTERFACE_QUIESCE=%s\n'  "${IC_LOWLEVEL_INTERFACE_QUIESCE:-0}"     >> "$dest"
+    printf 'LOWLEVEL_USE_WIFI_SERVICE=%s\n'   "${IC_LOWLEVEL_USE_WIFI_SERVICE:-0}"      >> "$dest"
+    printf 'LOWLEVEL_USE_PHONE_DATA_CMD=%s\n' "${IC_LOWLEVEL_USE_PHONE_DATA_CMD:-0}"    >> "$dest"
     printf 'LOWLEVEL_USE_BLUETOOTH_MANAGER=%s\n' "${IC_LOWLEVEL_USE_BLUETOOTH_MANAGER:-0}" >> "$dest"
-    printf 'LOWLEVEL_USE_TETHER_STOP=%s\n'    "${IC_LOWLEVEL_USE_TETHER_STOP:-1}"       >> "$dest"
-    printf 'VPN_LOCKDOWN_BOOT_ENFORCE=%s\n'   "${IC_VPN_LOCKDOWN_BOOT_ENFORCE:-1}"      >> "$dest"
-    printf 'VPN_LOCKDOWN_RELEASE_ON_RESTORE=%s\n' "${IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE:-1}" >> "$dest"
+    printf 'LOWLEVEL_USE_TETHER_STOP=%s\n'    "${IC_LOWLEVEL_USE_TETHER_STOP:-0}"       >> "$dest"
+    printf 'VPN_LOCKDOWN_BOOT_ENFORCE=%s\n'   "${IC_VPN_LOCKDOWN_BOOT_ENFORCE:-0}"      >> "$dest"
+    printf 'VPN_LOCKDOWN_RELEASE_ON_RESTORE=%s\n' "${IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE:-0}" >> "$dest"
     # Single-quote the VPN package list to prevent shell injection if the value
     # contains special characters; embedded single quotes are escaped as '\''.
     _vpn_pkgs="$(printf '%s' "${IC_VPN_LOCKDOWN_PROVIDER_PACKAGES:-}" | sed "s/'/'\\\\''/g")"
     printf "VPN_LOCKDOWN_PROVIDER_PACKAGES='%s'\n" "$_vpn_pkgs" >> "$dest"
-    printf 'TIMEOUT_SECS=%s\n'                "${IC_TIMEOUT_SECS:-120}"                >> "$dest"
+    printf 'AFWALL_READY_REQUIRE_BOOT_COMPLETED=%s\n' "${IC_AFWALL_READY_REQUIRE_BOOT_COMPLETED:-1}" >> "$dest"
+    printf 'AFWALL_READY_REQUIRE_UNLOCK=%s\n' "${IC_AFWALL_READY_REQUIRE_UNLOCK:-1}"   >> "$dest"
+    printf 'AFWALL_READY_MIN_POST_UNLOCK_SECS=%s\n' "${IC_AFWALL_READY_MIN_POST_UNLOCK_SECS:-8}" >> "$dest"
+    printf 'TIMEOUT_START_AFTER_READY_GATE=%s\n' "${IC_TIMEOUT_START_AFTER_READY_GATE:-1}" >> "$dest"
+    printf 'TIMEOUT_SECS=%s\n'                "${IC_TIMEOUT_SECS:-90}"                 >> "$dest"
     printf 'TIMEOUT_POLICY=%s\n'             "${IC_TIMEOUT_POLICY:-fail_closed}"       >> "$dest"
     printf 'AUTO_TIMEOUT_UNBLOCK=%s\n'       "${IC_AUTO_TIMEOUT_UNBLOCK:-0}"           >> "$dest"
     printf 'TIMEOUT_UNLOCK_GATED=%s\n'       "${IC_TIMEOUT_UNLOCK_GATED:-1}"           >> "$dest"
-    printf 'WIFI_AFWALL_GATE=%s\n'           "${IC_WIFI_AFWALL_GATE:-1}"               >> "$dest"
-    printf 'MOBILE_AFWALL_GATE=%s\n'         "${IC_MOBILE_AFWALL_GATE:-1}"             >> "$dest"
+    printf 'WIFI_AFWALL_GATE=%s\n'           "${IC_WIFI_AFWALL_GATE:-0}"               >> "$dest"
+    printf 'MOBILE_AFWALL_GATE=%s\n'         "${IC_MOBILE_AFWALL_GATE:-0}"             >> "$dest"
     printf 'RADIO_REASSERT_INTERVAL=%s\n'    "${IC_RADIO_REASSERT_INTERVAL:-10}"       >> "$dest"
     printf 'UNLOCK_POLL_INTERVAL=%s\n'       "${IC_UNLOCK_POLL_INTERVAL:-5}"           >> "$dest"
+    printf 'POLL_INTERVAL_SECS=%s\n'          "${IC_POLL_INTERVAL_SECS:-1}"             >> "$dest"
+    printf 'FAST_STABLE_SECS=%s\n'            "${IC_FAST_STABLE_SECS:-2}"               >> "$dest"
+    printf 'SLOW_STABLE_SECS=%s\n'            "${IC_SLOW_STABLE_SECS:-6}"               >> "$dest"
+    printf 'BOOT_COMPLETE_ACCELERATE=%s\n'    "${IC_BOOT_COMPLETE_ACCELERATE:-1}"       >> "$dest"
+    printf 'AFWALL_RULE_DENSITY_MIN=%s\n'     "${IC_AFWALL_RULE_DENSITY_MIN:-3}"        >> "$dest"
     printf 'SETTLE_SECS=%s\n'                 "${IC_SETTLE_SECS:-5}"                   >> "$dest"
     printf 'DEBUG=%s\n'                       "${IC_DEBUG:-0}"                         >> "$dest"
 
@@ -814,19 +957,21 @@ ic_write_config() {
 # Prints a human-readable summary of all current IC_* values.
 
 ic_render_summary() {
-    local fwd_str in_str quiesce_str wifi_str data_str bt_str teth_str dbg_str
-    local auto_unblock_str unlock_gate_str vpn_boot_str vpn_release_str
+    local fwd_str in_str quiesce_str wifi_str data_str bt_str teth_str dbg_str radio_str
+    local auto_unblock_str unlock_gate_str vpn_boot_str vpn_release_str gate_timeout_str
 
     [ "${IC_ENABLE_FORWARD_BLOCK:-1}" = "1" ]       && fwd_str="enabled"    || fwd_str="disabled"
     [ "${IC_ENABLE_INPUT_BLOCK:-0}" = "1" ]          && in_str="enabled"     || in_str="disabled"
-    [ "${IC_LOWLEVEL_INTERFACE_QUIESCE:-1}" = "1" ]  && quiesce_str="yes"    || quiesce_str="no"
-    [ "${IC_LOWLEVEL_USE_WIFI_SERVICE:-1}" = "1" ]   && wifi_str="managed"   || wifi_str="unmanaged"
-    [ "${IC_LOWLEVEL_USE_PHONE_DATA_CMD:-1}" = "1" ] && data_str="managed"   || data_str="unmanaged"
+    [ "${IC_LOWLEVEL_WIFI_DATA_OFF:-0}" = "1" ]      && radio_str="aggressive OFF" || radio_str="fast reconnect"
+    [ "${IC_LOWLEVEL_INTERFACE_QUIESCE:-0}" = "1" ]  && quiesce_str="yes"    || quiesce_str="no"
+    [ "${IC_LOWLEVEL_USE_WIFI_SERVICE:-0}" = "1" ]   && wifi_str="managed"   || wifi_str="unmanaged"
+    [ "${IC_LOWLEVEL_USE_PHONE_DATA_CMD:-0}" = "1" ] && data_str="managed"   || data_str="unmanaged"
     [ "${IC_LOWLEVEL_USE_BLUETOOTH_MANAGER:-0}" = "1" ] && bt_str="managed"  || bt_str="unmanaged"
     [ "${IC_LOWLEVEL_USE_TETHER_STOP:-1}" = "1" ]   && teth_str="managed"   || teth_str="unmanaged"
     [ "${IC_DEBUG:-0}" = "1" ]                       && dbg_str="enabled"    || dbg_str="disabled"
     [ "${IC_AUTO_TIMEOUT_UNBLOCK:-0}" = "1" ]        && auto_unblock_str="enabled"  || auto_unblock_str="DISABLED (safe default)"
     [ "${IC_TIMEOUT_UNLOCK_GATED:-1}" = "1" ]        && unlock_gate_str="yes"       || unlock_gate_str="no"
+    [ "${IC_TIMEOUT_START_AFTER_READY_GATE:-1}" = "1" ] && gate_timeout_str="yes"    || gate_timeout_str="no"
     [ "${IC_VPN_LOCKDOWN_BOOT_ENFORCE:-1}" = "1" ]   && vpn_boot_str="enabled" || vpn_boot_str="disabled"
     [ "${IC_VPN_LOCKDOWN_RELEASE_ON_RESTORE:-1}" = "1" ] && vpn_release_str="enabled" || vpn_release_str="disabled"
 
@@ -835,7 +980,8 @@ ic_render_summary() {
     _ic_print "  Integration mode:      ${IC_INTEGRATION_MODE:-auto}"
     _ic_print "  FORWARD block:         $fwd_str"
     _ic_print "  INPUT block:           $in_str"
-    _ic_print "  Lower-layer mode:      ${IC_LOWLEVEL_MODE:-safe}"
+    _ic_print "  Lower-layer mode:      ${IC_LOWLEVEL_MODE:-off}"
+    _ic_print "  Wi-Fi/data OFF mode:   $radio_str"
     _ic_print "  Interface quiesce:     $quiesce_str"
     _ic_print "  Wi-Fi management:      $wifi_str"
     _ic_print "  Mobile data:           $data_str"
@@ -843,12 +989,14 @@ ic_render_summary() {
     _ic_print "  Tethering:             $teth_str"
     _ic_print "  VPN lockdown on boot:  $vpn_boot_str"
     _ic_print "  VPN release restore:   $vpn_release_str"
-    _ic_print "  AFWall timeout:        ${IC_TIMEOUT_SECS:-120}s"
+    _ic_print "  Readiness gate:        boot=${IC_AFWALL_READY_REQUIRE_BOOT_COMPLETED:-1} unlock=${IC_AFWALL_READY_REQUIRE_UNLOCK:-1} +${IC_AFWALL_READY_MIN_POST_UNLOCK_SECS:-8}s"
+    _ic_print "  AFWall timeout:        ${IC_TIMEOUT_SECS:-90}s"
     _ic_print "  Timeout policy:        ${IC_TIMEOUT_POLICY:-fail_closed}"
     _ic_print "  Auto timeout unblock:  $auto_unblock_str"
     _ic_print "  Unlock-gated timeout:  $unlock_gate_str"
-    _ic_print "  Wi-Fi AFWall gate:     ${IC_WIFI_AFWALL_GATE:-1}"
-    _ic_print "  Mobile AFWall gate:    ${IC_MOBILE_AFWALL_GATE:-1}"
+    _ic_print "  Timeout after gate:    $gate_timeout_str"
+    _ic_print "  Wi-Fi AFWall gate:     ${IC_WIFI_AFWALL_GATE:-0}"
+    _ic_print "  Mobile AFWall gate:    ${IC_MOBILE_AFWALL_GATE:-0}"
     _ic_print "  Settle delay:          ${IC_SETTLE_SECS:-5}s"
     _ic_print "  Debug logging:         $dbg_str"
     _ic_print "  ───────────────────────────────────────────────────"
@@ -959,6 +1107,10 @@ ic_run_config_selection() {
             ic_apply_profile "$profile"
         fi
     fi
+
+    _ic_print ""
+    ic_apply_auto_vpn_defaults
+    ic_apply_wifi_data_off_consistency
 
     ic_render_summary
 
