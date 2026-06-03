@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v3.2.1 - Lower-layer suppression subsystem
+# AFWall Boot AntiLeak v4.0.0 - Lower-layer suppression subsystem
 # POSIX/ash compatible. No bashisms. Sourced by common.sh; do not execute directly.
 #
 # PURPOSE
@@ -582,10 +582,8 @@ lowlevel_restore_bluetooth() {
 #   - During transport restore (after AFWall takeover), disable lockdown again
 #     for the currently active provider and restore pre-boot always-on state.
 #
-# Config:
-#   VPN_LOCKDOWN_BOOT_ENFORCE=1        # enable boot-time lockdown enforcement
-#   VPN_LOCKDOWN_RELEASE_ON_RESTORE=1  # release lockdown during restore
-#   VPN_LOCKDOWN_PROVIDER_PACKAGES=""  # optional space/comma-separated package list
+# Internal behaviour is derived from v4.0.0 VPN_LOCKDOWN_MODE and
+# VPN_PROVIDER_PACKAGES in bin/common.sh; these are not user-facing knobs here.
 
 _ll_split_words() {
   printf '%s' "$1" | tr ',;' '  ' | tr -s '[:space:]' '\n' | sed '/^$/d'
@@ -650,16 +648,20 @@ lowlevel_clear_stale_vpn_state() {
 }
 
 lowlevel_vpn_lockdown_enforce() {
-  [ "${VPN_LOCKDOWN_BOOT_ENFORCE:-1}" = "1" ] || return 0
   has_cmd cmd || { debug_log "vpn_lockdown: cmd not available; skipping enforce"; return 0; }
 
   _ll_init_dirs
 
-  # Snapshot pre-boot state once.
+  # Snapshot pre-boot state once for preserve/restore modes.
   if ! _ll_state_exists "vpn_pre_active_pkg"; then
     _ll_state_set "vpn_pre_active_pkg" "$(_ll_vpn_get_active_pkg)"
     _ll_state_set "vpn_pre_lockdown" "$(_ll_vpn_get_lockdown_state)"
     debug_log "vpn_lockdown: snapshot pre-state active='$(_ll_state_get vpn_pre_active_pkg)' lockdown='$(_ll_state_get vpn_pre_lockdown)'"
+  fi
+
+  if [ "${VPN_LOCKDOWN_BOOT_ENFORCE:-0}" != "1" ]; then
+    [ "${VPN_LOCKDOWN_PRESERVE_ONLY:-0}" = "1" ] && log "vpn_lockdown: preserve mode active; recorded state without changing lockdown"
+    return 0
   fi
 
   local pkgs pkg active
@@ -682,6 +684,11 @@ $(_ll_vpn_discover_providers 2>/dev/null)
 EOF
 
   # Deduplicate and enforce lockdown where possible.
+  if [ -z "$(printf '%s' "$pkgs" | tr -d '[:space:]')" ]; then
+    log "vpn_lockdown: WARN: handling enabled but provider list is empty and auto-detection found no providers; VPN lockdown state cannot be managed"
+    return 0
+  fi
+
   local seen=" " ok=0
   for pkg in $pkgs; do
     case "$seen" in *" $pkg "*) continue ;; esac
@@ -695,7 +702,7 @@ EOF
   done
 
   if [ "$ok" = "0" ]; then
-    debug_log "vpn_lockdown: no provider accepted lockdown command"
+    log "vpn_lockdown: WARN: providers discovered/listed but none accepted lockdown command (active=${active:-none} providers='${pkgs}')"
   fi
 }
 
@@ -708,10 +715,12 @@ lowlevel_vpn_lockdown_release_if_needed() {
     return 0
   fi
 
-  local active pre_pkg pre_lock
+  local active pre_pkg pre_lock current_lock
   active="$(_ll_vpn_get_active_pkg)"
   pre_pkg="$(_ll_state_get vpn_pre_active_pkg)"
   pre_lock="$(_ll_state_get vpn_pre_lockdown)"
+  current_lock="$(_ll_vpn_get_lockdown_state)"
+  log "vpn_lockdown: restore check pre_active=${pre_pkg:-none} pre_lockdown=${pre_lock:-unknown} current_active=${active:-none} current_lockdown=${current_lock:-unknown}"
 
   if [ -n "$active" ]; then
     if cmd connectivity set-always-on-vpn "$active" false >/dev/null 2>&1; then
@@ -964,68 +973,83 @@ lowlevel_reassert_radios_off() {
 }
 
 # ── Device unlock detection ────────────────────────────────────────────────────
-# Strict positive-detection model: only returns 0 (unlocked) when there is
-# positive evidence from at least one reliable probe. If parsing fails,
-# commands are unavailable, or signals conflict, treat as locked (return 1).
-#
-# Probes used:
-#   A. dumpsys window: look for mKeyguardShowing=false or mShowingLockscreen=false
-#   B. dumpsys power:  look for mWakefulness=Awake (screen is on = user interaction)
-#   C. sys.boot_completed=1 + boot animation stopped: if the framework has
-#      completed boot AND Probe A confirms keyguard is gone, the combination is
-#      definitive.  The screen-awake requirement (Probe B) is relaxed because
-#      a momentarily-dim screen after a completed boot is still a valid
-#      post-unlock state (the device is not at the lock screen).
-#   D. getprop dev.bootcomplete=1: older Android fallback that mirrors
-#      sys.boot_completed; combined with Probe A it is treated the same as C.
-#
-# Default positive outcome: both A AND B confirm (original behaviour).
-# Fast-path outcomes (new): (A AND C) OR (A AND D) also return unlocked.
+# Multi-signal Direct-Boot-aware unlock heuristic.  Returns textual confidence
+# for logs: unlocked, probably_unlocked, locked, or unknown.  Unknown is not a
+# negative result and must not block family AFWall handoff.
+device_unlock_state() {
+  local user="0" cmd_user="unavailable" dumpsys_user="unavailable" ce="unavailable" keyguard="unavailable" trust="unavailable" result="unknown"
+
+  if has_cmd am; then
+    user="$(am get-current-user 2>/dev/null | tr -dc '0-9' | head -c 4)"
+    [ -z "$user" ] && user="0"
+  fi
+
+  if has_cmd cmd; then
+    _cu="$(cmd user is-user-unlocked "$user" 2>/dev/null || true)"
+    case "$_cu" in
+      *true*|*TRUE*|*1*|*unlocked*) cmd_user="unlocked" ;;
+      *false*|*FALSE*|*0*|*locked*) cmd_user="locked" ;;
+      '') cmd_user="unavailable" ;;
+      *) cmd_user="unknown($_cu)" ;;
+    esac
+  fi
+
+  if has_cmd dumpsys; then
+    _du="$(dumpsys user 2>/dev/null | grep -E "UserInfo\{$user:|RUNNING_UNLOCKED|unlock" | head -20)"
+    if printf '%s' "$_du" | grep -q 'RUNNING_UNLOCKED\|unlocked=true\|unlockTime'; then
+      dumpsys_user="RUNNING_UNLOCKED"
+    elif [ -n "$_du" ]; then
+      dumpsys_user="seen_no_unlock"
+    fi
+
+    _kw="$(dumpsys window 2>/dev/null | grep -iE 'mKeyguardShowing|mShowingLockscreen|isKeyguardShowing|KeyguardController' | head -5)"
+    if printf '%s' "$_kw" | grep -qi '=false\|Showing=false\|showing: false\|mKeyguardShowing=false'; then
+      keyguard="not_locked"
+    elif printf '%s' "$_kw" | grep -qi '=true\|Showing=true\|showing: true\|mKeyguardShowing=true'; then
+      keyguard="locked"
+    fi
+
+    _tr="$(dumpsys trust 2>/dev/null | grep -iE 'unlocked|deviceLocked|trusted' | head -5)"
+    if printf '%s' "$_tr" | grep -qi 'unlocked=true\|deviceLocked=false'; then
+      trust="unlocked"
+    elif printf '%s' "$_tr" | grep -qi 'unlocked=false\|deviceLocked=true'; then
+      trust="locked"
+    elif [ -n "$_tr" ]; then
+      trust="seen"
+    fi
+  fi
+
+  # CE proof: readable current-user CE root plus at least one AFWall/app CE dir
+  # or any child entry.  Existence alone is not enough.
+  if [ -r "/data/user/${user}" ] && find "/data/user/${user}" -maxdepth 1 -type d 2>/dev/null | head -2 | grep -q .; then
+    ce="readable"
+  elif [ -r "/data/user/0" ] && find "/data/user/0" -maxdepth 1 -type d 2>/dev/null | head -2 | grep -q .; then
+    ce="readable_user0"
+  else
+    ce="not_readable"
+  fi
+
+  case "$cmd_user:$dumpsys_user:$ce" in
+    unlocked:*:*|*:RUNNING_UNLOCKED:*|*:*:readable*) result="unlocked" ;;
+    locked:*:not_readable) result="locked" ;;
+    *)
+      case "$keyguard:$trust" in
+        not_locked:unlocked|not_locked:*) result="probably_unlocked" ;;
+        locked:locked) result="locked" ;;
+        *) result="unknown" ;;
+      esac
+      ;;
+  esac
+
+  log "unlock: user=${user} cmd_user=${cmd_user} dumpsys_user=${dumpsys_user} ce=${ce} keyguard=${keyguard} trust=${trust} => ${result}"
+  printf '%s' "$result"
+}
+
 lowlevel_device_is_unlocked() {
-  has_cmd dumpsys || return 1  # cannot determine; treat as locked
-
-  # Probe A: keyguard state
-  local wm_line kguard_showing=0
-  wm_line="$(dumpsys window 2>/dev/null | grep -iE 'mKeyguardShowing|mShowingLockscreen' | head -3)"
-  if [ -z "$wm_line" ]; then
-    # Alternative: check for isShowing() output style
-    wm_line="$(dumpsys window 2>/dev/null | grep -i 'KeyguardController' | head -3)"
-  fi
-  if printf '%s' "$wm_line" | grep -qi '=false\|Showing=false\|showing: false'; then
-    kguard_showing=1  # keyguard not showing: positive unlocked evidence
-  fi
-
-  # Probe B: screen awake
-  local pwr_line screen_awake=0
-  pwr_line="$(dumpsys power 2>/dev/null | grep -i 'mWakefulness' | head -2)"
-  if printf '%s' "$pwr_line" | grep -qi 'Awake'; then
-    screen_awake=1
-  fi
-
-  # Canonical check: both Probe A and Probe B confirm — original behaviour.
-  if [ "$kguard_showing" = "1" ] && [ "$screen_awake" = "1" ]; then
-    return 0  # Positive unlock evidence from both probes
-  fi
-
-  # Probe C fast-path: sys.boot_completed=1 (and optionally boot animation
-  # stopped) combined with keyguard gone.  Once the framework has signalled
-  # full boot completion the device is definitively at or past the lock screen;
-  # the screen-awake requirement is relaxed because the device may briefly dim
-  # while still being in an unlocked post-boot state.
-  if [ "$kguard_showing" = "1" ]; then
-    if sys_boot_completed; then
-      return 0  # Boot complete + keyguard gone => unlocked
-    fi
-    if boot_animation_stopped; then
-      return 0  # Boot animation stopped + keyguard gone => past lock screen
-    fi
-    # Probe D: older Android fallback property
-    if [ "$(getprop dev.bootcomplete 2>/dev/null)" = "1" ]; then
-      return 0
-    fi
-  fi
-
-  return 1  # Treat as locked
+  case "$(device_unlock_state 2>/dev/null)" in
+    unlocked|probably_unlocked) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 # ── Transport-specific restore helpers ────────────────────────────────────────
