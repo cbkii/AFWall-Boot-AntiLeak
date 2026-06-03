@@ -187,9 +187,9 @@ ic_select_enum() {
     _ic_any_input_avail || return 0
     _ic_flush_events
     _ic_print "  $question"
-    # shellcheck disable=SC2086 # options is an internal space-separated enum list.
-    set -- $options
-    total=$#; idx=1; count=0
+    total=0
+    for opt in $options; do total=$((total+1)); done
+    idx=1; count=0
     for opt in $options; do count=$((count+1)); [ "$opt" = "$default" ] && idx=$count; _ic_print "   $count) $opt"; done
     while :; do
         i=0; for opt in $options; do i=$((i+1)); [ "$i" = "$idx" ] && { current="$opt"; break; }; done
