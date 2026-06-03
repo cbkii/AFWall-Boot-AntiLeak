@@ -1,0 +1,273 @@
+name: PR29 review fixup
+
+on:
+  push:
+    branches:
+      - cx/implement-diagnostic-driven-patches-for-afwall
+
+permissions:
+  contents: write
+
+jobs:
+  apply-review-fixes:
+    if: ${{ !contains(github.event.head_commit.message, 'Apply PR review hardening fixes') && !contains(github.event.head_commit.message, 'Remove temporary PR review fixup workflow') }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: cx/implement-diagnostic-driven-patches-for-afwall
+          fetch-depth: 0
+
+      - name: Apply reviewer fixes
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          root = Path.cwd()
+
+          # bin/common.sh
+          p = root / 'bin/common.sh'
+          s = p.read_text()
+          s = s.replace(
+              '''case "${AFWALL_PACKAGE:-auto}" in
+              auto|dev.ukanth.ufirewall|dev.ukanth.ufirewall.donate) ;;''',
+              '''case "${AFWALL_PACKAGE:-auto}" in
+              auto|dev.ukanth.ufirewall|dev.ukanth.ufirewall.donate|com.ukanth.ufirewall) ;;'''
+          )
+          s = s.replace(
+              '''  cfg="${MODDIR:-}/config.sh"
+            if [ -f "$cfg" ]; then
+              . "$cfg" 2>/dev/null || true
+              CONFIG_SOURCED_FILES="$cfg"
+            fi
+            cfg="${MODDIR:-}/config.local.sh"
+            if [ -f "$cfg" ]; then
+              . "$cfg" 2>/dev/null || true
+              CONFIG_SOURCED_FILES="${CONFIG_SOURCED_FILES}${CONFIG_SOURCED_FILES:+ }$cfg"
+            fi''',
+              '''  cfg="${MODDIR:-}/config.sh"
+            if [ -f "$cfg" ]; then
+              if . "$cfg" 2>/dev/null; then
+                CONFIG_SOURCED_FILES="$cfg"
+              else
+                _config_warn "config: failed to source module config: $cfg"
+                return 1
+              fi
+            fi
+            cfg="${MODDIR:-}/config.local.sh"
+            if [ -f "$cfg" ]; then
+              if . "$cfg" 2>/dev/null; then
+                CONFIG_SOURCED_FILES="${CONFIG_SOURCED_FILES}${CONFIG_SOURCED_FILES:+ }$cfg"
+              else
+                _config_warn "config: failed to source module config: $cfg"
+                return 1
+              fi
+            fi'''
+          )
+          s = s.replace(
+              '''# Prefer donate package; fall back to free package; then dumpsys scan.
+          resolve_afwall_pkg() {
+            local c found
+            for c in dev.ukanth.ufirewall.donate dev.ukanth.ufirewall; do''',
+              '''# Prefer donate package; fall back to free package, then legacy package, then dumpsys scan.
+          resolve_afwall_pkg() {
+            local c found
+            for c in dev.ukanth.ufirewall.donate dev.ukanth.ufirewall com.ukanth.ufirewall; do'''
+          )
+          s = s.replace(
+              '''    for c in dev.ukanth.ufirewall.donate dev.ukanth.ufirewall; do''',
+              '''    for c in dev.ukanth.ufirewall.donate dev.ukanth.ufirewall com.ukanth.ufirewall; do'''
+          )
+          start = s.index('rooted_afwall_graph_from_snapshot() {')
+          end = s.index('\nafwall_rooted_graph_fingerprint_from_snapshot() {', start)
+          rooted = '''rooted_afwall_graph_from_snapshot() {
+            local snap="$1" out
+            [ -n "$snap" ] || return 1
+            out="$(printf '%s\n' "$snap" | awk -v main="${AFWALL_CHAIN_MAIN}" '
+              function add(c) { if (c != "" && !seen[c]) { seen[c]=1; q[++tail]=c } }
+              { lines[++n] = $0 }
+              /^-A OUTPUT / {
+                for (i=1; i<NF; i++) {
+                  if ($i=="-j" && $(i+1)==main) output=1
+                }
+              }
+              /^-N / { defs[$2]=1 }
+              /^-A / {
+                chain=$2
+                for (i=1; i<NF; i++) {
+                  if ($i=="-j") edges[chain]=edges[chain] " " $(i+1)
+                }
+              }
+              END {
+                if (!output || !defs[main]) exit 1
+                add(main)
+                for (head=1; head<=tail; head++) {
+                  count=split(edges[q[head]], children, " ")
+                  for (i=1; i<=count; i++) {
+                    if (children[i] ~ /^afwall/ && defs[children[i]]) add(children[i])
+                  }
+                }
+                for (i=1; i<=n; i++) {
+                  line=lines[i]
+                  if (line ~ /^-A OUTPUT /) {
+                    has_jump=0
+                    count=split(line, fields, " ")
+                    for (j=1; j<count; j++) {
+                      if (fields[j]=="-j" && fields[j+1]==main) has_jump=1
+                    }
+                    if (has_jump) print line
+                  } else if (line ~ /^-N /) {
+                    count=split(line, fields, " ")
+                    chain=fields[2]
+                    if (seen[chain]) print line
+                  } else if (line ~ /^-A /) {
+                    count=split(line, fields, " ")
+                    chain=fields[2]
+                    if (seen[chain]) {
+                      target=""
+                      for (j=1; j<count; j++) {
+                        if (fields[j]=="-j") target=fields[j+1]
+                      }
+                      if (target=="" || target !~ /^afwall/ || seen[target]) print line
+                    }
+                  }
+                }
+              }
+            ')" || return 1
+            [ -n "$out" ] || return 1
+            printf '%s\n' "$out" | sort
+          }
+          '''
+          s = s[:start] + rooted + s[end + 1:]
+          s = s.replace(
+              '''    *)
+                log "action: pid stale or not module-owned; relying on override latch (pid=${_svc_pid} cmdline='${_cmdline:-unreadable}')"
+                ;;
+          ''',
+              '''    *)
+                log "action: pid stale or not module-owned; relying on override latch (pid=${_svc_pid} cmdline='${_cmdline:-unreadable}')"
+                rm -f "$SERVICE_PID_FILE" 2>/dev/null || true
+                log "action: stale service pid file removed: $SERVICE_PID_FILE"
+                ;;
+          '''
+          )
+          p.write_text(s)
+
+          # bin/lowlevel.sh
+          p = root / 'bin/lowlevel.sh'
+          s = p.read_text()
+          s = s.replace(
+              '''  # Deduplicate and enforce lockdown where possible.
+            if [ -z "$(printf '%s' "$pkgs" | tr -d '[:space:]')" ]; then
+              log "vpn_lockdown: WARN: handling enabled but provider list is empty and auto-detection found no providers; VPN lockdown state cannot be managed"
+              return 0
+            fi
+          ''',
+              '''  # Deduplicate and enforce lockdown where possible.
+            case "$pkgs" in
+              *[![:space:]]*) ;;
+              *)
+                log "vpn_lockdown: WARN: handling enabled but provider list is empty and auto-detection found no providers; VPN lockdown state cannot be managed"
+                return 0
+                ;;
+            esac
+          '''
+          )
+          s = s.replace(
+              '''device_unlock_state() {
+            local user="0" cmd_user="unavailable" dumpsys_user="unavailable" ce="unavailable" keyguard="unavailable" trust="unavailable" result="unknown"''',
+              '''device_unlock_state() {
+            local user="0" cmd_user="unavailable" dumpsys_user="unavailable" ce="unavailable" keyguard="unavailable" trust="unavailable" result="unknown" _cu _du _kw _tr'''
+          )
+          s = s.replace(
+              '''  if [ -r "/data/user/${user}" ] && find "/data/user/${user}" -maxdepth 1 -type d 2>/dev/null | head -2 | grep -q .; then
+              ce="readable"
+            elif [ -r "/data/user/0" ] && find "/data/user/0" -maxdepth 1 -type d 2>/dev/null | head -2 | grep -q .; then
+              ce="readable_user0"''',
+              '''  if [ -r "/data/user/${user}" ] && find "/data/user/${user}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1 | grep -q .; then
+              ce="readable"
+            elif [ -r "/data/user/0" ] && find "/data/user/0" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1 | grep -q .; then
+              ce="readable_user0"'''
+          )
+          p.write_text(s)
+
+          # service.sh
+          p = root / 'service.sh'
+          s = p.read_text()
+          s = s.replace(
+              '''  watchdog_service_last_ts=0
+            watchdog_boot_start_ts=0
+            watchdog_boot_last_ts=0''',
+              '''  watchdog_service_start_last_ts=0
+            watchdog_boot_start_ts=0
+            watchdog_boot_completed_last_ts=0'''
+          )
+          p.write_text(s)
+
+          # config/docs consistency for legacy AFWall package fallback.
+          replacements = {
+              'config.sh': (
+                  'Accepted: auto, dev.ukanth.ufirewall, dev.ukanth.ufirewall.donate.',
+                  'Accepted: auto, dev.ukanth.ufirewall, dev.ukanth.ufirewall.donate, com.ukanth.ufirewall.',
+              ),
+              'README.md': (
+                  '| `AFWALL_PACKAGE` | `auto` | Auto, free, or donate package. |',
+                  '| `AFWALL_PACKAGE` | `auto` | Auto, free, donate, or legacy package. |',
+              ),
+              'ADVANCED.md': (
+                  '| `AFWALL_PACKAGE` | `auto` | AFWall package hint: `auto`, free, or donate package. |',
+                  '| `AFWALL_PACKAGE` | `auto` | AFWall package hint: `auto`, free, donate, or legacy package. |',
+              ),
+          }
+          for rel, (old, new) in replacements.items():
+              p = root / rel
+              s = p.read_text()
+              if old not in s:
+                  raise SystemExit(f'expected text not found in {rel}: {old}')
+              p.write_text(s.replace(old, new))
+          PY
+
+      - name: Validate shell syntax and rooted graph invariant
+        run: |
+          sh -n bin/common.sh
+          sh -n bin/lowlevel.sh
+          sh -n service.sh
+          sh -n config.sh
+          MODDIR="$PWD" . ./bin/common.sh
+          base_snap='-P OUTPUT ACCEPT
+          -N afwall
+          -N afwall-wifi
+          -A OUTPUT -j afwall
+          -A afwall -j afwall-wifi
+          -A afwall-wifi -m owner --uid-owner 1000 -j RETURN'
+          churn_snap="$base_snap
+          -N afwall-orphan
+          -A afwall-orphan -j DROP"
+          root_fp_1="$(afwall_rooted_graph_fingerprint_from_snapshot "$base_snap")"
+          root_fp_2="$(afwall_rooted_graph_fingerprint_from_snapshot "$churn_snap")"
+          test "$root_fp_1" = "$root_fp_2"
+          afwall_prefix_reachable_from_snapshot "$base_snap" afwall-wifi
+          orphan_snap='-P OUTPUT ACCEPT
+          -N afwall
+          -N afwall-wifi
+          -A OUTPUT -j afwall
+          -A afwall -m owner --uid-owner 1000 -j RETURN
+          -A afwall-wifi -j DROP'
+          if afwall_prefix_reachable_from_snapshot "$orphan_snap" afwall-wifi; then
+            echo 'orphan Wi-Fi subtree treated as reachable' >&2
+            exit 1
+          fi
+          git diff --check
+
+      - name: Commit reviewer fixes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add bin/common.sh bin/lowlevel.sh service.sh config.sh README.md ADVANCED.md
+          if git diff --cached --quiet; then
+            echo 'No review fixes required.'
+            exit 0
+          fi
+          git commit -m 'Apply PR review hardening fixes'
+          git push origin HEAD:cx/implement-diagnostic-driven-patches-for-afwall
