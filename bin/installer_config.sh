@@ -87,8 +87,12 @@ ic_apply_auto_vpn_defaults() {
     if [ "${IC_HAS_ALWAYS_ON_VPN:-0}" = "1" ]; then
         _ic_print "  [vpn] Android always-on VPN detected: ${IC_DETECTED_ALWAYS_ON_VPN_APP}"
         _ic_print "  [vpn] Android lockdown setting: ${IC_DETECTED_ALWAYS_ON_VPN_LOCKDOWN:-<unset>}"
-        [ "${IC_VPN_LOCKDOWN_MODE:-off}" = "off" ] && IC_VPN_LOCKDOWN_MODE=preserve
-        [ "${IC_VPN_PROVIDER_PACKAGES:-auto}" = "auto" ] && IC_VPN_PROVIDER_PACKAGES="$IC_DETECTED_ALWAYS_ON_VPN_APP"
+        if [ "${IC_VPN_LOCKDOWN_MODE:-off}" = "off" ]; then
+            IC_VPN_LOCKDOWN_MODE=preserve
+        fi
+        if [ "${IC_VPN_PROVIDER_PACKAGES:-auto}" = "auto" ]; then
+            IC_VPN_PROVIDER_PACKAGES="$IC_DETECTED_ALWAYS_ON_VPN_APP"
+        fi
         _ic_print "  [vpn] Using VPN_LOCKDOWN_MODE=${IC_VPN_LOCKDOWN_MODE}; provider hints=${IC_VPN_PROVIDER_PACKAGES}."
     else
         _ic_print "  [vpn] Android always-on VPN not detected; VPN lockdown handling remains ${IC_VPN_LOCKDOWN_MODE:-off}."
@@ -135,14 +139,24 @@ ic_detect_keys() {
         _IC_GETEVENT_PATH="$(command -v getevent)"
     fi
     for event_node in /dev/input/event*; do
-        [ -e "$event_node" ] && [ -n "$_IC_GETEVENT_PATH" ] && _IC_KEYS_AVAIL=1 && break
+        if [ -e "$event_node" ] && [ -n "$_IC_GETEVENT_PATH" ]; then
+            _IC_KEYS_AVAIL=1
+            break
+        fi
     done
     kc="$(_ic_get_keycheck_path 2>/dev/null || true)"
-    [ -n "$kc" ] && { _IC_KEYCHECK_AVAIL=1; _IC_KEYCHECK_PATH="$kc"; }
+    if [ -n "$kc" ]; then
+        _IC_KEYCHECK_AVAIL=1
+        _IC_KEYCHECK_PATH="$kc"
+    fi
 }
 
 _ic_any_input_avail() { [ "${_IC_KEYS_AVAIL:-0}" = "1" ] || [ "${_IC_KEYCHECK_AVAIL:-0}" = "1" ]; }
-_ic_flush_events() { [ "${_IC_KEYS_AVAIL:-0}" = "1" ] && timeout 1 "$_IC_GETEVENT_PATH" -lq >/dev/null 2>&1 || true; }
+_ic_flush_events() {
+    if [ "${_IC_KEYS_AVAIL:-0}" = "1" ]; then
+        timeout 1 "$_IC_GETEVENT_PATH" -lq >/dev/null 2>&1 || true
+    fi
+}
 
 ic_volkey() {
     local raw
