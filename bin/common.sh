@@ -1148,19 +1148,27 @@ afwall_graph_nontrivial_from_snapshot() {
 # reachable from the active OUTPUT -> afwall hook are returned.  Orphan/stale
 # afwall* chains are intentionally excluded from family release fingerprints and
 # transport reachability.
-_snapshot_jump_target() {
-  local _seen_jump=0 _tok
-  # Rule snapshots emit shell-like fields; we only need the token immediately
-  # following -j, so simple field iteration is sufficient and ash-safe.
-  set -- $1
-  for _tok in "$@"; do
-    if [ "$_seen_jump" = "1" ]; then
-      printf '%s' "$_tok"
-      return 0
-    fi
-    [ "$_tok" = "-j" ] && _seen_jump=1
+_snapshot_jump_targets() {
+  local _rest="$1" _target
+  while :; do
+    case "$_rest" in
+      '-j '*|*' -j '*) ;;
+      *) return 0 ;;
+    esac
+    case "$_rest" in
+      '-j '*) _rest="${_rest#-j }" ;;
+      *) _rest="${_rest#* -j }" ;;
+    esac
+    while [ "${_rest# }" != "$_rest" ]; do
+      _rest="${_rest# }"
+    done
+    _target="${_rest%% *}"
+    [ -n "$_target" ] && printf '%s\n' "$_target"
+    case "$_rest" in
+      *' '*) _rest="${_rest#* }" ;;
+      *) return 0 ;;
+    esac
   done
-  return 1
 }
 
 _afwall_chain_defined() {
@@ -1170,18 +1178,34 @@ _afwall_chain_defined() {
 }
 
 _snapshot_defined_chains() {
-  local _snap="$1" _line
+  local _snap="$1" _line _chain
   while IFS= read -r _line; do
     case "$_line" in
-      '-N '*) set -- $_line; [ -n "${2:-}" ] && printf '%s\n' "$2" ;;
+      '-N '*)
+        _chain="${_line#-N }"
+        _chain="${_chain%% *}"
+        [ -n "$_chain" ] && printf '%s\n' "$_chain"
+        ;;
     esac
   done <<EOF
 $_snap
 EOF
 }
 
+_chain_from_rule_line() {
+  local _suffix
+  case "$1" in
+    '-A '*) ;;
+    *) return 1 ;;
+  esac
+  _suffix="${1#-A }"
+  _suffix="${_suffix%% *}"
+  [ -n "$_suffix" ] || return 1
+  printf '%s' "$_suffix"
+}
+
 reachable_chains_from_snapshot() {
-  local snap="$1" defs reachable changed line chain target
+  local snap="$1" defs reachable changed line chain target targets
   [ -n "$snap" ] || return 1
   afwall_graph_present_from_snapshot "$snap" || return 1
   defs="$(_snapshot_defined_chains "$snap")"
@@ -1193,18 +1217,19 @@ reachable_chains_from_snapshot() {
     while IFS= read -r line; do
       case "$line" in
         '-A '*)
-          set -- $line
-          chain="${2:-}"
+          chain="$(_chain_from_rule_line "$line" 2>/dev/null || true)"
           _chain_in_list "$chain" "$reachable" || continue
-          target="$(_snapshot_jump_target "$line" 2>/dev/null || true)"
-          case "$target" in
-            afwall*)
-              if _afwall_chain_defined "$target" "$defs" && ! _chain_in_list "$target" "$reachable"; then
-                reachable="$reachable $target"
-                changed=1
-              fi
-              ;;
-          esac
+          targets="$(_snapshot_jump_targets "$line")"
+          for target in $targets; do
+            case "$target" in
+              afwall*)
+                if _afwall_chain_defined "$target" "$defs" && ! _chain_in_list "$target" "$reachable"; then
+                  reachable="$reachable $target"
+                  changed=1
+                fi
+                ;;
+            esac
+          done
           ;;
       esac
     done <<EOF
@@ -1220,8 +1245,23 @@ _chain_in_list() {
   return 1
 }
 
+_rule_afwall_targets_reachable() {
+  local _line="$1" _reachable="$2" _targets _target _seen=0
+  _targets="$(_snapshot_jump_targets "$_line")"
+  for _target in $_targets; do
+    case "$_target" in
+      afwall*)
+        _seen=1
+        _chain_in_list "$_target" "$_reachable" || return 1
+        ;;
+    esac
+  done
+  [ "$_seen" = "1" ] && return 0
+  return 2
+}
+
 rooted_afwall_graph_from_snapshot() {
-  local snap="$1" defs reachable out line chain target
+  local snap="$1" defs reachable out line chain rc
   [ -n "$snap" ] || return 1
   afwall_graph_present_from_snapshot "$snap" || return 1
   defs="$(_snapshot_defined_chains "$snap")"
@@ -1232,27 +1272,28 @@ rooted_afwall_graph_from_snapshot() {
   while IFS= read -r line; do
     case "$line" in
       '-A OUTPUT '*)
-        target="$(_snapshot_jump_target "$line" 2>/dev/null || true)"
-        [ "$target" = "$AFWALL_CHAIN_MAIN" ] && out="${out}${line}
+        if _rule_afwall_targets_reachable "$line" "$AFWALL_CHAIN_MAIN"; then
+          out="${out}${line}
 "
+        fi
         ;;
       '-N '*)
-        set -- $line
-        chain="${2:-}"
+        chain="${line#-N }"
+        chain="${chain%% *}"
         _chain_in_list "$chain" "$reachable" && out="${out}${line}
 "
         ;;
       '-A '*)
-        set -- $line
-        chain="${2:-}"
+        chain="$(_chain_from_rule_line "$line" 2>/dev/null || true)"
         if _chain_in_list "$chain" "$reachable"; then
-          target="$(_snapshot_jump_target "$line" 2>/dev/null || true)"
-          case "$target" in
-            afwall*) _chain_in_list "$target" "$reachable" && out="${out}${line}
-" ;;
-            *) out="${out}${line}
-" ;;
-          esac
+          if _rule_afwall_targets_reachable "$line" "$reachable"; then
+            out="${out}${line}
+"
+          else
+            rc=$?
+            [ "$rc" = "2" ] && out="${out}${line}
+"
+          fi
         fi
         ;;
     esac
@@ -1267,8 +1308,8 @@ _checksum_lines() {
   local _text="$1" _ck _lc _cc
   if has_cmd cksum; then
     _ck="$(printf '%s\n' "$_text" | cksum 2>/dev/null)" || _ck=""
-    set -- $_ck
-    [ -n "${1:-}" ] && { printf '%s' "$1"; return 0; }
+    _ck="${_ck%% *}"
+    [ -n "$_ck" ] && { printf '%s' "$_ck"; return 0; }
   fi
   _lc="$(printf '%s\n' "$_text" | wc -l | tr -d ' ')"
   _cc="$(printf '%s\n' "$_text" | wc -c | tr -d ' ')"

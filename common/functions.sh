@@ -48,9 +48,9 @@ device_check() {
   for i in /system /vendor /odm /product; do
     if [ -f $i/build.prop ]; then
       for j in "ro.product.$type" "ro.build.$type" "ro.product.vendor.$type" "ro.vendor.product.$type"; do
-        [ "$(sed -n "s/^$j=//p" $i/build.prop 2>/dev/null | head -n 1 | tr '[:upper:]' '[:lower:]')" == "$prop" ] && return 0
+        [ "$(sed -n "s/^$j=//p" $i/build.prop 2>/dev/null | head -n 1 | tr '[:upper:]' '[:lower:]')" = "$prop" ] && return 0
       done
-      [ "$type" == "device" ] && [ "$(sed -n "s/^"ro.build.product"=//p" $i/build.prop 2>/dev/null | head -n 1 | tr '[:upper:]' '[:lower:]')" == "$prop" ] && return 0
+      [ "$type" = "device" ] && [ "$(sed -n "s/^"ro.build.product"=//p" $i/build.prop 2>/dev/null | head -n 1 | tr '[:upper:]' '[:lower:]')" = "$prop" ] && return 0
     fi
   done
   return 1
@@ -75,7 +75,7 @@ cp_ch() {
   esac
   for OFILE in ${OFILES}; do
     if $FOL; then
-      if [ "$(basename $SRC)" == "$(basename $DEST)" ]; then
+      if [ "$(basename $SRC)" = "$(basename $DEST)" ]; then
         local FILE=$(echo $OFILE | sed "s|$SRC|$DEST|")
       else
         local FILE=$(echo $OFILE | sed "s|$SRC|$DEST/$(basename $SRC)|")
@@ -161,7 +161,7 @@ ui_print " "
 $KSU && { [ $KSU_VER_CODE -lt 11184 ] && require_new_ksu; }
 # APatch is fork of KSU, treat same
 [ -z $APATCH ] && APATCH=false
-[ "$APATCH" == "true" ] && KSU=true
+[ "$APATCH" = "true" ] && KSU=true
 
 # Start debug
 set -x
@@ -185,7 +185,7 @@ elif [ $MAGISK_VER_CODE -ge 27000 ]; then # Atomic Mount
   fi
   ORIGDIR="$MAGISKTMP/mirror"
   mount_mirrors
-elif [ "$(basename "$MAGISKTMP")" == ".magisk" ]; then
+elif [ "${MAGISKTMP##*/}" = ".magisk" ]; then
   ORIGDIR="$MAGISKTMP/mirror"
 else
   ORIGDIR="$MAGISKTMP/.magisk/mirror"
@@ -199,7 +199,8 @@ else
 fi
 # Detect extra partition compatibility (KernelSU or Magisk Delta/Kitsune)
 EXTRAPART=false
-if $KSU || [ "${MAGISK_VER##*-}" == "delta" ] || [ "${MAGISK_VER##*-}" == "kitsune" ]; then
+_MAGISK_VER_SUFFIX="${MAGISK_VER##*-}"
+if $KSU || [ "$_MAGISK_VER_SUFFIX" = "delta" ] || [ "$_MAGISK_VER_SUFFIX" = "kitsune" ]; then
   EXTRAPART=true
 elif ! $PARTOVER; then
   unset PARTITIONS
@@ -235,7 +236,7 @@ ui_print "- Removing old files"
 
 if [ -f $INFO ]; then
   while read LINE; do
-    if [ "$(echo -n $LINE | tail -c 1)" == "~" ]; then
+    if [ "$(echo -n $LINE | tail -c 1)" = "~" ]; then
       continue
     elif [ -f "$LINE~" ]; then
       mv -f $LINE~ $LINE

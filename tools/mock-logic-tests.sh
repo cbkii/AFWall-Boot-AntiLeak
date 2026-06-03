@@ -33,6 +33,19 @@ if find "$ROOT" -path "$ROOT/.git" -prune -o -type f ! -path "$ROOT/tools/mock-l
 fi
 pass "forbidden parser absence"
 
+# Release automation must also stay clear of the forbidden parser token.
+if grep -n "$forbidden" "$ROOT/.github/workflows/release.yml" "$ROOT/.github/scripts/previous_release_tag.py" >/dev/null 2>&1; then
+  fail "release automation contains forbidden parser token"
+fi
+pass "release automation forbidden parser absence"
+
+# Previous-tag selection must choose the newest older tag, not the release tag or a newer tag.
+prev_tag="$(printf '%s\n' v3.2.1 v4.0.1 v4.0.0 v2.6.0 | python3 "$ROOT/.github/scripts/previous_release_tag.py" v4.0.0)"
+[ "$prev_tag" = "v3.2.1" ] || fail "previous-tag selector chose '$prev_tag' instead of newest older tag"
+prev_tag="$(printf '%s\n' 39999 40000 40001 | python3 "$ROOT/.github/scripts/previous_release_tag.py" 40000)"
+[ "$prev_tag" = "39999" ] || fail "numeric previous-tag selector chose newer/current tag"
+pass "previous release tag selection"
+
 # Temporary review-helper artifacts must never ship in the module branch.
 for stale in \
   "$ROOT/tools/remove_${forbidden}_fixup.py" \
@@ -73,6 +86,13 @@ pass "per-boot VPN cleanup"
 # Rooted graph logic: reachable orphan churn must not alter release fingerprint.
 MODDIR="$ROOT"
 . "$ROOT/bin/common.sh"
+defined_glob_snap='-P OUTPUT ACCEPT
+-N afwall
+-N afwall-star*literal
+-A OUTPUT -j afwall
+-A afwall -j RETURN'
+defined_glob="$(_snapshot_defined_chains "$defined_glob_snap")"
+printf '%s\n' "$defined_glob" | grep -qx 'afwall-star[*]literal' || fail "defined-chain parser mishandled literal glob character"
 base_snap='-P OUTPUT ACCEPT
 -N afwall
 -N afwall-wifi
@@ -105,6 +125,24 @@ mobile_snap='-P OUTPUT ACCEPT
 -A afwall -j afwall-3g
 -A afwall-3g -j RETURN'
 afwall_prefix_reachable_from_snapshot "$mobile_snap" afwall-3g || fail "reachable mobile subtree not detected"
+mobile_orphan_snap='-P OUTPUT ACCEPT
+-N afwall
+-N afwall-3g
+-A OUTPUT -j afwall
+-A afwall -m owner --uid-owner 1000 -j RETURN
+-A afwall-3g -j DROP'
+if afwall_prefix_reachable_from_snapshot "$mobile_orphan_snap" afwall-3g; then fail "orphan mobile subtree treated as reachable"; fi
+multi_jump_snap='-P OUTPUT ACCEPT
+-N afwall
+-N afwall-wifi
+-A OUTPUT -m comment --comment synthetic -j RETURN -j afwall
+-A afwall -m comment --comment synthetic -j RETURN -j afwall-wifi
+-A afwall-wifi -j RETURN'
+afwall_prefix_reachable_from_snapshot "$multi_jump_snap" afwall-wifi || fail "later jump target was not included in reachability"
+rooted_afwall_graph_from_snapshot "$multi_jump_snap" | grep -q 'synthetic' || fail "rooted graph omitted rule with later reachable jump target"
+multi_orphan_snap="$multi_jump_snap
+-A afwall -m comment --comment orphan -j RETURN -j afwall-missing"
+if rooted_afwall_graph_from_snapshot "$multi_orphan_snap" | grep -q 'comment orphan'; then fail "rooted graph included rule with undefined later jump target"; fi
 pass "rooted graph and transport reachability"
 
 # Config single-source and PID lifecycle invariants.
@@ -119,7 +157,15 @@ allowed='LEAK_PROTECTION_MODE INTEGRATION_MODE POLL_INTERVAL_SECS FAST_STABLE_SE
 vars=$(sed -n 's/^\([A-Z0-9_][A-Z0-9_]*\)=.*/\1/p' "$ROOT/config.sh")
 for v in $vars; do
   case " $allowed " in *" $v "*) ;; *) fail "unexpected user-facing config variable: $v" ;; esac
-  prev=$(sed -n "/^[#]/{h;d;};/^${v}=/{x;p;q;};h" "$ROOT/config.sh")
+  prev=""
+  found=0
+  while IFS= read -r line; do
+    case "$line" in
+      "$v"=*) found=1; break ;;
+    esac
+    prev="$line"
+  done < "$ROOT/config.sh"
+  [ "$found" = "1" ] || fail "config variable not found while checking comment: $v"
   printf '%s' "$prev" | grep -q '^# .*' || fail "config variable lacks immediate explanatory comment: $v"
 done
 for v in WATCHDOG_POLICY VPN_LOCKDOWN_MODE VPN_PROVIDER_PACKAGES; do
