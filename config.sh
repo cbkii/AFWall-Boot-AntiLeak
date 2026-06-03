@@ -1,436 +1,80 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v3.2.1 - User Configuration
-# This file is sourced during boot. Keep syntax POSIX/ash compatible.
-# Place a custom copy at /data/adb/AFWall-Boot-AntiLeak/config.sh to
-# override the module's built-in defaults without modifying the module itself.
+# AFWall Boot AntiLeak v4.0.0 - User Configuration
+# Breaking-change note: v4.0.0 reads only this module-local file and optional
+# config.local.sh in the same directory. Old /data/adb/AFWall-Boot-AntiLeak
+# config files are ignored; clean uninstall, reboot, reinstall, and reconfigure
+# is recommended when upgrading from older releases.
 
-# ── Integration mode ──────────────────────────────────────────────────────────
-# Controls how this module coordinates with AFWall+'s optional "Fix Startup
-# Data Leak" (fixLeak) feature.
-#
-# Background: AFWall+'s fixLeak feature installs a startup script called
-# 'afwallstart' into init.d or su.d paths (/etc/init.d/, /su/su.d/, etc.) and
-# optionally into Magisk paths (/data/adb/post-fs-data.d/,
-# /data/adb/service.d/). On modern Android (8+) the init.d/su.d mechanism is
-# rarely effective without a special kernel or SuperSU. On Android 16 Pixel
-# devices it is effectively non-functional. The module checks for the presence
-# of that script to determine whether to defer.
-#
-#   auto          - Inspect AFWall state. Install the module block as primary
-#                   (or supplemental) protection regardless of AFWall state.
-#                   Recommended default. (default)
-#   prefer_module - Always install the module block, regardless of any detected
-#                   AFWall startup-script. Belt-and-suspenders maximum safety.
-#   prefer_afwall - Skip the module block only when an AFWall-owned afwallstart
-#                   script is detected in init.d/su.d/Magisk paths. On modern
-#                   Android this is effectively the same as auto unless you have
-#                   confirmed init.d support or AFWall Magisk-path fixLeak.
-#   off           - Disable module blocking entirely. Use only in emergencies.
-#
-# Recommended AFWall+ settings when using this module:
-#   - Fix Startup Data Leak: DISABLED (this module is the leak protection)
-#   - Startup Delay: 0 (no extra delay needed; module covers the window)
-#   - Active Rules: ENABLED (required for module to detect AFWall readiness)
-#   - Tether/LAN/VPN/Roaming controls: enable as needed; module covers boot gap
-#
+# Recommended default for most users; balanced keeps the kernel firewall as the main protection while avoiding disruptive radio toggles. Accepted: balanced, strict, recovery_friendly.
+LEAK_PROTECTION_MODE=balanced
+
+# Controls how this module coexists with AFWall's own startup-leak option; leave auto unless you intentionally want to force or disable module blocking. Accepted: auto, prefer_module, prefer_afwall, off.
 INTEGRATION_MODE=auto
 
-# ── FORWARD chain block (tethered-client / hotspot / USB / BT tether) ────────
-# When enabled (default), the module installs a temporary DROP block on the
-# iptables FORWARD chain (filter table) during early boot.
-# This prevents tethered clients (Wi-Fi hotspot, USB tether, Bluetooth PAN)
-# from leaking traffic through the phone before AFWall is ready.
-#
-# Set to 0 only if you do not use tethering AND you need to avoid touching
-# the filter FORWARD chain for compatibility reasons.
-#
-ENABLE_FORWARD_BLOCK=1
-
-# ── INPUT chain block (optional inbound traffic hardening) ────────────────────
-# When enabled, the module installs a temporary DROP block on the iptables
-# INPUT chain (filter table) during early boot.
-# This prevents inbound connections from reaching the device before AFWall has
-# applied its INPUT rules.
-#
-# IMPORTANT: Loopback (lo) is always exempted to avoid breaking local IPC.
-#
-# Disabled by default because:
-#   - Most users do not rely on AFWall INPUT rules during boot
-#   - Blocking INPUT during boot can delay ADB, Wi-Fi management frames, and
-#     DHCP responses (though all are typically after network interfaces are up)
-#   - AFWall's INPUT rule support depends on the user's AFWall configuration
-#
-# Enable if you have AFWall INPUT rules configured and want boot-time coverage.
-#
-ENABLE_INPUT_BLOCK=0
-
-# ══════════════════════════════════════════════════════════════════════════════
-# LOWER-LAYER SUPPRESSION SUBSYSTEM (v2.2.0+)
-# ══════════════════════════════════════════════════════════════════════════════
-# These options control a second, lower anti-leak tier that runs beneath the
-# iptables hard block.  Service-level and interface-level suppression reduces
-# network connectivity during the pre-AFWall window even if iptables were to
-# fail or be bypassed.
-#
-# IMPORTANT: These are BEST-EFFORT measures.  They supplement the iptables hard
-# block; they do NOT replace it.  If a service command fails, the iptables
-# block remains the authoritative hard stop.
-#
-# IMPORTANT: Airplane mode is NOT used as the primary anti-leak mechanism.
-# It is a framework/policy switch, not a kernel-level hardware kill.  Wi-Fi
-# can be re-enabled while in airplane mode.  See README for details.
-#
-# State tracking: the module records every change it makes to service and
-# interface state in /data/adb/AFWall-Boot-AntiLeak/state/ll/.  Only changes
-# made by the module are restored.  Wi-Fi, mobile data, or Bluetooth that the
-# user had already disabled before boot will NOT be re-enabled.
-
-# ── Lower-layer mode ──────────────────────────────────────────────────────────
-#
-#   off    - No lower-layer suppression. Firewall-only fast reconnect mode. (default)
-#   safe   - Interface quiesce + optional service suppression. Uses individual flags
-#            below to control which services are disabled.
-#   strict - Same as safe; individual flags still apply, but this mode signals
-#            intent to enable maximum suppression.  Upgrade path: set all
-#            LOWLEVEL_USE_* flags to 1 and set mode to strict.
-#
-LOWLEVEL_MODE=off
-
-# ── Wi-Fi/mobile-data OFF mode ───────────────────────────────────────────────
-# 0 = fast reconnect mode: leave Wi-Fi/mobile-data framework state alone and
-#     rely on the early netfilter hard block until AFWall is ready. Recommended
-#     for Pixel-style devices where radio/service toggles slow reconnect.
-# 1 = aggressive radio suppression: disable Wi-Fi/mobile data during the boot
-#     anti-leak window, then restore only if this module changed them.
-# WARNING: aggressive mode can substantially slow reconnect/release after boot
-# and unlock because Android must re-associate/revalidate networks afterwards.
-LOWLEVEL_WIFI_DATA_OFF=0
-
-# ── Interface quiesce ─────────────────────────────────────────────────────────
-# When enabled, the module brings non-loopback network interfaces DOWN during
-# the service.sh phase.  Uses /sys/class/net enumeration and `ip link set`.
-# Interfaces are restored (brought UP) after AFWall rules are confirmed.
-#
-# Safety:
-#   - Loopback (lo), kernel transition tunnels, and Qualcomm IPA are exempt
-#   - The iptables hard block remains in place throughout
-#   - Routes are NOT explicitly removed; they disappear when interfaces go down
-#     and are re-acquired automatically (DHCP/RA) when interfaces come back up
-#     under AFWall's protection
-#
-# Set to 0 if you experience boot-time issues with Wi-Fi or network management
-# reacting to interface state changes.
-#
-LOWLEVEL_INTERFACE_QUIESCE=0
-
-# ── Wi-Fi service suppression ─────────────────────────────────────────────────
-# Disables Wi-Fi via Android service commands (cmd wifi / svc wifi).
-# Tracks pre-boot Wi-Fi state; only re-enables if the module disabled it.
-# Enabled by default (best-effort; requires framework to be up).
-#
-LOWLEVEL_USE_WIFI_SERVICE=0
-
-# ── Mobile data suppression ───────────────────────────────────────────────────
-# Disables mobile data via Android service commands (cmd phone / svc data).
-# Tracks pre-boot data state; only re-enables if the module disabled it.
-# Enabled by default (best-effort; requires framework to be up).
-#
-LOWLEVEL_USE_PHONE_DATA_CMD=0
-
-# ── Bluetooth suppression ─────────────────────────────────────────────────────
-# Disables Bluetooth via cmd bluetooth_manager / svc bluetooth.
-# Disabled by default because:
-#   - Bluetooth rarely carries internet traffic (iptables FORWARD block handles
-#     Bluetooth PAN forwarded traffic independently)
-#   - Disabling Bluetooth disrupts headphones, keyboards, etc. during boot
-#   - Users who specifically use Bluetooth tethering as an internet path may
-#     enable this for extra protection
-#
-# Set to 1 to enable Bluetooth suppression.
-#
-LOWLEVEL_USE_BLUETOOTH_MANAGER=0
-
-# ── Tethering suppression ─────────────────────────────────────────────────────
-# Stops active tethering via cmd connectivity and/or interface shutdown.
-# Enabled by default.  Note: tethering is NOT auto-restarted after boot
-# because it requires explicit user action; this is intentional.
-#
-LOWLEVEL_USE_TETHER_STOP=0
-
-# ── VPN lockdown toggle during boot window ────────────────────────────────────
-# Controls Android's "block connections without VPN" (always-on VPN lockdown).
-#
-# When enabled (default), the module attempts to turn lockdown ON as early as
-# possible during boot for VPN providers it can detect (plus optional provider
-# packages listed below). This reduces leak risk before AFWall handoff.
-#
-# During restore, the module then turns lockdown OFF again for the active
-# provider and restores the pre-boot always-on baseline where possible.
-#
-VPN_LOCKDOWN_BOOT_ENFORCE=0
-
-# ── VPN lockdown release during restore ───────────────────────────────────────
-# When enabled (default), restore phase disables lockdown for the active VPN
-# provider after AFWall handoff and attempts to restore the original pre-boot
-# always-on VPN state.
-#
-VPN_LOCKDOWN_RELEASE_ON_RESTORE=0
-
-# ── Optional VPN provider package hints ───────────────────────────────────────
-# Optional space/comma-separated package list to supplement auto-discovery.
-# Leave empty for auto-detection only.
-#
-# Example:
-# VPN_LOCKDOWN_PROVIDER_PACKAGES="com.wireguard.android com.protonvpn.android"
-#
-VPN_LOCKDOWN_PROVIDER_PACKAGES=""
-
-# ══════════════════════════════════════════════════════════════════════════════
-
-# ── AFWall readiness gate ────────────────────────────────────────────────────
-# Keep the module hard block active, but skip expensive AFWall rule-graph checks
-# until Android has reached the stage where AFWall+ can realistically apply
-# rules.  On Pixel 9a / Android 16 diagnostics, AFWall+ was never ready inside
-# the first 8 seconds after unlock.
-AFWALL_READY_REQUIRE_BOOT_COMPLETED=1
-AFWALL_READY_REQUIRE_UNLOCK=1
-AFWALL_READY_MIN_POST_UNLOCK_SECS=8
-
-# When enabled, TIMEOUT_SECS starts when the AFWall readiness gate opens, not
-# at raw boot or raw unlock time.  This prevents the intentional unlock grace
-# window from consuming timeout budget.
-TIMEOUT_START_AFTER_READY_GATE=1
-
-# ── Timeout ───────────────────────────────────────────────────────────────────
-# Maximum seconds to wait for AFWall rules before the timeout action fires.
-# Increase on very slow devices. Conservative default: 120 s.
-TIMEOUT_SECS=90
-
-# ── Timeout policy ────────────────────────────────────────────────────────────
-# Controls what happens when TIMEOUT_SECS is reached for a family that has not
-# yet been handed off to AFWall.
-#
-# Supported values:
-#   fail_closed - Retain the module-owned blocks for unresolved families.
-#                 Lower-layer state (interfaces/services) is still restored
-#                 because it is service-level suppression, not the hard stop.
-#                 The iptables blocks remain in place.
-#                 Use this if you prefer the device stay fully offline rather
-#                 than risk an unprotected window. Requires manual recovery
-#                 via the Magisk action button (action.sh) if AFWall is
-#                 absent or broken. (default — safest choice)
-#
-#   unblock     - Remove any still-active module-owned blocks for unresolved
-#                 families and restore lower-layer state. Networking is
-#                 restored. This matches the historic/documented behaviour.
-#                 Use this on devices where AFWall is always installed and
-#                 you want networking to recover if the module gets stuck.
-#                 WARNING: only takes effect when AUTO_TIMEOUT_UNBLOCK=1 AND
-#                 the device has been unlocked (if TIMEOUT_UNLOCK_GATED=1).
-#
-# NOTE: Even with fail_closed, families that were successfully handed off
-# before the timeout do NOT have their blocks reinstated. Per-family
-# timeout operates independently.
-#
-TIMEOUT_POLICY=fail_closed
-
-# ── Automatic timeout-based unblocking ───────────────────────────────────────
-# Master gate: when set to 0 (default) the module NEVER automatically
-# unblocks connectivity on timeout, regardless of TIMEOUT_POLICY.
-# Set to 1 only if you explicitly want timeout-based unblocking AND have set
-# TIMEOUT_POLICY=unblock.
-#
-# Default: 0 (disabled — fail-safe)
-#
-AUTO_TIMEOUT_UNBLOCK=0
-
-# ── Unlock-gated timeout counting ────────────────────────────────────────────
-# When set to 1 (default), the timeout countdown does NOT start until the
-# device has been positively detected as unlocked. If unlock cannot be
-# confirmed (e.g., device is at the lock screen), the countdown never begins.
-#
-# Default: 1 (enabled — timeout cannot expire before device is unlocked)
-#
-TIMEOUT_UNLOCK_GATED=1
-
-# ── Transport-aware Wi-Fi gating ──────────────────────────────────────────────
-# When set to 1 (default), Wi-Fi is not restored until AFWall's Wi-Fi
-# transport chain (afwall-wifi) is confirmed present and stable. If AFWall
-# does not use a dedicated Wi-Fi chain, falls back to main chain readiness.
-#
-# Default: 1 (enabled)
-#
-WIFI_AFWALL_GATE=0
-
-# ── Transport-aware mobile-data gating ───────────────────────────────────────
-# When set to 1 (default), mobile data is not restored until AFWall's mobile
-# transport chain (afwall-3g) is confirmed present and stable. If AFWall
-# does not use a dedicated mobile chain, falls back to main chain readiness.
-#
-# Default: 1 (enabled)
-#
-MOBILE_AFWALL_GATE=0
-
-# ── Radio-off reassertion interval ───────────────────────────────────────────
-# While waiting for AFWall transport readiness, the module periodically
-# re-verifies and re-asserts that Wi-Fi and mobile data are off. This is the
-# interval in seconds between reassertion checks.
-#
-RADIO_REASSERT_INTERVAL=10
-
-# ── Blackout integrity reassertion interval ───────────────────────────────────
-# While the iptables OUTPUT blackout is active and AFWall handoff is incomplete,
-# the module periodically verifies that the OUTPUT blackout chains (chain +
-# DROP rule + OUTPUT jump) are still intact in raw and filter tables.  If any
-# layer is missing or degraded, it is immediately repaired.
-#
-# This is separate from RADIO_REASSERT_INTERVAL so that iptables integrity can
-# be checked more frequently than the radio-off reassertion.  A shorter interval
-# reduces the window during which blackout chains could be absent due to
-# external interference before the module repairs them.
-#
-# Default: 5 s (half the radio reassertion interval).
-# Increase only if you see excessive iptables call overhead on very slow devices.
-#
-BLACKOUT_REASSERT_INTERVAL=5
-
-# ── Unlock detection poll interval ───────────────────────────────────────────
-# How often (in seconds) to check whether the device has been unlocked,
-# while TIMEOUT_UNLOCK_GATED=1 and timeout has not started yet.
-#
-UNLOCK_POLL_INTERVAL=5
-
-# ── Transport subtree fingerprint stability window ────────────────────────────
-# When a reachable transport-specific subtree (afwall-wifi* / afwall-3g*) is
-# detected, the module waits this many seconds for the subtree fingerprint to
-# be continuously stable before accepting it as "ready" and restoring the
-# corresponding radio service.  This is NOT a blocking sleep — stability is
-# tracked via timestamps in the non-blocking poll loop.
-# Post-boot (sys.boot_completed=1) SETTLE_SECS_POST_BOOT is used instead.
-SETTLE_SECS=5
-
-# ── Poll interval ─────────────────────────────────────────────────────────────
-# How often (in seconds) the main handoff loop iterates while waiting for AFWall
-# takeover.  1 second allows the module to react to AFWall readiness within one
-# polling cycle rather than waiting up to 2 seconds.  The per-poll cost is one
-# iptables -t filter -S call per blocked family.
-# Set to 2 to restore the pre-v2.6 behaviour.
-#
+# Seconds between AFWall rule-graph checks; lower values react faster but call iptables more often during the short boot handoff. Default: 1.
 POLL_INTERVAL_SECS=1
 
-# ── Fast-path stable window ───────────────────────────────────────────────────
-# The AFWall full graph fingerprint must remain identical for at least this many
-# seconds before the fast-path accepts it.  The fast path fires when corroborating
-# evidence is present (AFWall process visible OR current-boot file evidence found).
-# Post-boot (sys.boot_completed=1) LIVENESS_SECS_POST_BOOT is used instead.
-#
+# Stable seconds needed for a quick release when the rooted graph also has a strong/dense corroborating signal. Default: 2; raise on very slow devices.
 FAST_STABLE_SECS=2
 
-# ── Conservative-path stable window ──────────────────────────────────────────
-# The AFWall full graph fingerprint must remain identical for at least this many
-# seconds before the conservative path accepts it.  The conservative path fires
-# when corroborating evidence is absent.  No extra settle sleep is added.
-# Post-boot (sys.boot_completed=1) FALLBACK_SECS_POST_BOOT is used instead.
-#
+# Stable seconds needed when the rooted graph alone proves handoff; this prevents releasing during AFWall rule churn without making unlock mandatory. Default: 6.
 SLOW_STABLE_SECS=6
 
-# ── Transport-absence stable window ──────────────────────────────────────────
-# Once the main AFWall family graph has been confirmed stable, if no transport-
-# specific chains or references (afwall-wifi* / afwall-3g*) have been seen as
-# reachable in any snapshot for this many consecutive seconds, the module
-# accepts main-chain-only readiness for that transport and restores radios.
-# This covers both "chain absent" and "chain present but unreachable" cases.
-# Post-boot (sys.boot_completed=1) TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT
-# is used instead.
-#
+# Maximum seconds from service start before watchdog action; block is safest, unblock is easier to recover. Default: 180.
+WATCHDOG_SERVICE_SECS=180
+
+# Maximum seconds after Android reports boot complete before watchdog action; useful when the service started early but AFWall never appears. Default: 120.
+WATCHDOG_BOOT_COMPLETED_SECS=120
+
+# What to do when proof never arrives: block keeps unresolved protection and logs diagnostics; unblock removes module suppression so networking can recover without proven AFWall readiness. Accepted: block, unblock. Default: block.
+WATCHDOG_POLICY=block
+
+# Protects tethered clients during boot by adding a temporary FORWARD-chain blackout; keep enabled unless you never tether and need maximum compatibility. Accepted: 1 or 0. Default: 1.
+BLOCK_FORWARD=1
+
+# Adds temporary inbound INPUT blocking; leave off unless you use AFWall inbound rules and accept possible boot-time service disruption. Accepted: 1 or 0. Default: 0.
+BLOCK_INPUT=0
+
+# Optional radio/service suppression beneath the firewall: off is fastest and recommended for modern Pixel-style devices; safe is moderate; strict is strongest but may slow Wi-Fi/mobile/VPN recovery. Accepted: off, safe, strict. Default: off.
+RADIO_SUPPRESSION=off
+
+# AFWall package to watch for optional corroboration only; auto checks free/donate packages, or set a package explicitly. Accepted: auto, dev.ukanth.ufirewall, dev.ukanth.ufirewall.donate, com.ukanth.ufirewall.
+AFWALL_PACKAGE=auto
+
+# Android always-on VPN lockdown handling: off leaves it alone; preserve records/respects existing state; restore may enforce during protection then restore the pre-boot state. Accepted: off, preserve, restore. Default: off.
+VPN_LOCKDOWN_MODE=off
+
+# VPN provider discovery: use auto for Android/package detection or list packages manually when detection fails.
+# Common examples: ch.protonvpn.android com.wireguard.android com.mullvad.mullvadvpn com.nordvpn.android
+VPN_PROVIDER_PACKAGES=auto
+
+# Verbose boot log details for troubleshooting; leave off unless collecting diagnostics. Accepted: 1 or 0. Default: 0.
+DEBUG=0
+
+# Advanced — normally leave unchanged: these tune rare timing edges after the safe AFWall handoff proof is already independent of unlock/radio/VPN state.
+# Stable seconds before accepting a missing transport subtree as absent for radio restore; does not affect family firewall release. Default: 3.
 TRANSPORT_ABSENCE_STABLE_SECS=3
 
-# ── Transport inconclusive/oscillation guard ────────────────────────────────
-# After AFWall family handoff is complete, transport-specific subtree state can
-# still oscillate (for example, VPN-related chain churn toggling reachable /
-# unreachable views). To avoid very long deferred restore tails, the service
-# forces a verified restore attempt once a transport has remained unresolved for
-# this many seconds.
-#
-# This does NOT weaken startup fail-closed behavior:
-#   - family blackout release still requires AFWall main-graph readiness
-#   - restore still requires verification probes and retries if not confirmed
-#
-TRANSPORT_INCONCLUSIVE_SECS=20
-
-# ── Transport-absence stable window (post-boot) ───────────────────────────────
-# Shorter absence-stable window applied after sys.boot_completed=1 when
-# BOOT_COMPLETE_ACCELERATE=1.  If no transport-specific subtree has been seen
-# in snapshots for this many seconds after boot-complete, the module accepts
-# absence-stable fallback for that transport more quickly.
-#
-# Must NOT be confused with TRANSPORT_ABSENCE_STABLE_SECS (the base threshold
-# used before boot-complete).  Keep these values independent.
-#
-# Default: 2 s  (shorter than the base 3 s for faster post-boot restore)
-#
+# Advanced: shorter post-boot absence window for transport restore once Android is fully up. Default: 2.
 TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT=2
 
-# ── Post-boot inconclusive guard window ──────────────────────────────────────
-# Shorter threshold used for TRANSPORT_INCONCLUSIVE_SECS once sys.boot_completed=1.
+# Advanced: stable seconds before treating unreachable Wi-Fi/mobile AFWall chains as orphaned instead of blocking restore forever. Default: 3.
+TRANSPORT_ORPHAN_STABLE_SECS=3
+
+# Advanced: maximum seconds to tolerate inconclusive transport restore state before forcing a verified restore attempt. Default: 20.
+TRANSPORT_INCONCLUSIVE_SECS=20
+
+# Advanced: shorter post-boot inconclusive window for transport restore retries. Default: 8.
 TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT=8
 
-# ── Boot-completion acceleration ──────────────────────────────────────────────
-# When set to 1 (default), the module uses sys.boot_completed=1 and related
-# boot-completion signals to shorten the detection windows for liveness,
-# fallback stability, rule-graph settle, and transport-chain wait.  This
-# allows the safest and soonest possible handoff to AFWall.
-#
-# Shorter windows are safe post-boot because sys.boot_completed=1 indicates
-# the Android framework and all system services are fully initialised;
-# AFWall's FirewallService will have already completed its rule-application
-# cycle and will not continue adding rules after this point.
-#
-# Set to 0 to disable all boot-completion-based acceleration and keep every
-# detection window at its full configured value (legacy behaviour).
-#
-# Default: 1 (enabled)
-#
-BOOT_COMPLETE_ACCELERATE=1
+# Advanced: seconds between firewall integrity repairs while a family blackout is still active. Default: 5.
+BLACKOUT_REASSERT_INTERVAL=5
 
-# ── AFWall rule-density threshold for the boot-complete fast path ─────────────
-# The boot-complete fast path (see BOOT_COMPLETE_ACCELERATE) fires when:
-#   sys.boot_completed=1 AND afwall chain rule count >= AFWALL_RULE_DENSITY_MIN
-# This guards against accepting a chain that was only partially populated.
-# Raise this value if your AFWall configuration applies many rules; lower it
-# (minimum 1) if you have a minimal configuration with very few app rules.
-#
-# Default: 3
-#
+# Advanced: seconds between lower-layer radio/service suppression reassertions while restore is pending. Default: 10.
+RADIO_REASSERT_INTERVAL=10
+
+# Advanced: seconds between unlock-confidence diagnostic probes; unlock never gates family release. Default: 5.
+UNLOCK_POLL_INTERVAL=5
+
+# Advanced: minimum rule count in AFWall's main chain used as a dense-graph accelerator, not a mandatory gate. Default: 3.
 AFWALL_RULE_DENSITY_MIN=3
-
-# ── Post-boot-complete timing parameters ──────────────────────────────────────
-# These shorter windows apply only when BOOT_COMPLETE_ACCELERATE=1 AND
-# sys.boot_completed=1 is detected.  Each value overrides its base counterpart
-# for that condition only; base values are used in all other cases (including
-# when boot has not yet completed).
-#
-# LIVENESS_SECS_POST_BOOT
-#   Fast-path stability window post-boot (with corroboration).
-#   Replaces FAST_STABLE_SECS (default 2 s) post-boot.
-#   Default: 2 s
-#
-# FALLBACK_SECS_POST_BOOT
-#   Conservative-path stability window post-boot (no corroboration needed).
-#   Replaces SLOW_STABLE_SECS (default 6 s) post-boot.
-#   Default: 4 s
-#
-# SETTLE_SECS_POST_BOOT
-#   Transport subtree fingerprint stability window post-boot.
-#   Replaces SETTLE_SECS (default 5 s) post-boot.  Safe to reduce because
-#   AFWall's rule population is finished at boot-complete.
-#   Default: 1 s
-#
-LIVENESS_SECS_POST_BOOT=2
-FALLBACK_SECS_POST_BOOT=4
-SETTLE_SECS_POST_BOOT=1
-
-# ── Debug logging ─────────────────────────────────────────────────────────────
-# Set to 1 to enable verbose [DEBUG] entries in the boot log.
-# Log path: /data/adb/AFWall-Boot-AntiLeak/logs/boot.log
-DEBUG=0

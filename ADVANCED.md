@@ -25,8 +25,8 @@ The module is built around a staged handoff model:
 
 1. install a kernel-level blackout as early as possible,
 2. maintain and repair that blackout during `service.sh`,
-3. wait for the configured readiness gate (`sys.boot_completed`, unlock, and post-unlock grace),
-4. prove AFWall is actually ready using its iptables graph,
+3. immediately snapshot AFWall filter graphs in the service loop,
+4. prove AFWall is actually ready using the rooted live `OUTPUT -> afwall` graph,
 5. release the family blackout, then
 6. optionally restore lower-layer state that the module changed itself.
 
@@ -54,8 +54,8 @@ What it does:
 - writes `service.pid` so manual recovery can stop the loop,
 - verifies the Stage A blackout is still intact,
 - repairs it immediately if state says it should exist but live integrity checks fail,
-- tracks boot-complete/unlock/readiness-gate timing cheaply,
-- only starts AFWall graph parsing after the readiness gate opens,
+- tracks boot-complete/unlock/readiness timing for diagnostics only,
+- starts AFWall graph parsing immediately and never gates family release on unlock,
 - optionally disables Wi-Fi/mobile-data if aggressive radio suppression is configured,
 - optionally quiesces interfaces, stops tethering, or manages VPN lockdown,
 - periodically reasserts blackout integrity while waiting.
@@ -70,7 +70,7 @@ Important properties of the implementation:
 
 - snapshots are captured once per family per poll using `iptables -t filter -S` / `ip6tables -t filter -S`,
 - all readiness checks for that poll use the same snapshot,
-- the module fingerprints the full AFWall graph, not just the root chain count,
+- the module fingerprints the rooted AFWall graph, not just the root chain count,
 - stability is tracked with timestamps, not blocking settle sleeps.
 
 Details are in [AFWall readiness and handoff](#afwall-readiness-and-handoff).
@@ -94,21 +94,20 @@ Transport decisions are based on AFWall transport subtrees such as `afwall-wifi`
 
 ## AFWall readiness and handoff
 
-### Readiness gate before graph checks
+### Rooted graph checks are independent of unlock
 
-AFWall process presence is insufficient. The module does not release because a package exists or because an AFWall process is visible; final handoff is based on the AFWall iptables graph.
+AFWall process presence is insufficient. The module does not release because a package exists or because an AFWall process is visible; final handoff is based on the AFWall iptables graph rooted at the live `OUTPUT -> afwall` hook.
 
-By default, heavy AFWall graph checks are skipped until:
+Family release does **not** wait for:
 
-```sh
-sys.boot_completed=1
-device unlocked
-AFWALL_READY_MIN_POST_UNLOCK_SECS=8 elapsed after unlock
-```
+- keyguard/unlock detection,
+- CE-storage access,
+- AFWall process visibility,
+- file mtime evidence,
+- Wi-Fi/mobile transport subtree readiness, or
+- VPN route readiness.
 
-This prevents useless early graph polling on devices where AFWall+ cannot realistically apply rules immediately after unlock. While the gate is closed, the service loop only performs cheap fail-closed maintenance: override/stop checks, blackout integrity checks, and boot/unlock timing.
-
-When `TIMEOUT_START_AFTER_READY_GATE=1`, `TIMEOUT_SECS` starts at readiness-gate open time, not at raw boot or raw unlock. The intentional post-unlock grace window does not consume timeout budget.
+Unlock and boot-complete signals are logged as diagnostics and may strengthen optional corroboration, but unknown unlock state is not treated as locked and does not block handoff.
 
 ### Coherent per-poll snapshots
 
@@ -123,15 +122,16 @@ service: snapshot backend v4=iptables-S
 service: snapshot backend v6=ip6tables-S
 ```
 
-### Full-graph fingerprinting
+### Rooted-graph fingerprinting
 
-Readiness is based on the whole AFWall graph, including:
+Readiness is based on AFWall chains reachable from the current live `OUTPUT -> afwall` hook. The release fingerprint includes:
 
-- `afwall*` chain definitions,
-- rules inside `afwall*` chains,
-- jumps to `afwall*` chains.
+- the OUTPUT hook into `afwall`,
+- reachable `afwall*` chain definitions,
+- rules inside reachable `afwall*` chains, and
+- jumps among reachable chains.
 
-The sorted graph is checksummed with `cksum`. Any change in descendants, such as transport subchains, resets stability.
+Unreachable/orphan `afwall*` chains are excluded, so stale or orphan chain churn cannot reset family readiness timers. A separate full-graph view may appear in diagnostics, but it is not the release gate.
 
 ### Confirmation paths
 
@@ -142,7 +142,7 @@ A family can hand off in two ways.
 All of the following must be true:
 
 1. AFWall main chain is present and non-trivial.
-2. The full graph fingerprint is stable for `FAST_STABLE_SECS`.
+2. The rooted graph fingerprint is stable for `FAST_STABLE_SECS`.
 3. There is corroboration, such as:
    - AFWall process visible,
    - current-boot file evidence,
@@ -159,7 +159,7 @@ service: v4 fast-path confirmed stable=2s corroboration=process fp=...
 All of the following must be true:
 
 1. AFWall main chain is present and non-trivial.
-2. The full graph fingerprint is stable for `SLOW_STABLE_SECS`.
+2. The rooted graph fingerprint is stable for `SLOW_STABLE_SECS`.
 3. No corroboration is required.
 
 Typical log line:
@@ -219,82 +219,31 @@ service: wifi transport accepted via absence-stable fallback after 3s
 
 This is why a stale `afwall-wifi` or `afwall-3g` chain does not create a permanent deadlock.
 
-## Timeout and unlock semantics
+## Timeout/watchdog and unlock semantics
 
-### Default behaviour
+The service has two absolute watchdogs that do not depend on readiness-gate or unlock state:
 
-The shipped defaults are conservative:
+- `WATCHDOG_SERVICE_SECS` from service-loop start,
+- `WATCHDOG_BOOT_COMPLETED_SECS` from first `sys.boot_completed=1`.
 
-- `TIMEOUT_POLICY=fail_closed`
-- `AUTO_TIMEOUT_UNBLOCK=0`
-- `TIMEOUT_UNLOCK_GATED=1`
-- `TIMEOUT_START_AFTER_READY_GATE=1`
+`WATCHDOG_POLICY=block` keeps unresolved module blocks active and emits loud diagnostic blocks containing blackout integrity, rooted AFWall graph/fingerprint state, unlock confidence, transport/VPN state, and effective config.
 
-That means:
+`WATCHDOG_POLICY=unblock` sets the stop latch, removes all module-owned OUTPUT/FORWARD/INPUT blocks, restores lower-layer/radio/VPN state as configured, clears state coherently, removes `service.pid`, and exits the service loop.
 
-- timeout countdown does not start before the readiness gate opens,
-- the post-unlock grace window does not consume timeout budget,
-- timeout never auto-unblocks unless you explicitly opt into it,
-- on unresolved families the module keeps the blackout by default.
-
-### Unlock-gated timeout
-
-When `TIMEOUT_UNLOCK_GATED=1`, the timeout countdown starts only after the device has been positively detected as unlocked.
-
-This prevents a timeout expiring while the device is still sitting at the lock screen.
-
-### Auto-unblocking on timeout
-
-Timeout-based unblocking requires **both**:
-
-```sh
-AUTO_TIMEOUT_UNBLOCK=1
-TIMEOUT_POLICY=unblock
-```
-
-If you set only `TIMEOUT_POLICY=unblock`, the module logs a warning and still behaves fail-closed.
-
-### What happens on fail-closed timeout
-
-With the default fail-closed behaviour, lower-layer state can be restored while unresolved family blackouts remain in place. Recovery is then manual; see [Manual recovery](#manual-recovery).
+Unlock detection is a multi-signal heuristic using `cmd user is-user-unlocked`, `dumpsys user`, current-user CE readability, keyguard/window hints, and `dumpsys trust` when available. The final confidence is logged. Unknown unlock state means “unknown”, not “locked”, and family handoff continues on the graph-only path.
 
 ## Configuration reference
 
-Persistent user overrides live at:
+Runtime config is module-local only:
 
 ```sh
-/data/adb/AFWall-Boot-AntiLeak/config.sh
+/data/adb/modules/AFWall-Boot-AntiLeak/config.sh
+/data/adb/modules/AFWall-Boot-AntiLeak/config.local.sh
 ```
 
-Built-in defaults ship in [`config.sh`](config.sh). Edit the persistent file, then reboot.
+Legacy `/data/adb/AFWall-Boot-AntiLeak/config.sh` and `/data/adb/AFWall-Boot-AntiLeak/installer.cfg` are ignored and logged. They are not sourced or migrated in v4.0.0; recreate needed settings manually in module-local `config.local.sh`.
 
-
-### Fast Pixel-style profile
-
-Recommended fast reconnect settings for Pixel 9a / Android 16 diagnostics:
-
-```sh
-LOWLEVEL_MODE=off
-LOWLEVEL_WIFI_DATA_OFF=0
-LOWLEVEL_INTERFACE_QUIESCE=0
-LOWLEVEL_USE_WIFI_SERVICE=0
-LOWLEVEL_USE_PHONE_DATA_CMD=0
-LOWLEVEL_USE_BLUETOOTH_MANAGER=0
-LOWLEVEL_USE_TETHER_STOP=0
-WIFI_AFWALL_GATE=0
-MOBILE_AFWALL_GATE=0
-AFWALL_READY_REQUIRE_BOOT_COMPLETED=1
-AFWALL_READY_REQUIRE_UNLOCK=1
-AFWALL_READY_MIN_POST_UNLOCK_SECS=8
-TIMEOUT_START_AFTER_READY_GATE=1
-TIMEOUT_SECS=90
-```
-
-This leaves radios/framework state alone and relies on the early netfilter block until AFWall graph readiness is proven.
-
-### Aggressive Wi-Fi/mobile-data OFF mode
-
-Set `LOWLEVEL_WIFI_DATA_OFF=1` to disable Wi-Fi and mobile data during the anti-leak window. The installer/reconfigure flow warns that this can slow reconnect/release because Android must reconnect and revalidate networks after restore. The runtime restores only state that the module changed itself.
+Beginner options are grouped in `config.sh`: safety mode, release timing/watchdogs, boot suppression, AFWall package, VPN handling, and advanced/debug. Old timeout/readiness variables are unsupported in v4.0.0 and are ignored if present in `config.local.sh`.
 
 ### VPN always-on install/update detection
 
@@ -305,65 +254,40 @@ settings get secure always_on_vpn_app
 settings get secure always_on_vpn_lockdown
 ```
 
-If an always-on VPN app is configured and the module VPN options are not explicitly present in existing config or installer.cfg, the installer enables `VPN_LOCKDOWN_BOOT_ENFORCE=1` and `VPN_LOCKDOWN_RELEASE_ON_RESTORE=1`. If no always-on VPN is configured, VPN lockdown integration remains off by default. Explicit user config is preserved. Runtime VPN state is per-boot only; stale VPN restore markers are cleared at boot initialisation.
+If VPN handling is enabled and providers are set to `auto`, runtime tries to discover providers. If no provider is known, the log warns loudly and VPN handling is not reported as complete. Restore logs pre-active provider, pre-lockdown state, current lockdown state, provider used, and action taken. Runtime VPN state is per-boot only; stale VPN restore markers are cleared at boot initialisation.
 
 ### FORWARD and IPv6 raw integrity
 
 FORWARD protection is active only when the module chain exists, the DROP rule exists, the parent `FORWARD` jump exists, and loopback exemption is present. Orphaned FORWARD chains are degraded and repaired while configured active. IPv6 raw OUTPUT is also required to have loopback exemption before being considered healthy.
 
-### Integration mode
+### User-facing v4.0.0 keys
 
 | Key | Default | Meaning |
 |---|---:|---|
-| `INTEGRATION_MODE` | `auto` | Coordinate with AFWall's own startup-leak feature. `auto` is recommended; `prefer_module` always installs the module blackout; `prefer_afwall` defers only when AFWall startup protection is actually detected; `off` disables module blocking. |
-
-### Kernel blackout and chain coverage
-
-| Key | Default | Meaning |
-|---|---:|---|
-| `ENABLE_FORWARD_BLOCK` | `1` | Also block `FORWARD` so tethered clients cannot leak through hotspot/USB/Bluetooth tethering during boot. |
-| `ENABLE_INPUT_BLOCK` | `0` | Optional inbound hardening for `INPUT`; loopback stays exempt. |
-
-### Lower-layer suppression
-
-| Key | Default | Meaning |
-|---|---:|---|
-| `LOWLEVEL_MODE` | `safe` | `off`, `safe`, or `strict`. `safe` is the default balanced mode. |
-| `LOWLEVEL_INTERFACE_QUIESCE` | `1` | Bring eligible interfaces down during the waiting period. |
-| `LOWLEVEL_USE_WIFI_SERVICE` | `1` | Disable and later restore Wi-Fi if the module changed it. |
-| `LOWLEVEL_USE_PHONE_DATA_CMD` | `1` | Disable and later restore mobile data if the module changed it. |
-| `LOWLEVEL_USE_BLUETOOTH_MANAGER` | `0` | Optional Bluetooth suppression. Disabled by default because it is disruptive and rarely needed. |
-| `LOWLEVEL_USE_TETHER_STOP` | `1` | Stop active tethering during boot; tethering is not automatically restarted. |
-
-### Timeout and restore behaviour
-
-| Key | Default | Meaning |
-|---|---:|---|
-| `TIMEOUT_SECS` | `120` | Maximum wait before timeout handling. |
-| `TIMEOUT_POLICY` | `fail_closed` | `fail_closed` keeps unresolved family blackouts; `unblock` only works when auto-timeout unblocking is also enabled. |
-| `AUTO_TIMEOUT_UNBLOCK` | `0` | Master gate for timeout-based unblocking. Default disables it entirely. |
-| `TIMEOUT_UNLOCK_GATED` | `1` | Timeout starts only after unlock. |
-| `WIFI_AFWALL_GATE` | `1` | Gate Wi-Fi restore on transport-aware logic. |
-| `MOBILE_AFWALL_GATE` | `1` | Gate mobile-data restore on transport-aware logic. |
-| `RADIO_REASSERT_INTERVAL` | `10` | Seconds between radio-off verification while waiting. |
-| `BLACKOUT_REASSERT_INTERVAL` | `5` | Seconds between blackout integrity checks while waiting. |
-| `UNLOCK_POLL_INTERVAL` | `5` | Seconds between unlock checks before timeout starts. |
-
-### Readiness and timing
-
-| Key | Default | Meaning |
-|---|---:|---|
-| `SETTLE_SECS` | `5` | Stable window for reachable transport subtree acceptance before post-boot acceleration applies. |
-| `POLL_INTERVAL_SECS` | `1` | Main readiness poll interval. |
-| `FAST_STABLE_SECS` | `2` | Fast-path AFWall graph stability window when corroboration exists. |
-| `SLOW_STABLE_SECS` | `6` | Conservative AFWall graph stability window without corroboration. |
-| `TRANSPORT_ABSENCE_STABLE_SECS` | `3` | Accept absent or unreachable transport after this stable window. |
-| `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT` | `2` | Shorter post-boot absence window. |
-| `BOOT_COMPLETE_ACCELERATE` | `1` | Enable shorter post-boot thresholds. |
-| `AFWALL_RULE_DENSITY_MIN` | `3` | Minimum chain density for boot-complete corroboration. |
-| `LIVENESS_SECS_POST_BOOT` | `2` | Post-boot fast-path stability threshold. |
-| `FALLBACK_SECS_POST_BOOT` | `4` | Post-boot conservative-path stability threshold. |
-| `SETTLE_SECS_POST_BOOT` | `1` | Post-boot transport subtree settle window. |
+| `LEAK_PROTECTION_MODE` | `balanced` | Recommended safety profile: `balanced`, `strict`, or `recovery_friendly`. |
+| `INTEGRATION_MODE` | `auto` | Coordinate with AFWall's own startup-leak feature; `auto` is recommended. |
+| `BLOCK_FORWARD` | `1` | Temporary FORWARD blackout for tethered clients. |
+| `BLOCK_INPUT` | `0` | Optional temporary INPUT blackout; loopback stays exempt. |
+| `RADIO_SUPPRESSION` | `off` | Optional lower-layer suppression: `off`, `safe`, or `strict`. |
+| `WATCHDOG_SERVICE_SECS` | `180` | Absolute watchdog from service start. |
+| `WATCHDOG_BOOT_COMPLETED_SECS` | `120` | Absolute watchdog from first `sys.boot_completed=1`. |
+| `WATCHDOG_POLICY` | `block` | `block` keeps unresolved protection and logs diagnostics; `unblock` removes module suppression for recovery. |
+| `POLL_INTERVAL_SECS` | `1` | Main snapshot poll interval. |
+| `FAST_STABLE_SECS` | `2` | Fast-path rooted graph stability window when corroboration exists. |
+| `SLOW_STABLE_SECS` | `6` | Conservative rooted graph stability window without mandatory corroboration. |
+| `AFWALL_PACKAGE` | `auto` | AFWall package hint: `auto`, free, donate, or legacy package. |
+| `VPN_LOCKDOWN_MODE` | `off` | VPN lockdown handling: `off`, `preserve`, or `restore`. |
+| `VPN_PROVIDER_PACKAGES` | `auto` | Auto-discover providers or provide a space/comma-separated package list. |
+| `DEBUG` | `0` | Set to `1` for verbose boot logging. |
+| `TRANSPORT_ABSENCE_STABLE_SECS` | `3` | Advanced transport restore absence fallback window. |
+| `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT` | `2` | Advanced shorter post-boot absence fallback window. |
+| `TRANSPORT_ORPHAN_STABLE_SECS` | `3` | Advanced orphan/unreachable transport fallback window. |
+| `TRANSPORT_INCONCLUSIVE_SECS` | `20` | Advanced inconclusive transport restore retry window. |
+| `TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT` | `8` | Advanced shorter post-boot inconclusive window. |
+| `RADIO_REASSERT_INTERVAL` | `10` | Seconds between lower-layer suppression reassertions. |
+| `BLACKOUT_REASSERT_INTERVAL` | `5` | Seconds between blackout integrity repair checks. |
+| `UNLOCK_POLL_INTERVAL` | `5` | Seconds between unlock-confidence diagnostic probes. |
+| `AFWALL_RULE_DENSITY_MIN` | `3` | Dense graph accelerator threshold; not a mandatory release gate. |
 
 ### Diagnostics and behaviour flags
 
@@ -484,11 +408,11 @@ iptables  -t filter -S | grep 'afwall.*afwall-wifi'
 ip6tables -t filter -S | grep 'afwall.*afwall-wifi'
 ```
 
-If AFWall does not use a dedicated Wi-Fi transport subtree on your setup, `WIFI_AFWALL_GATE=0` is the blunt workaround; otherwise the default absence-stable fallback should still restore Wi-Fi once the “not usable” state is stable.
+If AFWall does not use a dedicated Wi-Fi transport subtree on your setup, the default absence-stable fallback should still restore Wi-Fi once the “not usable” state is stable.
 
 ### Mobile data not coming back
 
-Same pattern as Wi-Fi, using `afwall-3g` and `MOBILE_AFWALL_GATE`.
+Same pattern as Wi-Fi, using the rooted `afwall-3g` subtree and the absence/orphan fallback.
 
 ```sh
 iptables  -t filter -S | grep afwall-3g
@@ -508,16 +432,15 @@ Typical checks:
 - enabling `DEBUG=1` gives finer-grained progress information,
 - absence of `boot_marker` or other evidence signals can remove fast-path corroboration.
 
-### Timeout fires but device stays offline
+### Watchdog fires but device stays offline
 
-That is expected with the default configuration.
+That is expected with `WATCHDOG_POLICY=block`: unresolved module blocks are retained and the log explains the exact blocker.
 
-To opt into timeout-based recovery:
+To opt into watchdog-based recovery, put this in module-local `config.local.sh`:
 
 ```sh
-# /data/adb/AFWall-Boot-AntiLeak/config.sh
-AUTO_TIMEOUT_UNBLOCK=1
-TIMEOUT_POLICY=unblock
+# /data/adb/modules/AFWall-Boot-AntiLeak/config.local.sh
+WATCHDOG_POLICY=unblock
 ```
 
 Be explicit about the trade-off: connectivity can return even if AFWall is still absent or broken.
@@ -543,11 +466,7 @@ The installer tries, in order:
 2. bundled `keycheck`,
 3. non-interactive fallback.
 
-Non-interactive fallback priority is:
-
-1. external `/data/adb/AFWall-Boot-AntiLeak/installer.cfg`,
-2. existing persistent `/data/adb/AFWall-Boot-AntiLeak/config.sh`,
-3. standard defaults.
+Non-interactive fallback uses installer defaults and module-local config only. Legacy external runtime config is ignored by service/post-fs-data and does not affect boot behaviour.
 
 ### Reconfiguration after install
 
@@ -557,15 +476,12 @@ To rerun the interactive configuration flow later:
 sh /data/adb/modules/AFWall-Boot-AntiLeak/reconfigure.sh
 ```
 
-Changes are written to the persistent config and take effect on the next reboot.
+Changes are written under the module directory and take effect on the next reboot.
 
 ### Pre-seeded installer config example
 
 ```sh
 IC_PROFILE=standard
 # or minimal / strict / custom
-AUTO_TIMEOUT_UNBLOCK=0
-TIMEOUT_UNLOCK_GATED=1
-WIFI_AFWALL_GATE=1
-MOBILE_AFWALL_GATE=1
+WATCHDOG_POLICY=block
 ```

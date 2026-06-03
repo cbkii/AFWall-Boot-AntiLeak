@@ -378,22 +378,7 @@ jobs:
 
           PREV_TAG="$(
             gh release list --repo "$GH_REPO" --limit 1000 --exclude-drafts --json tagName --jq '.[].tagName' 2>/dev/null |
-            awk -v rel="$RELEASE_TAG" '
-              function k(s,v,a,l){
-                if(match(s,/^[0-9]+$/)) return s+0
-                if(match(s,/[0-9]+\.[0-9]+\.[0-9]+/)){
-                  v=substr(s,RSTART,RLENGTH); split(v,a,".")
-                  return a[1] sprintf("%02d%02d",a[2],a[3]) + 0
-                }
-                if(match(s,/(^|[^0-9])([0-9]{5,}|[0-9]{3})([^0-9]|$)/)){
-                  v=substr(s,RSTART,RLENGTH); gsub(/[^0-9]/,"",v); l=length(v)
-                  return l==3 ? substr(v,1,1) sprintf("%02d%02d",substr(v,2,1),substr(v,3,1)) + 0 : v + 0
-                }
-                return -1
-              }
-              { n=k($0); if(n>=0 && $0!=rel && n>b) { b=n; o=$0 } }
-              END { print o }
-            '
+            python3 .github/scripts/previous_release_tag.py "$RELEASE_TAG"
           )"
 
           if [ -n "$PREV_TAG" ]; then

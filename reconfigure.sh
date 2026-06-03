@@ -5,11 +5,11 @@
 #   sh /data/adb/modules/AFWall-Boot-AntiLeak/reconfigure.sh
 #
 # This script re-runs the same interactive config selection used during
-# installation and writes the updated settings to the persistent config file:
-#   /data/adb/AFWall-Boot-AntiLeak/config.sh
+# installation and writes module-local overrides to:
+#   $MODDIR/config.local.sh
 #
-# The new settings take effect on the next reboot.
-# No reflash is needed to change module options.
+# v4.0.0 ignores old external config paths. The new settings take effect on the
+# next reboot. No reflash is needed to change module options.
 
 MODDIR="${0%/*}"
 
@@ -29,7 +29,7 @@ echo "  AFWall Boot AntiLeak -- Reconfigure"
 echo "================================================"
 echo ""
 echo "  Changes take effect on the next reboot."
-echo "  Config file: /data/adb/AFWall-Boot-AntiLeak/config.sh"
+echo "  Config file: ${MODDIR}/config.local.sh"
 echo ""
 
 ic_run_config_selection "reconfigure"
@@ -41,6 +41,6 @@ if [ "$_ic_rc" = "0" ]; then
     echo "  Reboot to apply the new settings."
 else
     echo "  Reconfiguration encountered an error."
-    echo "  Check that /data/adb/AFWall-Boot-AntiLeak/ is writable."
+    echo "  Check that the installed module directory is writable."
 fi
 echo ""

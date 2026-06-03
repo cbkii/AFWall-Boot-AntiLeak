@@ -11,7 +11,14 @@ shell=ash
 disable=SC1090,SC1091
 
 # SC2034: Variable appears unused.
-# config.sh variables (INTEGRATION_MODE, TIMEOUT_SECS, etc.) and customize.sh
-# variables (MINAPI, REPLACE, SKIPUNZIP) are intentionally set for external
-# consumers (Magisk installer or sourced config). Suppress false positives.
+# config.sh/customize.sh and installer helper variables are intentionally set
+# for external consumers (Magisk installer or sourced config). Suppress false
+# positives while keeping command/quoting checks active.
 disable=SC2034
+
+# SC2154: Variable is referenced but not assigned.
+# action.sh, service.sh, post-fs-data.sh and uninstall.sh import module globals
+# and functions through runtime-sourced common.sh/config.sh paths that ShellCheck
+# does not follow in CI. Keep this scoped to the repository config rather than
+# hiding it inline throughout every Magisk entrypoint.
+disable=SC2154

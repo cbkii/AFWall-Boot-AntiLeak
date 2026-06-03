@@ -6,7 +6,7 @@
 #   Stage B: Late lower-layer suppression (Wi-Fi/data off, verified). Reasserted
 #            periodically while waiting.
 #   Stage C: Wait for per-family AFWall takeover (fast / conservative / boot-complete
-#            path). Full AFWall graph fingerprints derived from coherent per-poll
+#            path). Rooted AFWall graph fingerprints derived from coherent per-poll
 #            snapshots. Non-blocking stability tracking (no blocking sleep).
 #   Stage D: Remove per-family OUTPUT blackout as soon as AFWall graph takeover is
 #            confirmed for that family — independent of transport readiness.
@@ -16,11 +16,11 @@
 #            TRANSPORT_ABSENCE_STABLE_SECS to avoid permanent deadlock.
 #   Stage E: Restore lower-layer state (only what the module changed).
 #
-# Timeout rules:
-#   - Countdown does NOT begin before device unlock (when TIMEOUT_UNLOCK_GATED=1).
-#   - Auto-unblocking on timeout is DISABLED by default (AUTO_TIMEOUT_UNBLOCK=0).
-#   - TIMEOUT_POLICY=unblock is a legacy option; it requires AUTO_TIMEOUT_UNBLOCK=1
-#     to have any effect; also subject to TIMEOUT_UNLOCK_GATED.
+# Watchdog rules:
+#   - Absolute service-start and boot-complete watchdogs run regardless of
+#     readiness/unlock state.
+#   - block logs repeated actionable diagnostics and keeps unresolved blocks.
+#   - unblock removes all module-imposed suppression for recovery.
 #
 # Transport tracking:
 #   wifi_done  = 1 when Wi-Fi radio-restore criteria are met (or not gating Wi-Fi).
@@ -30,85 +30,50 @@
 #   lower-layer (radio/service) restoration.
 #
 # Runs in a background subshell so Magisk's service phase is not held up.
+MODDIR="${0%/*}"
+. "$MODDIR/bin/common.sh"
 (
-  MODDIR="${0%/*}"
-  . "$MODDIR/bin/common.sh"
 
   load_config
 
-  # ── Config with safe defaults ───────────────────────────────────────────────
-  TIMEOUT_SECS="${TIMEOUT_SECS:-120}"
-  TIMEOUT_POLICY="${TIMEOUT_POLICY:-fail_closed}"
-  AUTO_TIMEOUT_UNBLOCK="${AUTO_TIMEOUT_UNBLOCK:-0}"
-  TIMEOUT_UNLOCK_GATED="${TIMEOUT_UNLOCK_GATED:-1}"
-  SETTLE_SECS="${SETTLE_SECS:-5}"
-  LIVENESS_SECS="${LIVENESS_SECS:-6}"
-  FALLBACK_SECS="${FALLBACK_SECS:-$((LIVENESS_SECS * 2))}"
-  WIFI_AFWALL_GATE="${WIFI_AFWALL_GATE:-1}"
-  MOBILE_AFWALL_GATE="${MOBILE_AFWALL_GATE:-1}"
-  RADIO_REASSERT_INTERVAL="${RADIO_REASSERT_INTERVAL:-10}"
-  BLACKOUT_REASSERT_INTERVAL="${BLACKOUT_REASSERT_INTERVAL:-5}"
-  UNLOCK_POLL_INTERVAL="${UNLOCK_POLL_INTERVAL:-5}"
-  AFWALL_READY_REQUIRE_BOOT_COMPLETED="${AFWALL_READY_REQUIRE_BOOT_COMPLETED:-1}"
-  AFWALL_READY_REQUIRE_UNLOCK="${AFWALL_READY_REQUIRE_UNLOCK:-1}"
-  AFWALL_READY_MIN_POST_UNLOCK_SECS="${AFWALL_READY_MIN_POST_UNLOCK_SECS:-8}"
-  TIMEOUT_START_AFTER_READY_GATE="${TIMEOUT_START_AFTER_READY_GATE:-1}"
-
-  # ── Composite-readiness timing ─────────────────────────────────────────────
-  # POLL_INTERVAL_SECS: how often the loop iterates (1s default → faster reaction).
-  # FAST_STABLE_SECS:   full-graph fingerprint must be stable this long + corroboration.
-  # SLOW_STABLE_SECS:   full-graph fingerprint must be stable this long (no corroborator).
-  # TRANSPORT_ABSENCE_STABLE_SECS: how long absence of a transport subtree must be
-  #   stable (after main family confirmed) before accepting main-chain-only readiness.
+  # ── v4.0.0 config-derived internal defaults ────────────────────────────────
+  # load_config/derive_internal_config in bin/common.sh owns validation and
+  # internal mapping.  Keep service local defaults only for timing values that
+  # may be absent if config.sh is missing.
   POLL_INTERVAL_SECS="${POLL_INTERVAL_SECS:-1}"
   FAST_STABLE_SECS="${FAST_STABLE_SECS:-2}"
   SLOW_STABLE_SECS="${SLOW_STABLE_SECS:-6}"
   TRANSPORT_ABSENCE_STABLE_SECS="${TRANSPORT_ABSENCE_STABLE_SECS:-3}"
-  # Max time to tolerate transport-subtree oscillation/inconclusive state after
-  # AFWall family handoff before forcing a verified restore attempt anyway.
-  # This keeps strict fail-closed startup behavior, but avoids long "waiting"
-  # tails caused by VPN/transport chain churn once AFWall main takeover is done.
-  TRANSPORT_INCONCLUSIVE_SECS="${TRANSPORT_INCONCLUSIVE_SECS:-20}"
-
-  # ── Boot-completion acceleration ───────────────────────────────────────────
-  BOOT_COMPLETE_ACCELERATE="${BOOT_COMPLETE_ACCELERATE:-1}"
-  AFWALL_RULE_DENSITY_MIN="${AFWALL_RULE_DENSITY_MIN:-3}"
-  LIVENESS_SECS_POST_BOOT="${LIVENESS_SECS_POST_BOOT:-2}"
-  FALLBACK_SECS_POST_BOOT="${FALLBACK_SECS_POST_BOOT:-4}"
-  SETTLE_SECS_POST_BOOT="${SETTLE_SECS_POST_BOOT:-1}"
-  # Absence-stable threshold post-boot: how many consecutive seconds with no
-  # transport-specific chains (afwall-wifi* / afwall-3g*) in snapshots before
-  # accepting that transport as absent and proceeding with radio restoration.
   TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT="${TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT:-2}"
+  TRANSPORT_ORPHAN_STABLE_SECS="${TRANSPORT_ORPHAN_STABLE_SECS:-3}"
+  TRANSPORT_INCONCLUSIVE_SECS="${TRANSPORT_INCONCLUSIVE_SECS:-20}"
   TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT="${TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT:-8}"
+  WATCHDOG_SERVICE_SECS="${WATCHDOG_SERVICE_SECS:-180}"
+  WATCHDOG_BOOT_COMPLETED_SECS="${WATCHDOG_BOOT_COMPLETED_SECS:-120}"
+  WATCHDOG_POLICY="${WATCHDOG_POLICY:-block}"
+  RADIO_REASSERT_INTERVAL="${RADIO_REASSERT_INTERVAL:-10}"
+  BLACKOUT_REASSERT_INTERVAL="${BLACKOUT_REASSERT_INTERVAL:-5}"
+  UNLOCK_POLL_INTERVAL="${UNLOCK_POLL_INTERVAL:-5}"
+  AFWALL_RULE_DENSITY_MIN="${AFWALL_RULE_DENSITY_MIN:-3}"
+  FAMILY_FAST_SECS_POST_BOOT_EFFECTIVE="${FAMILY_FAST_SECS_POST_BOOT_EFFECTIVE:-$FAST_STABLE_SECS}"
+  FAMILY_SLOW_SECS_POST_BOOT_EFFECTIVE="${FAMILY_SLOW_SECS_POST_BOOT_EFFECTIVE:-$SLOW_STABLE_SECS}"
+  TRANSPORT_SETTLE_SECS_EFFECTIVE="${TRANSPORT_SETTLE_SECS_EFFECTIVE:-5}"
+  TRANSPORT_SETTLE_SECS_POST_BOOT_EFFECTIVE="${TRANSPORT_SETTLE_SECS_POST_BOOT_EFFECTIVE:-1}"
+  BOOT_COMPLETE_ACCELERATE=1
 
   log "service: start ($MODULE_VERSION)"
-  log "service: config: timeout=${TIMEOUT_SECS}s policy=${TIMEOUT_POLICY} auto_unblock=${AUTO_TIMEOUT_UNBLOCK} unlock_gated=${TIMEOUT_UNLOCK_GATED} timeout_after_gate=${TIMEOUT_START_AFTER_READY_GATE}"
-  log "service: config: readiness_gate boot_completed=${AFWALL_READY_REQUIRE_BOOT_COMPLETED} unlock=${AFWALL_READY_REQUIRE_UNLOCK} post_unlock=${AFWALL_READY_MIN_POST_UNLOCK_SECS}s"
-  log "service: config: poll=${POLL_INTERVAL_SECS}s fast=${FAST_STABLE_SECS}s slow=${SLOW_STABLE_SECS}s transport_absence=${TRANSPORT_ABSENCE_STABLE_SECS}s absence_pb=${TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT}s transport_inconclusive=${TRANSPORT_INCONCLUSIVE_SECS}s inconclusive_pb=${TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT}s"
-  log "service: config: fwd=${ENABLE_FORWARD_BLOCK:-1} in=${ENABLE_INPUT_BLOCK:-0} ll_mode=${LOWLEVEL_MODE:-safe}"
-  log "service: config: wifi_gate=${WIFI_AFWALL_GATE} mobile_gate=${MOBILE_AFWALL_GATE} reassert=${RADIO_REASSERT_INTERVAL}s blackout_reassert=${BLACKOUT_REASSERT_INTERVAL}s"
-  log "service: config: boot_accel=${BOOT_COMPLETE_ACCELERATE} density_min=${AFWALL_RULE_DENSITY_MIN} liveness_pb=${LIVENESS_SECS_POST_BOOT}s fallback_pb=${FALLBACK_SECS_POST_BOOT}s settle_pb=${SETTLE_SECS_POST_BOOT}s"
+  log_effective_config
+  log "service: config: poll=${POLL_INTERVAL_SECS}s fast=${FAST_STABLE_SECS}s slow=${SLOW_STABLE_SECS}s transport_absence=${TRANSPORT_ABSENCE_STABLE_SECS}s orphan=${TRANSPORT_ORPHAN_STABLE_SECS}s absence_pb=${TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT}s transport_inconclusive=${TRANSPORT_INCONCLUSIVE_SECS}s inconclusive_pb=${TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT}s"
+  log "service: config: reassert=${RADIO_REASSERT_INTERVAL}s blackout_reassert=${BLACKOUT_REASSERT_INTERVAL}s density_min=${AFWALL_RULE_DENSITY_MIN} liveness_pb=${FAMILY_FAST_SECS_POST_BOOT_EFFECTIVE}s fallback_pb=${FAMILY_SLOW_SECS_POST_BOOT_EFFECTIVE}s settle_pb=${TRANSPORT_SETTLE_SECS_POST_BOOT_EFFECTIVE}s"
   log "service: snapshot backend v4=iptables-S"
   log "service: snapshot backend v6=ip6tables-S"
 
-  # Write service PID so action.sh can signal this background loop if needed.
-  write_service_pid "$$"
-  log "service: pid=$$ started"
+  log "service: worker started"
 
-  # Validate TIMEOUT_POLICY; default to fail_closed on unknown value.
-  case "$TIMEOUT_POLICY" in
-    unblock|fail_closed) ;;
-    *)
-      log "service: unknown TIMEOUT_POLICY='$TIMEOUT_POLICY'; defaulting to fail_closed"
-      TIMEOUT_POLICY=fail_closed
-      ;;
+  case "$WATCHDOG_POLICY" in
+    block|unblock) ;;
+    *) log "service: invalid WATCHDOG_POLICY='$WATCHDOG_POLICY'; using block"; WATCHDOG_POLICY=block ;;
   esac
-
-  # Warn if TIMEOUT_POLICY=unblock but AUTO_TIMEOUT_UNBLOCK is not set.
-  if [ "$TIMEOUT_POLICY" = "unblock" ] && [ "$AUTO_TIMEOUT_UNBLOCK" != "1" ]; then
-    log "service: WARN: TIMEOUT_POLICY=unblock but AUTO_TIMEOUT_UNBLOCK=0; timeout will NOT unblock (set AUTO_TIMEOUT_UNBLOCK=1 to enable)"
-  fi
 
   # ── Lazy AFWall package detection ─────────────────────────────────────────────
   AFW_PKG=""
@@ -116,7 +81,10 @@
   _refresh_afwall_pkg() {
     [ -n "$AFW_PKG" ] && return 0
     local reason="${1:-poll}" new_pkg=""
-    new_pkg="$(resolve_afwall_pkg 2>/dev/null)" || new_pkg=""
+    case "${AFWALL_PACKAGE:-auto}" in
+      auto|"") new_pkg="$(resolve_afwall_pkg 2>/dev/null)" || new_pkg="" ;;
+      *) new_pkg="$AFWALL_PACKAGE" ;;
+    esac
     if [ -n "$new_pkg" ]; then
       if [ "$new_pkg" != "$AFW_PKG" ]; then
         if [ -n "$AFW_PKG" ]; then
@@ -257,11 +225,17 @@
       log "service: v6 FORWARD startup repair FAILED"
     fi
   fi
-  if input_block_present_v4 || [ -f "${STATE_DIR}/ipv4_in_active" ]; then
-    log "service: v4 INPUT block active"
+  if input_block_present_v4; then
+    log "service: v4 INPUT block active (verified parent jump)"
+  elif input_block_degraded_v4 || [ -f "${STATE_DIR}/ipv4_in_active" ]; then
+    log "service: v4 INPUT block degraded/orphaned — repairing"
+    repair_input_block_v4 || log "service: v4 INPUT startup repair FAILED"
   fi
-  if input_block_present_v6 || [ -f "${STATE_DIR}/ipv6_in_active" ]; then
-    log "service: v6 INPUT block active"
+  if input_block_present_v6; then
+    log "service: v6 INPUT block active (verified parent jump)"
+  elif input_block_degraded_v6 || [ -f "${STATE_DIR}/ipv6_in_active" ]; then
+    log "service: v6 INPUT block degraded/orphaned — repairing"
+    repair_input_block_v6 || log "service: v6 INPUT startup repair FAILED"
   fi
 
   # ── E) Safe early-exit gate ──────────────────────────────────────────────────
@@ -310,7 +284,7 @@
   [ "$v6_blocked" = "0" ] && v6_done=1 && v6_released=1
 
   # Per-family stable-since fingerprint tracking.
-  # v4_last_fp / v6_last_fp: last seen full AFWall graph fingerprint.
+  # v4_last_fp / v6_last_fp: last seen rooted AFWall graph fingerprint.
   # v4_fp_stable_since / v6_fp_stable_since: timestamp when the current
   #   fingerprint was first observed (reset on drift).
   # v4_graph_seen_ts / v6_graph_seen_ts: timestamp when the AFWall graph was
@@ -338,13 +312,13 @@
   wifi_done=0; mobile_done=0
 
   # If not gating or not suppressed, mark as done immediately.
-  if [ "$WIFI_AFWALL_GATE" != "1" ] || [ "$_wifi_was_suppressed" = "0" ]; then
+  if [ "$_wifi_was_suppressed" = "0" ]; then
     wifi_done=1
-    log "service: wifi transport gate: skipped (gate=${WIFI_AFWALL_GATE} suppressed=${_wifi_was_suppressed})"
+    log "service: wifi transport restore: skipped (module did not suppress Wi-Fi)"
   fi
-  if [ "$MOBILE_AFWALL_GATE" != "1" ] || [ "$_mobile_was_suppressed" = "0" ]; then
+  if [ "$_mobile_was_suppressed" = "0" ]; then
     mobile_done=1
-    log "service: mobile transport gate: skipped (gate=${MOBILE_AFWALL_GATE} suppressed=${_mobile_was_suppressed})"
+    log "service: mobile transport restore: skipped (module did not suppress mobile data)"
   fi
 
   # Per-transport fingerprint stable-since tracking.
@@ -367,8 +341,13 @@
   # ── Unlock state for timeout gating ────────────────────────────────────────
   device_unlocked=0
   unlock_ts=0
-  timeout_start_ts=0  # timestamp when timeout countdown began (0 = not started)
+  timeout_start_ts="$START_TS"  # legacy diagnostic only; watchdogs are absolute
   timeout_deadline_ts=0
+  WATCHDOG_SERVICE_SECS="${WATCHDOG_SERVICE_SECS:-180}"
+  WATCHDOG_BOOT_COMPLETED_SECS="${WATCHDOG_BOOT_COMPLETED_SECS:-120}"
+  watchdog_service_start_last_ts=0
+  watchdog_boot_start_ts=0
+  watchdog_boot_completed_last_ts=0
   readiness_gate_open=0
   readiness_gate_ts=0
   readiness_gate_last_log_ts=0
@@ -386,49 +365,38 @@
     fi
     [ "$_do_unlock_probe" = "1" ] || return 1
     last_unlock_poll_ts="$NOW"
-    if lowlevel_device_is_unlocked; then
-      device_unlocked=1
-      unlock_ts="$NOW"
-      [ "$START_TS" != "0" ] && _unlock_elapsed=$((NOW - START_TS))
-      log "service: device unlock detected (elapsed=${_unlock_elapsed}s from service start; uptime_gate_grace=${AFWALL_READY_MIN_POST_UNLOCK_SECS}s)"
-      _refresh_afwall_pkg "unlock" || true
-      return 0
-    fi
-    debug_log "service: device not yet unlocked — readiness/timeout gates active"
+    UNLOCK_CONFIDENCE="$(device_unlock_state 2>/dev/null || printf unknown)"
+    case "$UNLOCK_CONFIDENCE" in
+      unlocked|probably_unlocked)
+        device_unlocked=1
+        unlock_ts="$NOW"
+        [ "$START_TS" != "0" ] && _unlock_elapsed=$((NOW - START_TS))
+        log "service: device unlock detected confidence=${UNLOCK_CONFIDENCE} (elapsed=${_unlock_elapsed}s from service start; unlock is diagnostic only)"
+        _refresh_afwall_pkg "unlock" || true
+        return 0
+        ;;
+    esac
+    debug_log "service: unlock confidence=${UNLOCK_CONFIDENCE}; continuing graph-only handoff path"
     return 1
   }
 
   _update_readiness_gate() {
+    # Diagnostic-only state for logs.  It never gates AFWall graph evaluation,
+    # family release, or watchdog clocks in v4.0.0.
     [ "$readiness_gate_open" = "1" ] && return 0
-    local _boot_ok=1 _unlock_ok=1 _grace_ok=1 _grace_elapsed=0 _reason=""
-
-    if [ "$AFWALL_READY_REQUIRE_BOOT_COMPLETED" = "1" ] && [ "$_boot_complete_now" != "1" ]; then
-      _boot_ok=0
-      _reason="${_reason} boot_completed"
-    fi
-    if [ "$AFWALL_READY_REQUIRE_UNLOCK" = "1" ] && [ "$device_unlocked" != "1" ]; then
-      _unlock_ok=0
-      _reason="${_reason} unlock"
-    fi
-    if [ "$AFWALL_READY_REQUIRE_UNLOCK" = "1" ] && [ "$device_unlocked" = "1" ]; then
-      [ "$unlock_ts" != "0" ] && _grace_elapsed=$((NOW - unlock_ts))
-      if [ "$_grace_elapsed" -lt "$AFWALL_READY_MIN_POST_UNLOCK_SECS" ]; then
-        _grace_ok=0
-        _reason="${_reason} post_unlock_grace(${_grace_elapsed}/${AFWALL_READY_MIN_POST_UNLOCK_SECS}s)"
-      fi
-    fi
-
-    if [ "$_boot_ok" = "1" ] && [ "$_unlock_ok" = "1" ] && [ "$_grace_ok" = "1" ]; then
+    local _reason=""
+    [ "$_boot_complete_now" != "1" ] && _reason="${_reason} boot_completed"
+    [ "$device_unlocked" != "1" ] && _reason="${_reason} unlock_confidence"
+    if [ "$_boot_complete_now" = "1" ] && [ "$device_unlocked" = "1" ]; then
       readiness_gate_open=1
       readiness_gate_ts="$NOW"
-      log "service: AFWall readiness gate OPEN at epoch=${readiness_gate_ts} (boot_completed=${_boot_complete_now} unlocked=${device_unlocked} unlock_ts=${unlock_ts} grace=${AFWALL_READY_MIN_POST_UNLOCK_SECS}s)"
-      _refresh_afwall_pkg "readiness_gate_open" || true
+      log "service: diagnostic readiness state observed (boot_completed=1 unlocked=${device_unlocked}); graph handoff was already active"
+      _refresh_afwall_pkg "diagnostic_readiness" || true
       return 0
     fi
-
     if [ "$NOW" != "0" ] && { [ "$readiness_gate_last_log_ts" = "0" ] || [ $((NOW - readiness_gate_last_log_ts)) -ge 10 ]; }; then
       readiness_gate_last_log_ts="$NOW"
-      debug_log "service: AFWall readiness gate closed; waiting for:${_reason}"
+      debug_log "service: diagnostic readiness incomplete:${_reason}; continuing graph-only handoff path"
     fi
     return 1
   }
@@ -495,8 +463,8 @@
 
         # Compute combined transport subtree fingerprint from both families.
         local _w_fp_v4 _w_fp_v6 _new_wifi_fp
-        _w_fp_v4="$(afwall_transport_fingerprint_from_snapshot "$v4_snap" "$AFWALL_CHAIN_WIFI")"
-        _w_fp_v6="$(afwall_transport_fingerprint_from_snapshot "$v6_snap" "$AFWALL_CHAIN_WIFI")"
+        _w_fp_v4="$(afwall_transport_fingerprint_rooted_from_snapshot "$v4_snap" "$AFWALL_CHAIN_WIFI")"
+        _w_fp_v6="$(afwall_transport_fingerprint_rooted_from_snapshot "$v6_snap" "$AFWALL_CHAIN_WIFI")"
         _new_wifi_fp="${_w_fp_v4}:${_w_fp_v6}"
 
         if [ -z "$wifi_last_fp" ]; then
@@ -512,8 +480,8 @@
         local _wifi_stable=0
         [ "$now_ts" != "0" ] && [ "$wifi_fp_stable_since" != "0" ] && \
           _wifi_stable=$((now_ts - wifi_fp_stable_since))
-        local _wifi_settle="$SETTLE_SECS"
-        [ "$_boot_complete_now" = "1" ] && _wifi_settle="$SETTLE_SECS_POST_BOOT"
+        local _wifi_settle="$TRANSPORT_SETTLE_SECS_EFFECTIVE"
+        [ "$_boot_complete_now" = "1" ] && _wifi_settle="$TRANSPORT_SETTLE_SECS_POST_BOOT_EFFECTIVE"
         if [ "$_wifi_stable" -ge "$_wifi_settle" ]; then
           if [ "$_boot_complete_now" != "1" ]; then
             debug_log "service: wifi transport stable but restore deferred until boot_complete"
@@ -544,6 +512,7 @@
           local _w_absent_elapsed _w_absent_threshold
           _w_absent_elapsed=$((now_ts - wifi_absent_since))
           _w_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS"
+          [ "$_wifi_in_snap" = "1" ] && _w_absent_threshold="${TRANSPORT_ORPHAN_STABLE_SECS:-$TRANSPORT_ABSENCE_STABLE_SECS}"
           [ "$_boot_complete_now" = "1" ] && _w_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT"
           if [ "$_w_absent_elapsed" -ge "$_w_absent_threshold" ]; then
             if [ "$_boot_complete_now" != "1" ]; then
@@ -612,8 +581,8 @@
         mobile_absent_since=0
 
         local _m_fp_v4 _m_fp_v6 _new_mobile_fp
-        _m_fp_v4="$(afwall_transport_fingerprint_from_snapshot "$v4_snap" "$AFWALL_CHAIN_MOBILE")"
-        _m_fp_v6="$(afwall_transport_fingerprint_from_snapshot "$v6_snap" "$AFWALL_CHAIN_MOBILE")"
+        _m_fp_v4="$(afwall_transport_fingerprint_rooted_from_snapshot "$v4_snap" "$AFWALL_CHAIN_MOBILE")"
+        _m_fp_v6="$(afwall_transport_fingerprint_rooted_from_snapshot "$v6_snap" "$AFWALL_CHAIN_MOBILE")"
         _new_mobile_fp="${_m_fp_v4}:${_m_fp_v6}"
 
         if [ -z "$mobile_last_fp" ]; then
@@ -629,8 +598,8 @@
         local _mobile_stable=0
         [ "$now_ts" != "0" ] && [ "$mobile_fp_stable_since" != "0" ] && \
           _mobile_stable=$((now_ts - mobile_fp_stable_since))
-        local _mobile_settle="$SETTLE_SECS"
-        [ "$_boot_complete_now" = "1" ] && _mobile_settle="$SETTLE_SECS_POST_BOOT"
+        local _mobile_settle="$TRANSPORT_SETTLE_SECS_EFFECTIVE"
+        [ "$_boot_complete_now" = "1" ] && _mobile_settle="$TRANSPORT_SETTLE_SECS_POST_BOOT_EFFECTIVE"
         if [ "$_mobile_stable" -ge "$_mobile_settle" ]; then
           if [ "$_boot_complete_now" != "1" ]; then
             debug_log "service: mobile transport stable but restore deferred until boot_complete"
@@ -659,6 +628,7 @@
           local _m_absent_elapsed _m_absent_threshold
           _m_absent_elapsed=$((now_ts - mobile_absent_since))
           _m_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS"
+          [ "$_mobile_in_snap" = "1" ] && _m_absent_threshold="${TRANSPORT_ORPHAN_STABLE_SECS:-$TRANSPORT_ABSENCE_STABLE_SECS}"
           [ "$_boot_complete_now" = "1" ] && _m_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT"
           if [ "$_m_absent_elapsed" -ge "$_m_absent_threshold" ]; then
             if [ "$_boot_complete_now" != "1" ]; then
@@ -747,20 +717,10 @@
     _update_readiness_gate || true
 
     # ── Capture coherent per-poll filter-table snapshots ────────────────────
-    # Do not parse AFWall graphs before the boot/unlock/post-unlock gate opens.
-    v4_snap=""; v6_snap=""
-    if [ "$readiness_gate_open" = "1" ]; then
-      if [ "$v4_blocked" = "1" ] && [ "$v4_done" = "0" ]; then
-        v4_snap="$(capture_filter_snapshot_v4 2>/dev/null)" || v4_snap=""
-      fi
-      if [ "$v6_blocked" = "1" ] && [ "$v6_done" = "0" ]; then
-        v6_snap="$(capture_filter_snapshot_v6 2>/dev/null)" || v6_snap=""
-      fi
-      if [ "$wifi_done" = "0" ] || [ "$mobile_done" = "0" ]; then
-        [ -z "$v4_snap" ] && v4_snap="$(capture_filter_snapshot_v4 2>/dev/null)"
-        [ -z "$v6_snap" ] && v6_snap="$(capture_filter_snapshot_v6 2>/dev/null)"
-      fi
-    fi
+    # Capture each family once per poll, independent of unlock/boot diagnostics.
+    # Family handoff keys only on the rooted live OUTPUT -> afwall graph.
+    v4_snap="$(capture_filter_snapshot_v4 2>/dev/null)" || v4_snap=""
+    v6_snap="$(capture_filter_snapshot_v6 2>/dev/null)" || v6_snap=""
 
     # ── Radio reassertion ───────────────────────────────────────────────────
     # Periodically re-assert Wi-Fi and mobile data off while blackout is active.
@@ -816,80 +776,64 @@
             repair_forward_block_v6 || log "service: v6 FORWARD periodic repair FAILED"
           fi
         fi
+        if [ "${ENABLE_INPUT_BLOCK:-0}" = "1" ]; then
+          if [ -f "${STATE_DIR}/ipv4_in_active" ] && ! input_block_intact_v4; then
+            log "service: INTEGRITY REPAIR v4: INPUT block degraded/orphaned — repairing"
+            repair_input_block_v4 || log "service: v4 INPUT periodic repair FAILED"
+          fi
+          if [ -f "${STATE_DIR}/ipv6_in_active" ] && ! input_block_intact_v6; then
+            log "service: INTEGRITY REPAIR v6: INPUT block degraded/orphaned — repairing"
+            repair_input_block_v6 || log "service: v6 INPUT periodic repair FAILED"
+          fi
+        fi
       fi
     fi
 
-    # Unlock/readiness gate was already polled before snapshot capture.
+    # Unlock/boot diagnostic state was already polled before snapshot capture.
 
-    # ── Timeout countdown and timeout start ─────────────────────────────────
-    if [ "$timeout_start_ts" = "0" ]; then
-      if [ "$TIMEOUT_START_AFTER_READY_GATE" = "1" ]; then
-        if [ "$readiness_gate_open" = "1" ]; then
-          timeout_start_ts="$readiness_gate_ts"
-          [ "$timeout_start_ts" = "0" ] && timeout_start_ts="$NOW"
-          timeout_deadline_ts=$((timeout_start_ts + TIMEOUT_SECS))
-          log "service: timeout countdown started at readiness gate (start=${timeout_start_ts} deadline=${timeout_deadline_ts} timeout=${TIMEOUT_SECS}s)"
-        fi
-      elif [ "$TIMEOUT_UNLOCK_GATED" = "1" ]; then
-        if [ "$device_unlocked" = "1" ]; then
-          timeout_start_ts="$NOW"
-          timeout_deadline_ts=$((timeout_start_ts + TIMEOUT_SECS))
-          log "service: timeout countdown started after unlock (start=${timeout_start_ts} deadline=${timeout_deadline_ts} timeout=${TIMEOUT_SECS}s)"
-        fi
-      else
-        timeout_start_ts="$START_TS"
-        [ "$timeout_start_ts" = "0" ] && timeout_start_ts="$NOW"
-        timeout_deadline_ts=$((timeout_start_ts + TIMEOUT_SECS))
-        log "service: timeout countdown started at service start (start=${timeout_start_ts} deadline=${timeout_deadline_ts} timeout=${TIMEOUT_SECS}s)"
+    # ── Absolute watchdogs independent of readiness/unlock gates ─────────────
+    if [ "$_boot_complete_now" = "1" ] && [ "$watchdog_boot_start_ts" = "0" ]; then
+      watchdog_boot_start_ts="$NOW"
+      log "service: boot-complete watchdog armed start=${watchdog_boot_start_ts} timeout=${WATCHDOG_BOOT_COMPLETED_SECS}s"
+    fi
+
+    _watchdog_fire=0; _watchdog_reason=""; _watchdog_elapsed=0
+    if [ "$NOW" != "0" ] && [ "$START_TS" != "0" ]; then
+      _svc_elapsed=$((NOW - START_TS))
+      if [ "$_svc_elapsed" -ge "$WATCHDOG_SERVICE_SECS" ]; then
+        _watchdog_fire=1; _watchdog_reason="service_start"; _watchdog_elapsed="$_svc_elapsed"
+      fi
+    fi
+    if [ "$_watchdog_fire" = "0" ] && [ "$NOW" != "0" ] && [ "$watchdog_boot_start_ts" != "0" ]; then
+      _boot_elapsed=$((NOW - watchdog_boot_start_ts))
+      if [ "$_boot_elapsed" -ge "$WATCHDOG_BOOT_COMPLETED_SECS" ]; then
+        _watchdog_fire=1; _watchdog_reason="boot_completed"; _watchdog_elapsed="$_boot_elapsed"
       fi
     fi
 
-    # ── Timeout check ───────────────────────────────────────────────────────
-    if [ "$timeout_start_ts" != "0" ] && [ "$NOW" != "0" ]; then
-      ELAPSED_SINCE_TIMEOUT_START=$((NOW - timeout_start_ts))
-      if [ "$ELAPSED_SINCE_TIMEOUT_START" -ge "$TIMEOUT_SECS" ]; then
-        log "service: TIMEOUT ${TIMEOUT_SECS}s reached — policy=${TIMEOUT_POLICY} auto_unblock=${AUTO_TIMEOUT_UNBLOCK} unlocked=${device_unlocked}"
-
-        # Check whether timeout-based unblocking is permitted.
-        if [ "$AUTO_TIMEOUT_UNBLOCK" = "1" ] && \
-           [ "$TIMEOUT_POLICY" = "unblock" ] && \
-           [ "$device_unlocked" = "1" ]; then
-          # ── Timeout: unblock policy (user opted in, device unlocked) ──────
-          log "service: TIMEOUT: unblocking per AUTO_TIMEOUT_UNBLOCK=1 + TIMEOUT_POLICY=unblock"
-          recover_connectivity "service-timeout-unblock" "0"
-          log "service: TIMEOUT: networking restored (unblock policy after unlock)"
-          log "service: TIMEOUT: timeout unblock triggered — stop flag set, loop exiting"
-        else
-          # ── Timeout: fail_closed or auto_unblock disabled or not unlocked ──
-          _reason=""
-          if [ "$AUTO_TIMEOUT_UNBLOCK" != "1" ]; then
-            _reason="AUTO_TIMEOUT_UNBLOCK=0 (auto-unblocking disabled)"
-          elif [ "$TIMEOUT_POLICY" != "unblock" ]; then
-            _reason="TIMEOUT_POLICY=${TIMEOUT_POLICY}"
-          else
-            _reason="device not yet unlocked"
-          fi
-          if [ "$v4_done" = "0" ] || [ "$v4_released" = "0" ]; then
-            log "service: TIMEOUT v4: block RETAINED — ${_reason}"
-            log_transition_snapshot "v4" "timeout_fail_closed"
-          fi
-          if [ "$v6_done" = "0" ] || [ "$v6_released" = "0" ]; then
-            log "service: TIMEOUT v6: block RETAINED — ${_reason}"
-            log_transition_snapshot "v6" "timeout_fail_closed"
-          fi
-          lowlevel_restore_changed_state
-          log "service: TIMEOUT: lower-layer restored; iptables blocks retained (${_reason})"
-        fi
-
+    if [ "$_watchdog_fire" = "1" ]; then
+      _last_var="watchdog_${_watchdog_reason}_last_ts"
+      eval "_last=\${${_last_var}:-0}"
+      if [ "$WATCHDOG_POLICY" = "unblock" ]; then
+        log "service: WATCHDOG ${_watchdog_reason} elapsed=${_watchdog_elapsed}s policy=unblock — removing all module suppression"
+        write_stop_requested
+        recover_connectivity "service-watchdog-${_watchdog_reason}" "0"
         remove_service_pid
         exit 0
       fi
+      if [ "$_last" = "0" ] || [ $((NOW - _last)) -ge "$WATCHDOG_SERVICE_SECS" ]; then
+        eval "${_last_var}=\$NOW"
+        log "service: WATCHDOG ${_watchdog_reason} elapsed=${_watchdog_elapsed}s policy=block — retaining unresolved module blocks"
+        log "service: watchdog state: released v4=${v4_released}/done=${v4_done}/fp=${v4_last_fp:-na} v6=${v6_released}/done=${v6_done}/fp=${v6_last_fp:-na} readiness_gate=${readiness_gate_open} unlocked=${device_unlocked} unlock_confidence=${UNLOCK_CONFIDENCE:-unknown}"
+        log "service: watchdog config: sourced=${CONFIG_SOURCED_FILES:-unknown} ignored=${CONFIG_IGNORED_FILES:-none} policy=${WATCHDOG_POLICY} service=${WATCHDOG_SERVICE_SECS}s boot=${WATCHDOG_BOOT_COMPLETED_SECS}s"
+        log_blackout_integrity "v4" "watchdog_${_watchdog_reason}"
+        log_blackout_integrity "v6" "watchdog_${_watchdog_reason}"
+        log_transition_snapshot "v4" "watchdog_${_watchdog_reason}"
+        log_transition_snapshot "v6" "watchdog_${_watchdog_reason}"
+      fi
     fi
 
-    if [ "$readiness_gate_open" != "1" ]; then
-      sleep "$POLL_INTERVAL_SECS"
-      continue
-    fi
+    # Readiness/unlock gate is diagnostic-only; never skip AFWall graph checks.
 
     # ── Boot-completion diagnostic ──────────────────────────────────────────
     if [ "$_boot_complete_now" = "1" ]; then
@@ -903,8 +847,8 @@
          afwall_graph_nontrivial_from_snapshot "$v4_snap"; then
 
         [ -z "$AFW_PKG" ] && _refresh_afwall_pkg "v4_graph_evidence" || true
-        # Compute full AFWall graph fingerprint from this poll's snapshot.
-        _new_v4_fp="$(afwall_graph_fingerprint_from_snapshot "$v4_snap")"
+        # Compute rooted AFWall graph fingerprint from this poll's snapshot.
+        _new_v4_fp="$(afwall_rooted_graph_fingerprint_from_snapshot "$v4_snap")"
 
         if [ -z "$v4_last_fp" ]; then
           # First time a non-trivial AFWall graph is observed for v4.
@@ -927,9 +871,9 @@
 
         # Determine corroborating evidence.
         _v4_corroborator="none"
-        if [ -n "$AFW_PKG" ] && afwall_process_present "$AFW_PKG"; then
+        if [ "$_boot_complete_now" = "1" ] && [ -n "$AFW_PKG" ] && afwall_process_present "$AFW_PKG"; then
           _v4_corroborator="process"
-        elif afwall_secondary_evidence_present "$AFW_PKG"; then
+        elif [ "${UNLOCK_CONFIDENCE:-unknown}" = "unlocked" ] && afwall_secondary_evidence_present "$AFW_PKG"; then
           _v4_corroborator="file_mtime"
         fi
         afwall_rules_dense_from_snapshot "$v4_snap" "$AFWALL_RULE_DENSITY_MIN" && \
@@ -940,8 +884,8 @@
         _v4_fast_secs="$FAST_STABLE_SECS"
         _v4_slow_secs="$SLOW_STABLE_SECS"
         if [ "$_boot_complete_now" = "1" ]; then
-          _v4_fast_secs="$LIVENESS_SECS_POST_BOOT"
-          _v4_slow_secs="$FALLBACK_SECS_POST_BOOT"
+          _v4_fast_secs="$FAMILY_FAST_SECS_POST_BOOT_EFFECTIVE"
+          _v4_slow_secs="$FAMILY_SLOW_SECS_POST_BOOT_EFFECTIVE"
         fi
 
         _v4_strong_corroboration=0
@@ -950,11 +894,7 @@
         esac
 
         # ── Fast path: corroboration + shorter stable window ──────────────
-        if [ "$_boot_complete_now" != "1" ]; then
-          debug_log "service: v4 graph stable but handoff deferred until boot_complete"
-        elif [ "$device_unlocked" != "1" ] && [ "$_v4_strong_corroboration" != "1" ]; then
-          debug_log "service: v4 handoff deferred until unlock (corroboration=${_v4_corroborator})"
-        elif [ "$_v4_corroborator" != "none" ] && \
+        if [ "$_v4_corroborator" != "none" ] && \
            [ "$_v4_stable" -ge "$_v4_fast_secs" ]; then
           v4_done=1; v4_path="fast"
           _v4_seen_elapsed=0
@@ -1002,7 +942,7 @@
       if afwall_graph_present_from_snapshot "$v6_snap" && \
          afwall_graph_nontrivial_from_snapshot "$v6_snap"; then
 
-        _new_v6_fp="$(afwall_graph_fingerprint_from_snapshot "$v6_snap")"
+        _new_v6_fp="$(afwall_rooted_graph_fingerprint_from_snapshot "$v6_snap")"
 
         if [ -z "$v6_last_fp" ]; then
           v6_last_fp="$_new_v6_fp"
@@ -1021,9 +961,9 @@
           _v6_stable=$((NOW - v6_fp_stable_since))
 
         _v6_corroborator="none"
-        if [ -n "$AFW_PKG" ] && afwall_process_present "$AFW_PKG"; then
+        if [ "$_boot_complete_now" = "1" ] && [ -n "$AFW_PKG" ] && afwall_process_present "$AFW_PKG"; then
           _v6_corroborator="process"
-        elif afwall_secondary_evidence_present "$AFW_PKG"; then
+        elif [ "${UNLOCK_CONFIDENCE:-unknown}" = "unlocked" ] && afwall_secondary_evidence_present "$AFW_PKG"; then
           _v6_corroborator="file_mtime"
         fi
         afwall_rules_dense_from_snapshot "$v6_snap" "$AFWALL_RULE_DENSITY_MIN" && \
@@ -1033,8 +973,8 @@
         _v6_fast_secs="$FAST_STABLE_SECS"
         _v6_slow_secs="$SLOW_STABLE_SECS"
         if [ "$_boot_complete_now" = "1" ]; then
-          _v6_fast_secs="$LIVENESS_SECS_POST_BOOT"
-          _v6_slow_secs="$FALLBACK_SECS_POST_BOOT"
+          _v6_fast_secs="$FAMILY_FAST_SECS_POST_BOOT_EFFECTIVE"
+          _v6_slow_secs="$FAMILY_SLOW_SECS_POST_BOOT_EFFECTIVE"
         fi
 
         _v6_strong_corroboration=0
@@ -1042,11 +982,7 @@
           process|file_mtime|boot_complete_dense) _v6_strong_corroboration=1 ;;
         esac
 
-        if [ "$_boot_complete_now" != "1" ]; then
-          debug_log "service: v6 graph stable but handoff deferred until boot_complete"
-        elif [ "$device_unlocked" != "1" ] && [ "$_v6_strong_corroboration" != "1" ]; then
-          debug_log "service: v6 handoff deferred until unlock (corroboration=${_v6_corroborator})"
-        elif [ "$_v6_corroborator" != "none" ] && \
+        if [ "$_v6_corroborator" != "none" ] && \
            [ "$_v6_stable" -ge "$_v6_fast_secs" ]; then
           v6_done=1; v6_path="fast"
           _v6_seen_elapsed=0
@@ -1215,4 +1151,8 @@
     sleep "$POLL_INTERVAL_SECS"
   done
 ) &
+_svc_pid="$!"
+write_service_pid "$_svc_pid"
+_svc_cmdline="$(tr '\0' ' ' < "/proc/${_svc_pid}/cmdline" 2>/dev/null)"
+log "service: pid_file written pid=${_svc_pid} cmdline=${_svc_cmdline:-unreadable}"
 exit 0

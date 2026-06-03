@@ -1,11 +1,11 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v3.2.1 - Common library
+# AFWall Boot AntiLeak v4.0.0 - Common library
 # POSIX/ash compatible. No bashisms. Sourced by all module scripts; do not
 # execute directly.
 
 # ── Module identity ────────────────────────────────────────────────────────────
 MODULE_ID="AFWall-Boot-AntiLeak"
-MODULE_VERSION="v3.2.1"
+MODULE_VERSION="v4.0.0"
 MODULE_DATA="/data/adb/${MODULE_ID}"
 LOG_DIR="${MODULE_DATA}/logs"
 LOG_FILE="${LOG_DIR}/boot.log"
@@ -119,33 +119,180 @@ _ipt_out() {
 
 
 # ── Config loading ─────────────────────────────────────────────────────────────
-# Sources config.sh from the module directory (built-in defaults), then from the
-# persistent data directory (user override). Both files are loaded so the
-# persistent override at MODULE_DATA/config.sh takes precedence over defaults
-# and survives module updates.
-load_config() {
-  # Config is static for a given boot/session. Avoid repeated filesystem reads
-  # in hot paths (post-fs-data/service loops) by loading once per process.
-  [ "${_MODULE_CFG_LOADED:-0}" = "1" ] && return 0
+# v4.0.0 breaking-change config model: only module-local config is read.
+# Sources, in order:
+#   1. $MODDIR/config.sh        (packaged defaults)
+#   2. $MODDIR/config.local.sh  (optional user overrides)
+# Nothing under /data/adb/AFWall-Boot-AntiLeak is sourced at runtime.
+_config_warn() {
+  _init_dirs
+  printf '%s\n' "$*" >> "${STATE_DIR}/config_warnings" 2>/dev/null || true
+  log "$*"
+}
 
-  local cfg loaded=0
-  # Load built-in defaults from the module directory first.
+_config_bool() {
+  case "$1" in 1|yes|true|on) printf '1' ;; *) printf '0' ;; esac
+}
+
+_config_uint_or_default() {
+  local val="$1" def="$2" name="$3"
+  case "$val" in
+    ''|*[!0-9]*) _config_warn "config: invalid numeric value for ${name}='${val}'; using ${def}"; printf '%s' "$def" ;;
+    *) printf '%s' "$val" ;;
+  esac
+}
+
+_warn_and_unset_legacy_config_vars() {
+  local v set
+  for v in \
+    TIMEOUT_START_AFTER_READY_GATE TIMEOUT_UNLOCK_GATED \
+    AFWALL_READY_REQUIRE_BOOT_COMPLETED AFWALL_READY_REQUIRE_UNLOCK AFWALL_READY_MIN_POST_UNLOCK_SECS \
+    TIMEOUT_POLICY AUTO_TIMEOUT_UNBLOCK TIMEOUT_SECS \
+    TRANSPORT_WAIT_SECS TRANSPORT_WAIT_SECS_POST_BOOT \
+    SETTLE_SECS SETTLE_SECS_POST_BOOT LIVENESS_SECS_POST_BOOT FALLBACK_SECS_POST_BOOT \
+    LOWLEVEL_MODE LOWLEVEL_WIFI_DATA_OFF LOWLEVEL_INTERFACE_QUIESCE \
+    LOWLEVEL_USE_WIFI_SERVICE LOWLEVEL_USE_PHONE_DATA_CMD LOWLEVEL_USE_BLUETOOTH_MANAGER LOWLEVEL_USE_TETHER_STOP \
+    VPN_LOCKDOWN_BOOT_ENFORCE VPN_LOCKDOWN_RELEASE_ON_RESTORE VPN_LOCKDOWN_PROVIDER_PACKAGES \
+    WIFI_AFWALL_GATE MOBILE_AFWALL_GATE ENABLE_FORWARD_BLOCK ENABLE_INPUT_BLOCK; do
+    eval "set=\${${v}+set}"
+    if [ "$set" = "set" ]; then
+      _config_warn "config: unsupported legacy variable ignored in v4.0.0: $v"
+      unset "$v"
+    fi
+  done
+}
+
+derive_internal_config() {
+  # Validate simple enums first.  Invalid values fall back to safe defaults.
+  case "${LEAK_PROTECTION_MODE:-balanced}" in
+    balanced|strict|recovery_friendly) ;;
+    *) _config_warn "config: invalid LEAK_PROTECTION_MODE='${LEAK_PROTECTION_MODE}'; using balanced"; LEAK_PROTECTION_MODE=balanced ;;
+  esac
+  case "${INTEGRATION_MODE:-auto}" in
+    auto|prefer_module|prefer_afwall|off) ;;
+    *) _config_warn "config: invalid INTEGRATION_MODE='${INTEGRATION_MODE}'; using auto"; INTEGRATION_MODE=auto ;;
+  esac
+  case "${WATCHDOG_POLICY:-block}" in
+    block|unblock) ;;
+    *) _config_warn "config: invalid WATCHDOG_POLICY='${WATCHDOG_POLICY}'; using block"; WATCHDOG_POLICY=block ;;
+  esac
+  case "${RADIO_SUPPRESSION:-off}" in
+    off|safe|strict) ;;
+    *) _config_warn "config: invalid RADIO_SUPPRESSION='${RADIO_SUPPRESSION}'; using off"; RADIO_SUPPRESSION=off ;;
+  esac
+  case "${AFWALL_PACKAGE:-auto}" in
+    auto|dev.ukanth.ufirewall|dev.ukanth.ufirewall.donate|com.ukanth.ufirewall) ;;
+    *) _config_warn "config: invalid AFWALL_PACKAGE='${AFWALL_PACKAGE}'; using auto"; AFWALL_PACKAGE=auto ;;
+  esac
+  case "${VPN_LOCKDOWN_MODE:-off}" in
+    off|preserve|restore) ;;
+    *) _config_warn "config: invalid VPN_LOCKDOWN_MODE='${VPN_LOCKDOWN_MODE}'; using off"; VPN_LOCKDOWN_MODE=off ;;
+  esac
+
+  # Numeric config with defaults.
+  POLL_INTERVAL_SECS="$(_config_uint_or_default "${POLL_INTERVAL_SECS:-1}" 1 POLL_INTERVAL_SECS)"
+  [ "$POLL_INTERVAL_SECS" = "0" ] && { _config_warn "config: POLL_INTERVAL_SECS=0 is too aggressive; using 1"; POLL_INTERVAL_SECS=1; }
+  FAST_STABLE_SECS="$(_config_uint_or_default "${FAST_STABLE_SECS:-2}" 2 FAST_STABLE_SECS)"
+  SLOW_STABLE_SECS="$(_config_uint_or_default "${SLOW_STABLE_SECS:-6}" 6 SLOW_STABLE_SECS)"
+  WATCHDOG_SERVICE_SECS="$(_config_uint_or_default "${WATCHDOG_SERVICE_SECS:-180}" 180 WATCHDOG_SERVICE_SECS)"
+  WATCHDOG_BOOT_COMPLETED_SECS="$(_config_uint_or_default "${WATCHDOG_BOOT_COMPLETED_SECS:-120}" 120 WATCHDOG_BOOT_COMPLETED_SECS)"
+  TRANSPORT_ABSENCE_STABLE_SECS="$(_config_uint_or_default "${TRANSPORT_ABSENCE_STABLE_SECS:-3}" 3 TRANSPORT_ABSENCE_STABLE_SECS)"
+  TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT="$(_config_uint_or_default "${TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT:-2}" 2 TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT)"
+  TRANSPORT_ORPHAN_STABLE_SECS="$(_config_uint_or_default "${TRANSPORT_ORPHAN_STABLE_SECS:-3}" 3 TRANSPORT_ORPHAN_STABLE_SECS)"
+  TRANSPORT_INCONCLUSIVE_SECS="$(_config_uint_or_default "${TRANSPORT_INCONCLUSIVE_SECS:-20}" 20 TRANSPORT_INCONCLUSIVE_SECS)"
+  TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT="$(_config_uint_or_default "${TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT:-8}" 8 TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT)"
+  BLACKOUT_REASSERT_INTERVAL="$(_config_uint_or_default "${BLACKOUT_REASSERT_INTERVAL:-5}" 5 BLACKOUT_REASSERT_INTERVAL)"
+  RADIO_REASSERT_INTERVAL="$(_config_uint_or_default "${RADIO_REASSERT_INTERVAL:-10}" 10 RADIO_REASSERT_INTERVAL)"
+  UNLOCK_POLL_INTERVAL="$(_config_uint_or_default "${UNLOCK_POLL_INTERVAL:-5}" 5 UNLOCK_POLL_INTERVAL)"
+  AFWALL_RULE_DENSITY_MIN="$(_config_uint_or_default "${AFWALL_RULE_DENSITY_MIN:-3}" 3 AFWALL_RULE_DENSITY_MIN)"
+
+  BLOCK_FORWARD_EFFECTIVE="$(_config_bool "${BLOCK_FORWARD:-1}")"
+  BLOCK_INPUT_EFFECTIVE="$(_config_bool "${BLOCK_INPUT:-0}")"
+  DEBUG="$(_config_bool "${DEBUG:-0}")"
+
+  # Internal knobs consumed by the existing lower-layer/firewall implementation.
+  # They are derived only from v4.0.0 user-facing settings and are not user config.
+  ENABLE_FORWARD_BLOCK="$BLOCK_FORWARD_EFFECTIVE"
+  ENABLE_INPUT_BLOCK="$BLOCK_INPUT_EFFECTIVE"
+  TRANSPORT_RESTORE_GATING_EFFECTIVE=1
+
+  case "$LEAK_PROTECTION_MODE" in
+    strict) [ "$RADIO_SUPPRESSION" = "off" ] && RADIO_SUPPRESSION=strict ;;
+    recovery_friendly) : ;;
+  esac
+  case "$RADIO_SUPPRESSION" in
+    off)
+      LOWLEVEL_MODE=off; LOWLEVEL_WIFI_DATA_OFF=0; LOWLEVEL_INTERFACE_QUIESCE=0
+      LOWLEVEL_USE_WIFI_SERVICE=0; LOWLEVEL_USE_PHONE_DATA_CMD=0; LOWLEVEL_USE_BLUETOOTH_MANAGER=0; LOWLEVEL_USE_TETHER_STOP=0 ;;
+    safe)
+      LOWLEVEL_MODE=safe; LOWLEVEL_WIFI_DATA_OFF=0; LOWLEVEL_INTERFACE_QUIESCE=0
+      LOWLEVEL_USE_WIFI_SERVICE=0; LOWLEVEL_USE_PHONE_DATA_CMD=0; LOWLEVEL_USE_BLUETOOTH_MANAGER=0; LOWLEVEL_USE_TETHER_STOP=0 ;;
+    strict)
+      LOWLEVEL_MODE=strict; LOWLEVEL_WIFI_DATA_OFF=1; LOWLEVEL_INTERFACE_QUIESCE=1
+      LOWLEVEL_USE_WIFI_SERVICE=1; LOWLEVEL_USE_PHONE_DATA_CMD=1; LOWLEVEL_USE_BLUETOOTH_MANAGER=0; LOWLEVEL_USE_TETHER_STOP=1 ;;
+  esac
+
+  case "$VPN_LOCKDOWN_MODE" in
+    off) VPN_LOCKDOWN_BOOT_ENFORCE=0; VPN_LOCKDOWN_RELEASE_ON_RESTORE=0; VPN_LOCKDOWN_PRESERVE_ONLY=0 ;;
+    preserve) VPN_LOCKDOWN_BOOT_ENFORCE=0; VPN_LOCKDOWN_RELEASE_ON_RESTORE=0; VPN_LOCKDOWN_PRESERVE_ONLY=1 ;;
+    restore) VPN_LOCKDOWN_BOOT_ENFORCE=1; VPN_LOCKDOWN_RELEASE_ON_RESTORE=1; VPN_LOCKDOWN_PRESERVE_ONLY=0 ;;
+  esac
+  if [ "${VPN_PROVIDER_PACKAGES:-auto}" = "auto" ]; then
+    VPN_LOCKDOWN_PROVIDER_PACKAGES=""
+  else
+    VPN_LOCKDOWN_PROVIDER_PACKAGES="${VPN_PROVIDER_PACKAGES:-}"
+  fi
+
+  TRANSPORT_SETTLE_SECS_EFFECTIVE=5
+  TRANSPORT_SETTLE_SECS_POST_BOOT_EFFECTIVE=1
+  FAMILY_FAST_SECS_POST_BOOT_EFFECTIVE="$FAST_STABLE_SECS"
+  FAMILY_SLOW_SECS_POST_BOOT_EFFECTIVE="$SLOW_STABLE_SECS"
+}
+
+load_config() {
+  [ "${_MODULE_CFG_LOADED:-0}" = "1" ] && return 0
+  _init_dirs
+  CONFIG_SOURCED_FILES=""
+  CONFIG_IGNORED_FILES=""
+
+  local cfg legacy
   cfg="${MODDIR:-}/config.sh"
   if [ -f "$cfg" ]; then
-    . "$cfg" 2>/dev/null || true
-    debug_log "config: loaded defaults from $cfg"
-    loaded=1
+    if . "$cfg" 2>/dev/null; then
+      CONFIG_SOURCED_FILES="$cfg"
+    else
+      _config_warn "config: failed to source module config: $cfg"
+      return 1
+    fi
   fi
-  # Load persistent user override second; its values win over the defaults above.
-  cfg="${MODULE_DATA}/config.sh"
+  cfg="${MODDIR:-}/config.local.sh"
   if [ -f "$cfg" ]; then
-    . "$cfg" 2>/dev/null || true
-    debug_log "config: loaded user override from $cfg"
-    loaded=1
+    if . "$cfg" 2>/dev/null; then
+      CONFIG_SOURCED_FILES="${CONFIG_SOURCED_FILES}${CONFIG_SOURCED_FILES:+ }$cfg"
+    else
+      _config_warn "config: failed to source module config: $cfg"
+      return 1
+    fi
   fi
-  [ "$loaded" = "0" ] && debug_log "config: no config files found; using built-in defaults"
+
+  for legacy in "${MODULE_DATA}/config.sh" "${MODULE_DATA}/installer.cfg"; do
+    if [ -f "$legacy" ]; then
+      CONFIG_IGNORED_FILES="${CONFIG_IGNORED_FILES}${CONFIG_IGNORED_FILES:+ }$legacy"
+      _config_warn "config: legacy external config path ignored in v4.0.0 breaking-change release: $legacy"
+    fi
+  done
+
+  _warn_and_unset_legacy_config_vars
+  derive_internal_config
+  [ -z "$CONFIG_SOURCED_FILES" ] && CONFIG_SOURCED_FILES="(none; built-in fallbacks)"
   _MODULE_CFG_LOADED=1
   return 0
+}
+
+log_effective_config() {
+  log "config: sourced=${CONFIG_SOURCED_FILES:-unknown} ignored_legacy=${CONFIG_IGNORED_FILES:-none}"
+  log "config: effective mode=${LEAK_PROTECTION_MODE:-balanced} poll=${POLL_INTERVAL_SECS}s fast=${FAST_STABLE_SECS}s slow=${SLOW_STABLE_SECS}s watchdog_service=${WATCHDOG_SERVICE_SECS}s watchdog_boot=${WATCHDOG_BOOT_COMPLETED_SECS}s watchdog_policy=${WATCHDOG_POLICY}"
+  log "config: effective blocks forward=${BLOCK_FORWARD_EFFECTIVE} input=${BLOCK_INPUT_EFFECTIVE} radio=${RADIO_SUPPRESSION} afwall_package=${AFWALL_PACKAGE:-auto} vpn_mode=${VPN_LOCKDOWN_MODE} vpn_providers=${VPN_PROVIDER_PACKAGES:-auto}"
 }
 
 # ── IPTables low-level helpers ─────────────────────────────────────────────────
@@ -454,13 +601,18 @@ install_input_block_v4() {
   }
   _init_dirs
 
-  if _install_chain_block_table "$ipt" filter "$CHAIN_IN_V4" INPUT; then
+  if _install_chain_block_table "$ipt" filter "$CHAIN_IN_V4" INPUT && input_block_intact_v4; then
     printf '1' > "${STATE_DIR}/ipv4_in_active" 2>/dev/null || true
-    log "install_input_block_v4: installed in filter table"
+    log "install_input_block_v4: active in filter table (chain+DROP+INPUT jump+loopback verified)"
     return 0
   fi
 
-  log "install_input_block_v4: WARN: could not install IPv4 INPUT block"
+  rm -f "${STATE_DIR}/ipv4_in_active" 2>/dev/null || true
+  if _chain_exists "$ipt" filter "$CHAIN_IN_V4"; then
+    log "install_input_block_v4: DEGRADED/orphaned; not marking active"
+  else
+    log "install_input_block_v4: WARN: could not install IPv4 INPUT block"
+  fi
   return 1
 }
 
@@ -472,13 +624,18 @@ install_input_block_v6() {
   }
   _init_dirs
 
-  if _install_chain_block_table "$ip6t" filter "$CHAIN_IN_V6" INPUT; then
+  if _install_chain_block_table "$ip6t" filter "$CHAIN_IN_V6" INPUT && input_block_intact_v6; then
     printf '1' > "${STATE_DIR}/ipv6_in_active" 2>/dev/null || true
-    log "install_input_block_v6: installed in filter table"
+    log "install_input_block_v6: active in filter table (chain+DROP+INPUT jump+loopback verified)"
     return 0
   fi
 
-  log "install_input_block_v6: WARN: could not install IPv6 INPUT block"
+  rm -f "${STATE_DIR}/ipv6_in_active" 2>/dev/null || true
+  if _chain_exists "$ip6t" filter "$CHAIN_IN_V6"; then
+    log "install_input_block_v6: DEGRADED/orphaned; not marking active"
+  else
+    log "install_input_block_v6: WARN: could not install IPv6 INPUT block"
+  fi
   return 1
 }
 
@@ -486,7 +643,7 @@ install_block() {
   _init_dirs
   load_config
   local out_v4=0 out_v6=0
-  log "install_block: start (fwd=${ENABLE_FORWARD_BLOCK:-1} in=${ENABLE_INPUT_BLOCK:-0})"
+  log "install_block: start (forward=${BLOCK_FORWARD_EFFECTIVE:-${ENABLE_FORWARD_BLOCK:-1}} input=${BLOCK_INPUT_EFFECTIVE:-${ENABLE_INPUT_BLOCK:-0}})"
 
   # OUTPUT block: always installed (device-originated traffic).
   install_output_block_v4 && out_v4=1
@@ -498,7 +655,7 @@ install_block() {
     install_forward_block_v4 || true
     install_forward_block_v6 || true
   else
-    log "install_block: FORWARD block disabled by ENABLE_FORWARD_BLOCK=0"
+    log "install_block: FORWARD block disabled by BLOCK_FORWARD=0"
   fi
 
   # INPUT block: disabled by default; opt-in for inbound traffic hardening.
@@ -506,7 +663,7 @@ install_block() {
     install_input_block_v4 || true
     install_input_block_v6 || true
   else
-    log "install_block: INPUT block not enabled (set ENABLE_INPUT_BLOCK=1 to enable)"
+    log "install_block: INPUT block not enabled (set BLOCK_INPUT=1 to enable)"
   fi
 
   if [ "$out_v4" = "1" ] && [ "$out_v6" = "1" ]; then
@@ -697,18 +854,47 @@ forward_block_degraded_v6() {
   return 0
 }
 
-input_block_present_v4() {
+input_block_intact_v4() {
   local ipt
   ipt="$(_find_cmd iptables 2>/dev/null)" || return 1
-  _chain_exists "$ipt" filter "$CHAIN_IN_V4" && return 0
-  return 1
+  _chain_block_intact "$ipt" filter "$CHAIN_IN_V4" INPUT
 }
 
-input_block_present_v6() {
+input_block_intact_v6() {
   local ip6t
   ip6t="$(_find_cmd ip6tables 2>/dev/null)" || return 1
-  _chain_exists "$ip6t" filter "$CHAIN_IN_V6" && return 0
-  return 1
+  _chain_block_intact "$ip6t" filter "$CHAIN_IN_V6" INPUT
+}
+
+input_block_present_v4() { input_block_intact_v4; }
+input_block_present_v6() { input_block_intact_v6; }
+
+input_block_degraded_v4() {
+  local ipt
+  ipt="$(_find_cmd iptables 2>/dev/null)" || return 1
+  _chain_exists "$ipt" filter "$CHAIN_IN_V4" || return 1
+  input_block_intact_v4 && return 1
+  return 0
+}
+
+input_block_degraded_v6() {
+  local ip6t
+  ip6t="$(_find_cmd ip6tables 2>/dev/null)" || return 1
+  _chain_exists "$ip6t" filter "$CHAIN_IN_V6" || return 1
+  input_block_intact_v6 && return 1
+  return 0
+}
+
+repair_input_block_v4() {
+  [ "${ENABLE_INPUT_BLOCK:-0}" = "1" ] || return 0
+  log "repair_input_block_v4: verifying/repairing IPv4 INPUT block"
+  install_input_block_v4
+}
+
+repair_input_block_v6() {
+  [ "${ENABLE_INPUT_BLOCK:-0}" = "1" ] || return 0
+  log "repair_input_block_v6: verifying/repairing IPv6 INPUT block"
+  install_input_block_v6
 }
 
 # ── Stronger OUTPUT blackout integrity detection ───────────────────────────────
@@ -885,7 +1071,7 @@ AFWALL_CHAIN_MAIN="afwall"       # primary filter OUTPUT chain
 AFWALL_CHAIN_WIFI="afwall-wifi"  # Wi-Fi transport sub-chain
 AFWALL_CHAIN_MOBILE="afwall-3g"  # mobile data transport sub-chain
 
-# Prefer donate package; fall back to free package; then dumpsys scan.
+# Prefer donate package; fall back to free package, then legacy package, then dumpsys scan.
 resolve_afwall_pkg() {
   local c found
   for c in dev.ukanth.ufirewall.donate dev.ukanth.ufirewall com.ukanth.ufirewall; do
@@ -918,9 +1104,9 @@ resolve_afwall_pkg() {
 #
 # Uses "iptables -t filter -S" exclusively.  All downstream parsers expect the
 # "-N chain" / "-A chain ..." rule-spec syntax that this command produces.
-# "iptables-save" outputs restore-file format (":chain - [packets:bytes]" and
+# Restore-file snapshots use a different format (":chain - [packets:bytes]" and
 # commit markers) which is NOT compatible with the parsers below.  Do not
-# switch to iptables-save here unless the parser layer is first normalised to
+# switch snapshot sources here unless the parser layer is first normalised to
 # handle both formats.
 capture_filter_snapshot_v4() {
   local cmd
@@ -958,6 +1144,202 @@ afwall_graph_nontrivial_from_snapshot() {
   [ "${count:-0}" -ge 1 ]
 }
 
+# Build the live rooted AFWall chain set from the current snapshot.  Only chains
+# reachable from the active OUTPUT -> afwall hook are returned.  Orphan/stale
+# afwall* chains are intentionally excluded from family release fingerprints and
+# transport reachability.
+_snapshot_jump_targets() {
+  local _rest="$1" _target
+  while :; do
+    case "$_rest" in
+      '-j '*|*' -j '*) ;;
+      *) return 0 ;;
+    esac
+    case "$_rest" in
+      '-j '*) _rest="${_rest#-j }" ;;
+      *) _rest="${_rest#* -j }" ;;
+    esac
+    while [ "${_rest# }" != "$_rest" ]; do
+      _rest="${_rest# }"
+    done
+    _target="${_rest%% *}"
+    [ -n "$_target" ] && printf '%s\n' "$_target"
+    case "$_rest" in
+      *' '*) _rest="${_rest#* }" ;;
+      *) return 0 ;;
+    esac
+  done
+}
+
+_afwall_chain_defined() {
+  local _chain="$1" _defs="$2" _c
+  for _c in $_defs; do [ "$_c" = "$_chain" ] && return 0; done
+  return 1
+}
+
+_snapshot_defined_chains() {
+  local _snap="$1" _line _chain
+  while IFS= read -r _line; do
+    case "$_line" in
+      '-N '*)
+        _chain="${_line#-N }"
+        _chain="${_chain%% *}"
+        [ -n "$_chain" ] && printf '%s\n' "$_chain"
+        ;;
+    esac
+  done <<EOF
+$_snap
+EOF
+}
+
+_chain_from_rule_line() {
+  local _suffix
+  case "$1" in
+    '-A '*) ;;
+    *) return 1 ;;
+  esac
+  _suffix="${1#-A }"
+  _suffix="${_suffix%% *}"
+  [ -n "$_suffix" ] || return 1
+  printf '%s' "$_suffix"
+}
+
+reachable_chains_from_snapshot() {
+  local snap="$1" defs reachable changed line chain target targets
+  [ -n "$snap" ] || return 1
+  afwall_graph_present_from_snapshot "$snap" || return 1
+  defs="$(_snapshot_defined_chains "$snap")"
+  _afwall_chain_defined "$AFWALL_CHAIN_MAIN" "$defs" || return 1
+  reachable="$AFWALL_CHAIN_MAIN"
+  changed=1
+  while [ "$changed" = "1" ]; do
+    changed=0
+    while IFS= read -r line; do
+      case "$line" in
+        '-A '*)
+          chain="$(_chain_from_rule_line "$line" 2>/dev/null || true)"
+          _chain_in_list "$chain" "$reachable" || continue
+          targets="$(_snapshot_jump_targets "$line")"
+          for target in $targets; do
+            case "$target" in
+              afwall*)
+                if _afwall_chain_defined "$target" "$defs" && ! _chain_in_list "$target" "$reachable"; then
+                  reachable="$reachable $target"
+                  changed=1
+                fi
+                ;;
+            esac
+          done
+          ;;
+      esac
+    done <<EOF
+$snap
+EOF
+  done
+  printf '%s\n' $reachable
+}
+
+_chain_in_list() {
+  local chain="$1" list="$2" c
+  for c in $list; do [ "$c" = "$chain" ] && return 0; done
+  return 1
+}
+
+_rule_afwall_targets_reachable() {
+  local _line="$1" _reachable="$2" _targets _target _seen=0
+  _targets="$(_snapshot_jump_targets "$_line")"
+  for _target in $_targets; do
+    case "$_target" in
+      afwall*)
+        _seen=1
+        _chain_in_list "$_target" "$_reachable" || return 1
+        ;;
+    esac
+  done
+  [ "$_seen" = "1" ] && return 0
+  return 2
+}
+
+rooted_afwall_graph_from_snapshot() {
+  local snap="$1" defs reachable out line chain rc
+  [ -n "$snap" ] || return 1
+  afwall_graph_present_from_snapshot "$snap" || return 1
+  defs="$(_snapshot_defined_chains "$snap")"
+  _afwall_chain_defined "$AFWALL_CHAIN_MAIN" "$defs" || return 1
+  reachable="$(reachable_chains_from_snapshot "$snap")" || return 1
+  [ -n "$reachable" ] || return 1
+  out=""
+  while IFS= read -r line; do
+    case "$line" in
+      '-A OUTPUT '*)
+        if _rule_afwall_targets_reachable "$line" "$AFWALL_CHAIN_MAIN"; then
+          out="${out}${line}
+"
+        fi
+        ;;
+      '-N '*)
+        chain="${line#-N }"
+        chain="${chain%% *}"
+        _chain_in_list "$chain" "$reachable" && out="${out}${line}
+"
+        ;;
+      '-A '*)
+        chain="$(_chain_from_rule_line "$line" 2>/dev/null || true)"
+        if _chain_in_list "$chain" "$reachable"; then
+          if _rule_afwall_targets_reachable "$line" "$reachable"; then
+            out="${out}${line}
+"
+          else
+            rc=$?
+            [ "$rc" = "2" ] && out="${out}${line}
+"
+          fi
+        fi
+        ;;
+    esac
+  done <<EOF
+$snap
+EOF
+  [ -n "$out" ] || return 1
+  printf '%s' "$out" | sort
+}
+
+_checksum_lines() {
+  local _text="$1" _ck _lc _cc
+  if has_cmd cksum; then
+    _ck="$(printf '%s\n' "$_text" | cksum 2>/dev/null)" || _ck=""
+    _ck="${_ck%% *}"
+    [ -n "$_ck" ] && { printf '%s' "$_ck"; return 0; }
+  fi
+  _lc="$(printf '%s\n' "$_text" | wc -l | tr -d ' ')"
+  _cc="$(printf '%s\n' "$_text" | wc -c | tr -d ' ')"
+  printf '%s:%s' "$_lc" "$_cc"
+}
+
+afwall_rooted_graph_fingerprint_from_snapshot() {
+  local graph
+  graph="$(rooted_afwall_graph_from_snapshot "$1")" || { printf 'na'; return 1; }
+  _checksum_lines "$graph"
+}
+
+afwall_prefix_reachable_rooted_from_snapshot() {
+  local snap="$1" prefix="$2" chains c
+  [ -n "$prefix" ] || return 1
+  chains="$(reachable_chains_from_snapshot "$snap")" || return 1
+  for c in $chains; do
+    case "$c" in "$prefix"*) return 0 ;; esac
+  done
+  return 1
+}
+
+afwall_transport_fingerprint_rooted_from_snapshot() {
+  local snap="$1" prefix="$2" graph
+  graph="$(rooted_afwall_graph_from_snapshot "$snap")" || { printf 'na'; return 1; }
+  graph="$(printf '%s\n' "$graph" | grep -E "(^-N ${prefix}|^-A ${prefix}|-j ${prefix})" 2>/dev/null | sort)"
+  [ -n "$graph" ] || { printf 'na'; return 1; }
+  _checksum_lines "$graph"
+}
+
 # ── Full AFWall graph fingerprint ─────────────────────────────────────────────
 # Produces a deterministic checksum of the ENTIRE AFWall rule graph, including
 # all afwall-prefixed chain definitions, all rules inside any afwall* chain, and
@@ -984,14 +1366,7 @@ afwall_graph_fingerprint_from_snapshot() {
     | grep -E '(^-N afwall|^-A afwall|-j afwall)' 2>/dev/null \
     | sort)"
   [ -n "$relevant" ] || { printf 'na'; return 1; }
-  if has_cmd cksum; then
-    printf '%s\n' "$relevant" | cksum | awk '{print $1}'
-  else
-    local lc cc
-    lc="$(printf '%s\n' "$relevant" | wc -l | tr -d ' ')"
-    cc="$(printf '%s\n' "$relevant" | wc -c | tr -d ' ')"
-    printf '%s:%s' "$lc" "$cc"
-  fi
+  _checksum_lines "$relevant"
 }
 
 # ── Transport subtree fingerprint ─────────────────────────────────────────────
@@ -1013,14 +1388,7 @@ afwall_transport_fingerprint_from_snapshot() {
     | grep -E "(^-N ${prefix}|^-A ${prefix}|-j ${prefix})" 2>/dev/null \
     | sort)"
   [ -n "$relevant" ] || { printf 'na'; return 1; }
-  if has_cmd cksum; then
-    printf '%s\n' "$relevant" | cksum | awk '{print $1}'
-  else
-    local lc cc
-    lc="$(printf '%s\n' "$relevant" | wc -l | tr -d ' ')"
-    cc="$(printf '%s\n' "$relevant" | wc -c | tr -d ' ')"
-    printf '%s:%s' "$lc" "$cc"
-  fi
+  _checksum_lines "$relevant"
 }
 
 # ── Transport subtree presence ────────────────────────────────────────────────
@@ -1046,12 +1414,7 @@ afwall_prefix_present_from_snapshot() {
 # Works for both direct references (afwall -> afwall-wifi) and indirect
 # references through other afwall sub-chains (afwall -> afwall-X -> afwall-wifi).
 afwall_prefix_reachable_from_snapshot() {
-  local snap="$1" prefix="$2"
-  [ -n "$snap" ] || return 1
-  [ -n "$prefix" ] || return 1
-  # Any rule inside any afwall-prefixed chain that jumps to a chain with prefix.
-  printf '%s\n' "$snap" \
-    | grep -qE "^-A afwall[^ ]* .*-j ${prefix}" 2>/dev/null
+  afwall_prefix_reachable_rooted_from_snapshot "$1" "$2"
 }
 
 # ── Boot-completion probes ────────────────────────────────────────────────────
@@ -1488,19 +1851,22 @@ recover_stop_service_loop() {
   # Ownership validation: only signal when cmdline indicates this module's
   # service loop. This prevents killing unrelated processes if PID is reused.
   kill -0 "$_svc_pid" 2>/dev/null || {
-    log "recover_stop_service_loop: PID not running (pid=${_svc_pid})"
+    log "action: pid stale or not module-owned; relying on override latch (pid=${_svc_pid} not running)"
+    rm -f "$SERVICE_PID_FILE" 2>/dev/null || true
     return 0
   }
   _cmdline="$(tr '\0' ' ' < "/proc/${_svc_pid}/cmdline" 2>/dev/null)"
   case "$_cmdline" in
-    *"/AFWall-Boot-AntiLeak/service.sh"*|*"${MODDIR}/service.sh"*)
+    *"AFWall-Boot-AntiLeak"*"service.sh"*|*"${MODDIR}/service.sh"*)
+      log "action: service pid validated pid=${_svc_pid} cmdline='${_cmdline:-unreadable}'"
       kill "$_svc_pid" 2>/dev/null || true
-      log "recover_stop_service_loop: service pid ${_svc_pid} signalled (owner-confirmed)"
-      # Remove pid markers only after ownership is confirmed.
+      log "action: service pid killed pid=${_svc_pid}"
       rm -f "$SERVICE_PID_FILE" 2>/dev/null || true
       ;;
     *)
-      log "recover_stop_service_loop: PID ownership mismatch (pid=${_svc_pid} file=$SERVICE_PID_FILE cmdline='${_cmdline:-unreadable}') — not signalling"
+      log "action: pid stale or not module-owned; relying on override latch (pid=${_svc_pid} cmdline='${_cmdline:-unreadable}')"
+      rm -f "$SERVICE_PID_FILE" 2>/dev/null || true
+      log "action: stale service pid file removed: $SERVICE_PID_FILE"
       ;;
   esac
 }
@@ -1529,6 +1895,9 @@ recover_connectivity() {
   lowlevel_emergency_restore
   cleanup_legacy "$origin"
 
+  log_blackout_integrity "v4" "${origin}_after_recovery"
+  log_blackout_integrity "v6" "${origin}_after_recovery"
+  log "recover_connectivity[$origin]: network state after restore: wifi=$(cmd wifi status 2>/dev/null | head -1 || printf unavailable) default_route=$(ip route show default 2>/dev/null | head -1 || printf none) vpn_active=$(_ll_vpn_get_active_pkg 2>/dev/null || printf none) vpn_lockdown=$(_ll_vpn_get_lockdown_state 2>/dev/null || printf unknown)"
   log "recover_connectivity[$origin]: complete"
 }
 
