@@ -1,0 +1,26 @@
+name: awk removal runner
+on:
+  push:
+    branches: [cx/implement-diagnostic-driven-patches-for-afwall]
+permissions:
+  contents: write
+jobs:
+  run:
+    if: ${{ !contains(github.event.head_commit.message, 'Apply awk-free parsing') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: cx/implement-diagnostic-driven-patches-for-afwall
+      - run: python3 tools/remove_awk_fixup.py
+      - run: |
+          grep -RIn --exclude-dir=.git --exclude=tools/remove_awk_fixup.py --exclude=.github/workflows/awk-removal-runner.yml 'awk' . && exit 1 || true
+          find . -path './.git' -prune -o -type f -name '*.sh' -print | sort | xargs -r sh -n
+          ./tools/mock-logic-tests.sh
+          git diff --check
+      - run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add bin/common.sh tools/mock-logic-tests.sh
+          git commit -m 'Apply awk-free parsing' || exit 0
+          git push origin HEAD:cx/implement-diagnostic-driven-patches-for-afwall
