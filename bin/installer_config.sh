@@ -96,30 +96,60 @@ ic_apply_auto_vpn_defaults() {
 }
 
 _ic_get_keycheck_path() {
-    local d
+    local arch names subdirs d name sub candidate
+    arch="$(uname -m 2>/dev/null)"
+    case "$arch" in
+        aarch64|arm64) names="keycheck-arm64 keycheck-aarch64 keycheck-arm keycheck"; subdirs="arm64 arm x64 x86" ;;
+        arm*) names="keycheck-arm keycheck-armeabi-v7a keycheck-arm64 keycheck"; subdirs="arm arm64 x64 x86" ;;
+        x86_64) names="keycheck-x86_64 keycheck-x64 keycheck-x86 keycheck"; subdirs="x64 x86 arm64 arm" ;;
+        x86|i686) names="keycheck-x86 keycheck-i686 keycheck-x86_64 keycheck"; subdirs="x86 x64 arm64 arm" ;;
+        *) names="keycheck keycheck-arm64 keycheck-arm keycheck-x86_64 keycheck-x86"; subdirs="arm64 arm x64 x86" ;;
+    esac
+
     for d in "${MODPATH:-}" "${MODDIR:-}" "/data/adb/modules/${_IC_MODULE_ID}"; do
-        [ -x "$d/bin/keycheck/keycheck-arm64" ] && { printf '%s' "$d/bin/keycheck/keycheck-arm64"; return 0; }
-        [ -x "$d/bin/keycheck/keycheck-x86_64" ] && { printf '%s' "$d/bin/keycheck/keycheck-x86_64"; return 0; }
+        [ -n "$d" ] || continue
+        for name in $names; do
+            candidate="$d/bin/keycheck/$name"
+            [ -x "$candidate" ] && { printf '%s' "$candidate"; return 0; }
+        done
+        for sub in $subdirs; do
+            for name in $names; do
+                candidate="$d/META-INF/com/google/android/$sub/$name"
+                [ -x "$candidate" ] && { printf '%s' "$candidate"; return 0; }
+            done
+        done
+        for name in $names; do
+            candidate="$d/$name"
+            [ -x "$candidate" ] && { printf '%s' "$candidate"; return 0; }
+        done
     done
     return 1
 }
 
 ic_detect_keys() {
+    local event_node kc
     _IC_KEYS_AVAIL=0; _IC_KEYCHECK_AVAIL=0; _IC_GETEVENT_PATH=""; _IC_KEYCHECK_PATH=""
-    if [ -x /system/bin/getevent ]; then _IC_GETEVENT_PATH=/system/bin/getevent; elif command -v getevent >/dev/null 2>&1; then _IC_GETEVENT_PATH="$(command -v getevent)"; fi
-    for _f in /dev/input/event*; do [ -e "$_f" ] && [ -n "$_IC_GETEVENT_PATH" ] && _IC_KEYS_AVAIL=1 && break; done
-    _kc="$(_ic_get_keycheck_path 2>/dev/null || true)"
-    [ -n "$_kc" ] && { _IC_KEYCHECK_AVAIL=1; _IC_KEYCHECK_PATH="$_kc"; }
+    if [ -x /system/bin/getevent ]; then
+        _IC_GETEVENT_PATH=/system/bin/getevent
+    elif command -v getevent >/dev/null 2>&1; then
+        _IC_GETEVENT_PATH="$(command -v getevent)"
+    fi
+    for event_node in /dev/input/event*; do
+        [ -e "$event_node" ] && [ -n "$_IC_GETEVENT_PATH" ] && _IC_KEYS_AVAIL=1 && break
+    done
+    kc="$(_ic_get_keycheck_path 2>/dev/null || true)"
+    [ -n "$kc" ] && { _IC_KEYCHECK_AVAIL=1; _IC_KEYCHECK_PATH="$kc"; }
 }
 
 _ic_any_input_avail() { [ "${_IC_KEYS_AVAIL:-0}" = "1" ] || [ "${_IC_KEYCHECK_AVAIL:-0}" = "1" ]; }
 _ic_flush_events() { [ "${_IC_KEYS_AVAIL:-0}" = "1" ] && timeout 1 "$_IC_GETEVENT_PATH" -lq >/dev/null 2>&1 || true; }
 
 ic_volkey() {
+    local raw
     _ic_any_input_avail || return 2
     if [ "${_IC_KEYS_AVAIL:-0}" = "1" ]; then
-        _raw="$(timeout "$_IC_KEY_TIMEOUT" "$_IC_GETEVENT_PATH" -lq 2>/dev/null | grep -m1 -E 'EV_KEY.*(KEY_VOLUMEUP|KEY_VOLUMEDOWN|0073|0072).*(DOWN|00000001)' || true)"
-        case "$_raw" in *KEY_VOLUMEUP*|*0073*) return 0 ;; *KEY_VOLUMEDOWN*|*0072*) return 1 ;; esac
+        raw="$(timeout "$_IC_KEY_TIMEOUT" "$_IC_GETEVENT_PATH" -lq 2>/dev/null | grep -m1 -E 'EV_KEY.*(KEY_VOLUMEUP|KEY_VOLUMEDOWN|0073|0072).*(DOWN|00000001)' || true)"
+        case "$raw" in *KEY_VOLUMEUP*|*0073*) return 0 ;; *KEY_VOLUMEDOWN*|*0072*) return 1 ;; esac
     fi
     if [ "${_IC_KEYCHECK_AVAIL:-0}" = "1" ]; then
         timeout "$_IC_KEY_TIMEOUT" "$_IC_KEYCHECK_PATH" >/dev/null 2>&1
@@ -143,7 +173,9 @@ ic_select_enum() {
     _ic_any_input_avail || return 0
     _ic_flush_events
     _ic_print "  $question"
-    set -- $options; total=$#; idx=1; count=0
+    # shellcheck disable=SC2086 # options is an internal space-separated enum list.
+    set -- $options
+    total=$#; idx=1; count=0
     for opt in $options; do count=$((count+1)); [ "$opt" = "$default" ] && idx=$count; _ic_print "   $count) $opt"; done
     while :; do
         i=0; for opt in $options; do i=$((i+1)); [ "$i" = "$idx" ] && { current="$opt"; break; }; done
