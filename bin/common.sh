@@ -181,7 +181,7 @@ derive_internal_config() {
     *) _config_warn "config: invalid RADIO_SUPPRESSION='${RADIO_SUPPRESSION}'; using off"; RADIO_SUPPRESSION=off ;;
   esac
   case "${AFWALL_PACKAGE:-auto}" in
-    auto|dev.ukanth.ufirewall|dev.ukanth.ufirewall.donate) ;;
+    auto|dev.ukanth.ufirewall|dev.ukanth.ufirewall.donate|com.ukanth.ufirewall) ;;
     *) _config_warn "config: invalid AFWALL_PACKAGE='${AFWALL_PACKAGE}'; using auto"; AFWALL_PACKAGE=auto ;;
   esac
   case "${VPN_LOCKDOWN_MODE:-off}" in
@@ -258,13 +258,21 @@ load_config() {
   local cfg legacy
   cfg="${MODDIR:-}/config.sh"
   if [ -f "$cfg" ]; then
-    . "$cfg" 2>/dev/null || true
-    CONFIG_SOURCED_FILES="$cfg"
+    if . "$cfg" 2>/dev/null; then
+      CONFIG_SOURCED_FILES="$cfg"
+    else
+      _config_warn "config: failed to source module config: $cfg"
+      return 1
+    fi
   fi
   cfg="${MODDIR:-}/config.local.sh"
   if [ -f "$cfg" ]; then
-    . "$cfg" 2>/dev/null || true
-    CONFIG_SOURCED_FILES="${CONFIG_SOURCED_FILES}${CONFIG_SOURCED_FILES:+ }$cfg"
+    if . "$cfg" 2>/dev/null; then
+      CONFIG_SOURCED_FILES="${CONFIG_SOURCED_FILES}${CONFIG_SOURCED_FILES:+ }$cfg"
+    else
+      _config_warn "config: failed to source module config: $cfg"
+      return 1
+    fi
   fi
 
   for legacy in "${MODULE_DATA}/config.sh" "${MODULE_DATA}/installer.cfg"; do
@@ -1063,10 +1071,10 @@ AFWALL_CHAIN_MAIN="afwall"       # primary filter OUTPUT chain
 AFWALL_CHAIN_WIFI="afwall-wifi"  # Wi-Fi transport sub-chain
 AFWALL_CHAIN_MOBILE="afwall-3g"  # mobile data transport sub-chain
 
-# Prefer donate package; fall back to free package; then dumpsys scan.
+# Prefer donate package; fall back to free package, then legacy package, then dumpsys scan.
 resolve_afwall_pkg() {
   local c found
-  for c in dev.ukanth.ufirewall.donate dev.ukanth.ufirewall; do
+  for c in dev.ukanth.ufirewall.donate dev.ukanth.ufirewall com.ukanth.ufirewall; do
     if has_cmd cmd && cmd package path "$c" >/dev/null 2>&1; then
       printf '%s' "$c"
       return 0
@@ -1078,7 +1086,7 @@ resolve_afwall_pkg() {
   done
   if has_cmd dumpsys; then
     found="$(dumpsys package 2>/dev/null)" || found=""
-    for c in dev.ukanth.ufirewall.donate dev.ukanth.ufirewall; do
+    for c in dev.ukanth.ufirewall.donate dev.ukanth.ufirewall com.ukanth.ufirewall; do
       if printf '%s\n' "$found" | grep -F "Package [$c]" >/dev/null 2>&1; then
         printf '%s' "$c"
         return 0
@@ -1170,29 +1178,64 @@ _chain_in_list() {
 }
 
 rooted_afwall_graph_from_snapshot() {
-  local snap="$1" chains line chain target out=""
-  chains="$(reachable_chains_from_snapshot "$snap")" || return 1
-  while IFS= read -r line; do
-    case "$line" in
-      "-A OUTPUT "*) printf '%s\n' "$line" | grep -qE " -j ${AFWALL_CHAIN_MAIN}( |$)" && out="${out}${line}\n" ;;
-      "-N afwall"*) chain="${line#-N }"; chain="${chain%% *}"; _chain_in_list "$chain" "$chains" && out="${out}${line}\n" ;;
-      "-A afwall"*)
-        chain="${line#-A }"; chain="${chain%% *}"
-        if _chain_in_list "$chain" "$chains"; then
-          target="$(printf '%s\n' "$line" | sed -n 's/.* -j \(afwall[^ ]*\).*/\1/p')"
-          if [ -z "$target" ] || _chain_in_list "$target" "$chains" || printf '%s\n' "$target" | grep -qv '^afwall'; then
-            out="${out}${line}\n"
-          fi
-        fi
-        ;;
-    esac
-  done <<EOF
-$snap
-EOF
+  local snap="$1" out
+  [ -n "$snap" ] || return 1
+  out="$(printf '%s
+' "$snap" | awk -v main="${AFWALL_CHAIN_MAIN}" '
+    function add(c) { if (c != "" && !seen[c]) { seen[c]=1; q[++tail]=c } }
+    { lines[++n] = $0 }
+    /^-A OUTPUT / {
+      for (i=1; i<NF; i++) {
+        if ($i=="-j" && $(i+1)==main) output=1
+      }
+    }
+    /^-N / { defs[$2]=1 }
+    /^-A / {
+      chain=$2
+      for (i=1; i<NF; i++) {
+        if ($i=="-j") edges[chain]=edges[chain] " " $(i+1)
+      }
+    }
+    END {
+      if (!output || !defs[main]) exit 1
+      add(main)
+      for (head=1; head<=tail; head++) {
+        count=split(edges[q[head]], children, " ")
+        for (i=1; i<=count; i++) {
+          if (children[i] ~ /^afwall/ && defs[children[i]]) add(children[i])
+        }
+      }
+      for (i=1; i<=n; i++) {
+        line=lines[i]
+        if (line ~ /^-A OUTPUT /) {
+          has_jump=0
+          count=split(line, fields, " ")
+          for (j=1; j<count; j++) {
+            if (fields[j]=="-j" && fields[j+1]==main) has_jump=1
+          }
+          if (has_jump) print line
+        } else if (line ~ /^-N /) {
+          count=split(line, fields, " ")
+          chain=fields[2]
+          if (seen[chain]) print line
+        } else if (line ~ /^-A /) {
+          count=split(line, fields, " ")
+          chain=fields[2]
+          if (seen[chain]) {
+            target=""
+            for (j=1; j<count; j++) {
+              if (fields[j]=="-j") target=fields[j+1]
+            }
+            if (target=="" || target !~ /^afwall/ || seen[target]) print line
+          }
+        }
+      }
+    }
+  ')" || return 1
   [ -n "$out" ] || return 1
-  printf '%b' "$out" | sort
+  printf '%s
+' "$out" | sort
 }
-
 afwall_rooted_graph_fingerprint_from_snapshot() {
   local graph
   graph="$(rooted_afwall_graph_from_snapshot "$1")" || { printf 'na'; return 1; }
@@ -1760,6 +1803,8 @@ recover_stop_service_loop() {
       ;;
     *)
       log "action: pid stale or not module-owned; relying on override latch (pid=${_svc_pid} cmdline='${_cmdline:-unreadable}')"
+      rm -f "$SERVICE_PID_FILE" 2>/dev/null || true
+      log "action: stale service pid file removed: $SERVICE_PID_FILE"
       ;;
   esac
 }

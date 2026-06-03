@@ -684,10 +684,13 @@ $(_ll_vpn_discover_providers 2>/dev/null)
 EOF
 
   # Deduplicate and enforce lockdown where possible.
-  if [ -z "$(printf '%s' "$pkgs" | tr -d '[:space:]')" ]; then
-    log "vpn_lockdown: WARN: handling enabled but provider list is empty and auto-detection found no providers; VPN lockdown state cannot be managed"
-    return 0
-  fi
+  case "$pkgs" in
+    *[![:space:]]*) ;;
+    *)
+      log "vpn_lockdown: WARN: handling enabled but provider list is empty and auto-detection found no providers; VPN lockdown state cannot be managed"
+      return 0
+      ;;
+  esac
 
   local seen=" " ok=0
   for pkg in $pkgs; do
@@ -977,7 +980,7 @@ lowlevel_reassert_radios_off() {
 # for logs: unlocked, probably_unlocked, locked, or unknown.  Unknown is not a
 # negative result and must not block family AFWall handoff.
 device_unlock_state() {
-  local user="0" cmd_user="unavailable" dumpsys_user="unavailable" ce="unavailable" keyguard="unavailable" trust="unavailable" result="unknown"
+  local user="0" cmd_user="unavailable" dumpsys_user="unavailable" ce="unavailable" keyguard="unavailable" trust="unavailable" result="unknown" _cu _du _kw _tr
 
   if has_cmd am; then
     user="$(am get-current-user 2>/dev/null | tr -dc '0-9' | head -c 4)"
@@ -1021,9 +1024,9 @@ device_unlock_state() {
 
   # CE proof: readable current-user CE root plus at least one AFWall/app CE dir
   # or any child entry.  Existence alone is not enough.
-  if [ -r "/data/user/${user}" ] && find "/data/user/${user}" -maxdepth 1 -type d 2>/dev/null | head -2 | grep -q .; then
+  if [ -r "/data/user/${user}" ] && find "/data/user/${user}" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1 | grep -q .; then
     ce="readable"
-  elif [ -r "/data/user/0" ] && find "/data/user/0" -maxdepth 1 -type d 2>/dev/null | head -2 | grep -q .; then
+  elif [ -r "/data/user/0" ] && find "/data/user/0" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1 | grep -q .; then
     ce="readable_user0"
   else
     ce="not_readable"

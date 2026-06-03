@@ -149,7 +149,7 @@ Beginner-facing options:
 | `BLOCK_FORWARD` | `1` | Temporarily block tethered-client FORWARD traffic. |
 | `BLOCK_INPUT` | `0` | Optional inbound INPUT blackout. |
 | `RADIO_SUPPRESSION` | `off` | `off`, `safe`, or `strict` lower-layer suppression. |
-| `AFWALL_PACKAGE` | `auto` | Auto, free, or donate package. |
+| `AFWALL_PACKAGE` | `auto` | Auto, free, donate, or legacy package. |
 | `VPN_LOCKDOWN_MODE` | `off` | `off` leaves VPN alone; `preserve` respects existing lockdown; `restore` enforces/restores module-managed lockdown. |
 
 Examples:

@@ -275,7 +275,7 @@ FORWARD protection is active only when the module chain exists, the DROP rule ex
 | `POLL_INTERVAL_SECS` | `1` | Main snapshot poll interval. |
 | `FAST_STABLE_SECS` | `2` | Fast-path rooted graph stability window when corroboration exists. |
 | `SLOW_STABLE_SECS` | `6` | Conservative rooted graph stability window without mandatory corroboration. |
-| `AFWALL_PACKAGE` | `auto` | AFWall package hint: `auto`, free, or donate package. |
+| `AFWALL_PACKAGE` | `auto` | AFWall package hint: `auto`, free, donate, or legacy package. |
 | `VPN_LOCKDOWN_MODE` | `off` | VPN lockdown handling: `off`, `preserve`, or `restore`. |
 | `VPN_PROVIDER_PACKAGES` | `auto` | Auto-discover providers or provide a space/comma-separated package list. |
 | `DEBUG` | `0` | Set to `1` for verbose boot logging. |

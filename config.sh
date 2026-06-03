@@ -38,7 +38,7 @@ BLOCK_INPUT=0
 # Optional radio/service suppression beneath the firewall: off is fastest and recommended for modern Pixel-style devices; safe is moderate; strict is strongest but may slow Wi-Fi/mobile/VPN recovery. Accepted: off, safe, strict. Default: off.
 RADIO_SUPPRESSION=off
 
-# AFWall package to watch for optional corroboration only; auto checks free/donate packages, or set a package explicitly. Accepted: auto, dev.ukanth.ufirewall, dev.ukanth.ufirewall.donate.
+# AFWall package to watch for optional corroboration only; auto checks free/donate packages, or set a package explicitly. Accepted: auto, dev.ukanth.ufirewall, dev.ukanth.ufirewall.donate, com.ukanth.ufirewall.
 AFWALL_PACKAGE=auto
 
 # Android always-on VPN lockdown handling: off leaves it alone; preserve records/respects existing state; restore may enforce during protection then restore the pre-boot state. Accepted: off, preserve, restore. Default: off.
