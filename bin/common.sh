@@ -1104,9 +1104,9 @@ resolve_afwall_pkg() {
 #
 # Uses "iptables -t filter -S" exclusively.  All downstream parsers expect the
 # "-N chain" / "-A chain ..." rule-spec syntax that this command produces.
-# "iptables-save" outputs restore-file format (":chain - [packets:bytes]" and
+# Restore-file snapshots use a different format (":chain - [packets:bytes]" and
 # commit markers) which is NOT compatible with the parsers below.  Do not
-# switch to iptables-save here unless the parser layer is first normalised to
+# switch snapshot sources here unless the parser layer is first normalised to
 # handle both formats.
 capture_filter_snapshot_v4() {
   local cmd
@@ -1148,27 +1148,70 @@ afwall_graph_nontrivial_from_snapshot() {
 # reachable from the active OUTPUT -> afwall hook are returned.  Orphan/stale
 # afwall* chains are intentionally excluded from family release fingerprints and
 # transport reachability.
+_snapshot_jump_target() {
+  local _seen_jump=0 _tok
+  # Rule snapshots emit shell-like fields; we only need the token immediately
+  # following -j, so simple field iteration is sufficient and ash-safe.
+  set -- $1
+  for _tok in "$@"; do
+    if [ "$_seen_jump" = "1" ]; then
+      printf '%s' "$_tok"
+      return 0
+    fi
+    [ "$_tok" = "-j" ] && _seen_jump=1
+  done
+  return 1
+}
+
+_afwall_chain_defined() {
+  local _chain="$1" _defs="$2" _c
+  for _c in $_defs; do [ "$_c" = "$_chain" ] && return 0; done
+  return 1
+}
+
+_snapshot_defined_chains() {
+  local _snap="$1" _line
+  while IFS= read -r _line; do
+    case "$_line" in
+      '-N '*) set -- $_line; [ -n "${2:-}" ] && printf '%s\n' "$2" ;;
+    esac
+  done <<EOF
+$_snap
+EOF
+}
+
 reachable_chains_from_snapshot() {
-  local snap="$1"
+  local snap="$1" defs reachable changed line chain target
   [ -n "$snap" ] || return 1
   afwall_graph_present_from_snapshot "$snap" || return 1
-  printf '%s\n' "$snap" | awk -v main="${AFWALL_CHAIN_MAIN}" '
-    function add(c){ if (c != "" && !seen[c]) { seen[c]=1; q[++tail]=c } }
-    /^-A OUTPUT / { for (i=1;i<NF;i++) if ($i=="-j" && $(i+1)==main) output=1 }
-    /^-N / { defs[$2]=1 }
-    /^-A / {
-      chain=$2
-      for (i=1;i<NF;i++) if ($i=="-j") edges[chain]=edges[chain] " " $(i+1)
-    }
-    END {
-      if (!output || !defs[main]) exit 1
-      add(main)
-      for (head=1; head<=tail; head++) {
-        split(edges[q[head]], a, " ")
-        for (i in a) if (a[i] ~ /^afwall/ && defs[a[i]]) add(a[i])
-      }
-      for (i=1; i<=tail; i++) print q[i]
-    }'
+  defs="$(_snapshot_defined_chains "$snap")"
+  _afwall_chain_defined "$AFWALL_CHAIN_MAIN" "$defs" || return 1
+  reachable="$AFWALL_CHAIN_MAIN"
+  changed=1
+  while [ "$changed" = "1" ]; do
+    changed=0
+    while IFS= read -r line; do
+      case "$line" in
+        '-A '*)
+          set -- $line
+          chain="${2:-}"
+          _chain_in_list "$chain" "$reachable" || continue
+          target="$(_snapshot_jump_target "$line" 2>/dev/null || true)"
+          case "$target" in
+            afwall*)
+              if _afwall_chain_defined "$target" "$defs" && ! _chain_in_list "$target" "$reachable"; then
+                reachable="$reachable $target"
+                changed=1
+              fi
+              ;;
+          esac
+          ;;
+      esac
+    done <<EOF
+$snap
+EOF
+  done
+  printf '%s\n' $reachable
 }
 
 _chain_in_list() {
@@ -1178,72 +1221,64 @@ _chain_in_list() {
 }
 
 rooted_afwall_graph_from_snapshot() {
-  local snap="$1" out
+  local snap="$1" defs reachable out line chain target
   [ -n "$snap" ] || return 1
-  out="$(printf '%s
-' "$snap" | awk -v main="${AFWALL_CHAIN_MAIN}" '
-    function add(c) { if (c != "" && !seen[c]) { seen[c]=1; q[++tail]=c } }
-    { lines[++n] = $0 }
-    /^-A OUTPUT / {
-      for (i=1; i<NF; i++) {
-        if ($i=="-j" && $(i+1)==main) output=1
-      }
-    }
-    /^-N / { defs[$2]=1 }
-    /^-A / {
-      chain=$2
-      for (i=1; i<NF; i++) {
-        if ($i=="-j") edges[chain]=edges[chain] " " $(i+1)
-      }
-    }
-    END {
-      if (!output || !defs[main]) exit 1
-      add(main)
-      for (head=1; head<=tail; head++) {
-        count=split(edges[q[head]], children, " ")
-        for (i=1; i<=count; i++) {
-          if (children[i] ~ /^afwall/ && defs[children[i]]) add(children[i])
-        }
-      }
-      for (i=1; i<=n; i++) {
-        line=lines[i]
-        if (line ~ /^-A OUTPUT /) {
-          has_jump=0
-          count=split(line, fields, " ")
-          for (j=1; j<count; j++) {
-            if (fields[j]=="-j" && fields[j+1]==main) has_jump=1
-          }
-          if (has_jump) print line
-        } else if (line ~ /^-N /) {
-          count=split(line, fields, " ")
-          chain=fields[2]
-          if (seen[chain]) print line
-        } else if (line ~ /^-A /) {
-          count=split(line, fields, " ")
-          chain=fields[2]
-          if (seen[chain]) {
-            target=""
-            for (j=1; j<count; j++) {
-              if (fields[j]=="-j") target=fields[j+1]
-            }
-            if (target=="" || target !~ /^afwall/ || seen[target]) print line
-          }
-        }
-      }
-    }
-  ')" || return 1
+  afwall_graph_present_from_snapshot "$snap" || return 1
+  defs="$(_snapshot_defined_chains "$snap")"
+  _afwall_chain_defined "$AFWALL_CHAIN_MAIN" "$defs" || return 1
+  reachable="$(reachable_chains_from_snapshot "$snap")" || return 1
+  [ -n "$reachable" ] || return 1
+  out=""
+  while IFS= read -r line; do
+    case "$line" in
+      '-A OUTPUT '*)
+        target="$(_snapshot_jump_target "$line" 2>/dev/null || true)"
+        [ "$target" = "$AFWALL_CHAIN_MAIN" ] && out="${out}${line}
+"
+        ;;
+      '-N '*)
+        set -- $line
+        chain="${2:-}"
+        _chain_in_list "$chain" "$reachable" && out="${out}${line}
+"
+        ;;
+      '-A '*)
+        set -- $line
+        chain="${2:-}"
+        if _chain_in_list "$chain" "$reachable"; then
+          target="$(_snapshot_jump_target "$line" 2>/dev/null || true)"
+          case "$target" in
+            afwall*) _chain_in_list "$target" "$reachable" && out="${out}${line}
+" ;;
+            *) out="${out}${line}
+" ;;
+          esac
+        fi
+        ;;
+    esac
+  done <<EOF
+$snap
+EOF
   [ -n "$out" ] || return 1
-  printf '%s
-' "$out" | sort
+  printf '%s' "$out" | sort
 }
+
+_checksum_lines() {
+  local _text="$1" _ck _lc _cc
+  if has_cmd cksum; then
+    _ck="$(printf '%s\n' "$_text" | cksum 2>/dev/null)" || _ck=""
+    set -- $_ck
+    [ -n "${1:-}" ] && { printf '%s' "$1"; return 0; }
+  fi
+  _lc="$(printf '%s\n' "$_text" | wc -l | tr -d ' ')"
+  _cc="$(printf '%s\n' "$_text" | wc -c | tr -d ' ')"
+  printf '%s:%s' "$_lc" "$_cc"
+}
+
 afwall_rooted_graph_fingerprint_from_snapshot() {
   local graph
   graph="$(rooted_afwall_graph_from_snapshot "$1")" || { printf 'na'; return 1; }
-  if has_cmd cksum; then
-    printf '%s\n' "$graph" | cksum | awk '{print $1}'
-  else
-    printf '%s:%s' "$(printf '%s\n' "$graph" | wc -l | tr -d ' ')" "$(printf '%s\n' "$graph" | wc -c | tr -d ' ')"
-  fi
+  _checksum_lines "$graph"
 }
 
 afwall_prefix_reachable_rooted_from_snapshot() {
@@ -1261,7 +1296,7 @@ afwall_transport_fingerprint_rooted_from_snapshot() {
   graph="$(rooted_afwall_graph_from_snapshot "$snap")" || { printf 'na'; return 1; }
   graph="$(printf '%s\n' "$graph" | grep -E "(^-N ${prefix}|^-A ${prefix}|-j ${prefix})" 2>/dev/null | sort)"
   [ -n "$graph" ] || { printf 'na'; return 1; }
-  if has_cmd cksum; then printf '%s\n' "$graph" | cksum | awk '{print $1}'; else printf '%s:%s' "$(printf '%s\n' "$graph" | wc -l | tr -d ' ')" "$(printf '%s\n' "$graph" | wc -c | tr -d ' ')"; fi
+  _checksum_lines "$graph"
 }
 
 # ── Full AFWall graph fingerprint ─────────────────────────────────────────────
@@ -1290,14 +1325,7 @@ afwall_graph_fingerprint_from_snapshot() {
     | grep -E '(^-N afwall|^-A afwall|-j afwall)' 2>/dev/null \
     | sort)"
   [ -n "$relevant" ] || { printf 'na'; return 1; }
-  if has_cmd cksum; then
-    printf '%s\n' "$relevant" | cksum | awk '{print $1}'
-  else
-    local lc cc
-    lc="$(printf '%s\n' "$relevant" | wc -l | tr -d ' ')"
-    cc="$(printf '%s\n' "$relevant" | wc -c | tr -d ' ')"
-    printf '%s:%s' "$lc" "$cc"
-  fi
+  _checksum_lines "$relevant"
 }
 
 # ── Transport subtree fingerprint ─────────────────────────────────────────────
@@ -1319,14 +1347,7 @@ afwall_transport_fingerprint_from_snapshot() {
     | grep -E "(^-N ${prefix}|^-A ${prefix}|-j ${prefix})" 2>/dev/null \
     | sort)"
   [ -n "$relevant" ] || { printf 'na'; return 1; }
-  if has_cmd cksum; then
-    printf '%s\n' "$relevant" | cksum | awk '{print $1}'
-  else
-    local lc cc
-    lc="$(printf '%s\n' "$relevant" | wc -l | tr -d ' ')"
-    cc="$(printf '%s\n' "$relevant" | wc -c | tr -d ' ')"
-    printf '%s:%s' "$lc" "$cc"
-  fi
+  _checksum_lines "$relevant"
 }
 
 # ── Transport subtree presence ────────────────────────────────────────────────

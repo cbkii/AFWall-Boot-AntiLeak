@@ -26,6 +26,24 @@ if find "$ROOT" -path "$ROOT/.git" -prune -o -type f ! -path "$ROOT/tools/mock-l
 fi
 pass "v4.0.0 release metadata"
 
+# Repository text must not contain the early-boot parser that this project forbids.
+forbidden="$(printf '\141\167\153')"
+if find "$ROOT" -path "$ROOT/.git" -prune -o -type f ! -path "$ROOT/tools/mock-logic-tests.sh" -exec grep -n "$forbidden" {} + >/dev/null 2>&1; then
+  fail "forbidden parser token remains"
+fi
+pass "forbidden parser absence"
+
+# Temporary review-helper artifacts must never ship in the module branch.
+for stale in \
+  "$ROOT/tools/remove_${forbidden}_fixup.py" \
+  "$ROOT/.github/workflows/${forbidden}-removal-runner.yml" \
+  "$ROOT/.github/workflows/remove-${forbidden}-fixup.yml" \
+  "$ROOT/.github/workflows/run-remove-${forbidden}-fixup.yml" \
+  "$ROOT/.github/workflows/pr29-review-fixup.yml"; do
+  [ ! -e "$stale" ] || fail "temporary review-helper artifact remains: $stale"
+done
+pass "temporary review-helper artifacts absent"
+
 # Static invariants from the decoupled handoff/watchdog implementation.
 grep -q 'Capture each family once per poll, independent of unlock/boot diagnostics' "$ROOT/service.sh" || fail "snapshot capture is still readiness gated"
 grep -q 'WATCHDOG_SERVICE_SECS' "$ROOT/service.sh" || fail "absolute service watchdog missing"
@@ -101,7 +119,7 @@ allowed='LEAK_PROTECTION_MODE INTEGRATION_MODE POLL_INTERVAL_SECS FAST_STABLE_SE
 vars=$(sed -n 's/^\([A-Z0-9_][A-Z0-9_]*\)=.*/\1/p' "$ROOT/config.sh")
 for v in $vars; do
   case " $allowed " in *" $v "*) ;; *) fail "unexpected user-facing config variable: $v" ;; esac
-  prev=$(awk -v key="$v" 'index($0,key"=")==1 {print last; exit} {last=$0}' "$ROOT/config.sh")
+  prev=$(sed -n "/^[#]/{h;d;};/^${v}=/{x;p;q;};h" "$ROOT/config.sh")
   printf '%s' "$prev" | grep -q '^# .*' || fail "config variable lacks immediate explanatory comment: $v"
 done
 for v in WATCHDOG_POLICY VPN_LOCKDOWN_MODE VPN_PROVIDER_PACKAGES; do
@@ -141,6 +159,24 @@ load_config
 grep -q 'unsupported legacy variable ignored in v4.0.0: TIMEOUT_POLICY' "$LOG_FILE" || fail "legacy TIMEOUT_POLICY warning missing"
 grep -q 'unsupported legacy variable ignored in v4.0.0: AFWALL_READY_REQUIRE_UNLOCK' "$LOG_FILE" || fail "legacy readiness warning missing"
 pass "config derivation and legacy ignore"
+
+# AFWall package detection must include donate, current free, and legacy IDs.
+mkdir -p "$TMP/bin"
+cat > "$TMP/bin/cmd" <<'SH'
+#!/bin/sh
+[ "$1" = package ] && [ "$2" = path ] || exit 1
+[ "$3" = "$TEST_AF_PKG" ] || exit 1
+echo "package:/data/app/$3/base.apk"
+SH
+chmod +x "$TMP/bin/cmd"
+PATH="$TMP/bin:$PATH"
+for pkg in dev.ukanth.ufirewall.donate dev.ukanth.ufirewall com.ukanth.ufirewall; do
+  TEST_AF_PKG="$pkg"
+  export TEST_AF_PKG
+  found="$(resolve_afwall_pkg)" || fail "AFWall package resolver failed for $pkg"
+  [ "$found" = "$pkg" ] || fail "AFWall package resolver returned $found for $pkg"
+done
+pass "AFWall package candidates"
 
 # External legacy paths are mentioned as ignored, never sourced by installer/common.
 grep -q 'legacy external config path ignored in v4.0.0' "$ROOT/bin/common.sh" || fail "runtime legacy path ignore missing"

@@ -185,7 +185,7 @@ elif [ $MAGISK_VER_CODE -ge 27000 ]; then # Atomic Mount
   fi
   ORIGDIR="$MAGISKTMP/mirror"
   mount_mirrors
-elif [ "$(echo $MAGISKTMP | awk -F/ '{ print $NF}')" == ".magisk" ]; then
+elif [ "$(basename "$MAGISKTMP")" == ".magisk" ]; then
   ORIGDIR="$MAGISKTMP/mirror"
 else
   ORIGDIR="$MAGISKTMP/.magisk/mirror"
@@ -199,7 +199,7 @@ else
 fi
 # Detect extra partition compatibility (KernelSU or Magisk Delta/Kitsune)
 EXTRAPART=false
-if $KSU || [ "$(echo $MAGISK_VER | awk -F- '{ print $NF}')" == "delta" ] || [ "$(echo $MAGISK_VER | awk -F- '{ print $NF}')" == "kitsune" ]; then
+if $KSU || [ "${MAGISK_VER##*-}" == "delta" ] || [ "${MAGISK_VER##*-}" == "kitsune" ]; then
   EXTRAPART=true
 elif ! $PARTOVER; then
   unset PARTITIONS
