@@ -90,14 +90,25 @@ jobs:
             fi
           else
             PR_NUMBER="${{ github.event.issue.number }}"
-            # Resolve to PR base (trusted repo ref), not PR head SHA from potential forks.
-            REF="$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.base.ref')"
+            # Build the PR head for same-repository PRs. Building the base branch
+            # can publish stale assets under the requested release tag/version.
+            # Fork PRs are rejected for release comments because this workflow has
+            # contents:write and publishes GitHub Releases.
+            HEAD_REPO="$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.head.repo.full_name')"
+            HEAD_REF="$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.head.ref')"
+            HEAD_SHA="$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.head.sha')"
+            if [ "$HEAD_REPO" != "${{ github.repository }}" ]; then
+              echo "::error::Refusing /release from fork PR head $HEAD_REPO. Merge or dispatch workflow manually on a trusted branch."
+              exit 1
+            fi
+            REF="$HEAD_REF"
             # Extract optional tag from comment body via env var (avoids shell injection).
             # Strip any characters outside the valid tag alphabet [a-zA-Z0-9._-] so
             # the value is safe for downstream interpolation in shell steps.
             TAG_INPUT="$(printf '%s' "$COMMENT_BODY" | sed -nE 's#^/release[[:space:]]+([^[:space:]]+).*$#\1#p' | head -1 | tr -cd 'a-zA-Z0-9._-' | head -c 100)"
             DRAFT_INPUT="false"
             FORCE_RETAG_INPUT="false"
+            echo "release PR head: repo=$HEAD_REPO ref=$HEAD_REF sha=$HEAD_SHA"
           fi
 
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
@@ -221,33 +232,9 @@ jobs:
           RELEASE_TAG="${{ steps.tag.outputs.release_tag }}"
           RELEASE_VERSION="${{ steps.tag.outputs.release_version }}"
 
-          sed -E -i "s/^version=.*/version=${RELEASE_VERSION}/" module.prop
-          sed -E -i "s/^versionCode=.*/versionCode=${RELEASE_TAG}/" module.prop
+          tools/sync-version-metadata.py "$RELEASE_VERSION" "$RELEASE_TAG"
 
-          RELEASE_VERSION="$RELEASE_VERSION" RELEASE_TAG="$RELEASE_TAG" python3 - <<'PY'
-          import json
-          import os
-          import pathlib
-
-          p = pathlib.Path('update.json')
-          data = json.loads(p.read_text(encoding='utf-8'))
-          data['version'] = os.environ['RELEASE_VERSION']
-          data['versionCode'] = int(os.environ['RELEASE_TAG'])
-          p.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-          PY
-
-          # Keep version strings in embedded source files in sync with module.prop.
-          # Pattern targets only the module-header comment line and MODULE_VERSION variable;
-          # historical version references (e.g. "v2.2.0+" in comments) are not touched.
-          sed -E -i "s/(# AFWall Boot AntiLeak )v[0-9]+\.[0-9]+\.[0-9]+/\1${RELEASE_VERSION}/" bin/common.sh
-          sed -E -i "s/^MODULE_VERSION=.*/MODULE_VERSION=\"${RELEASE_VERSION}\"/" bin/common.sh
-          sed -E -i "s/(# AFWall Boot AntiLeak )v[0-9]+\.[0-9]+\.[0-9]+/\1${RELEASE_VERSION}/" bin/lowlevel.sh
-          sed -E -i "s/(# AFWall Boot AntiLeak )v[0-9]+\.[0-9]+\.[0-9]+/\1${RELEASE_VERSION}/" config.sh
-          # Update installer UI version strings (header banner and defaults note).
-          sed -E -i "s/(AFWall Boot AntiLeak[[:space:]]+)v[0-9]+\.[0-9]+\.[0-9]+/\1${RELEASE_VERSION}/" common/install.sh
-          sed -E -i "s/(\[DEFAULTS IN )v[0-9]+\.[0-9]+\.[0-9]+(\])/\1${RELEASE_VERSION}\2/" common/install.sh
-
-          git add module.prop update.json bin/common.sh bin/lowlevel.sh config.sh common/install.sh
+          git add module.prop update.json bin/common.sh bin/lowlevel.sh bin/installer_config.sh config.sh common/install.sh reconfigure.sh service.sh README.md ADVANCED.md
           if git diff --cached --quiet; then
             echo "No metadata changes detected after bump logic; skipping commit/push."
           else
@@ -261,34 +248,24 @@ jobs:
           BRANCH="$(git symbolic-ref --short -q HEAD || true)"
           VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           VERSION_CODE="$(grep '^versionCode=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
-          VERSION="$VERSION" VERSION_CODE="$VERSION_CODE" python3 - <<'PY'
-          import json
-          import os
-          import pathlib
+          tools/sync-version-metadata.py "$VERSION" "$VERSION_CODE"
 
-          p = pathlib.Path('update.json')
-          data = json.loads(p.read_text(encoding='utf-8'))
-          data['version'] = os.environ['VERSION']
-          data['versionCode'] = int(os.environ['VERSION_CODE'])
-          p.write_text(json.dumps(data, indent=2) + '\n', encoding='utf-8')
-          PY
-
-          if git diff --quiet -- update.json; then
-            echo "update.json already in sync with module.prop."
+          if git diff --quiet -- module.prop update.json bin/common.sh bin/lowlevel.sh bin/installer_config.sh config.sh common/install.sh reconfigure.sh service.sh README.md ADVANCED.md; then
+            echo "release metadata already in sync with module.prop."
           else
             # Guard: if this tag was already pushed to origin in a prior run, pushing a
             # new sync commit would advance HEAD past the existing tag, causing a
             # tag/commit mismatch that fails the "Create tag" step.  Emit a warning
             # instead and let the "Create tag" step handle the re-publish scenario.
             if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
-              echo "::warning::update.json is out of sync with module.prop but tag ${RELEASE_TAG} already exists on origin. Skipping sync commit to avoid advancing HEAD past the existing tag. Fix update.json manually if needed."
+              echo "::warning::release metadata is out of sync with module.prop but tag ${RELEASE_TAG} already exists on origin. Skipping sync commit to avoid advancing HEAD past the existing tag. Fix metadata manually if needed."
             else
               if [ -z "$BRANCH" ]; then
-                echo "::error::update.json changed but checkout is detached; cannot commit synced metadata."
+                echo "::error::release metadata changed but checkout is detached; cannot commit synced metadata."
                 exit 1
               fi
-              git add update.json
-              git commit -m "chore: sync update.json version"
+              git add module.prop update.json bin/common.sh bin/lowlevel.sh bin/installer_config.sh config.sh common/install.sh reconfigure.sh service.sh README.md ADVANCED.md
+              git commit -m "chore: sync release metadata"
               git push origin HEAD:"$BRANCH"
             fi
           fi
@@ -309,6 +286,16 @@ jobs:
             echo "::error::Final module.prop versionCode ($VERSION_CODE) does not match release tag (${{ steps.tag.outputs.release_tag }})."
             exit 1
           fi
+          if [ "$VERSION" != "${{ steps.tag.outputs.release_version }}" ]; then
+            echo "::error::Final module.prop version ($VERSION) does not match release version (${{ steps.tag.outputs.release_version }})."
+            exit 1
+          fi
+          UPDATE_VERSION="$(python3 -c 'import json; print(json.load(open("update.json"))["version"])')"
+          UPDATE_CODE="$(python3 -c 'import json; print(json.load(open("update.json"))["versionCode"])')"
+          if [ "$UPDATE_VERSION" != "$VERSION" ] || [ "$UPDATE_CODE" != "$VERSION_CODE" ]; then
+            echo "::error::update.json ($UPDATE_VERSION/$UPDATE_CODE) does not match module.prop ($VERSION/$VERSION_CODE)."
+            exit 1
+          fi
 
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
@@ -320,11 +307,27 @@ jobs:
           ZIP_NAME="${{ steps.meta_final.outputs.module_id }}-${{ steps.meta_final.outputs.version }}.zip"
           tools/build-release.sh dist/ "$ZIP_NAME" "${{ steps.meta_final.outputs.module_id }}.zip"
 
-      - name: Validate ZIP structure
+      - name: Validate ZIP structure and embedded version metadata
         run: |
           chmod +x tools/validate-zip.sh
-          tools/validate-zip.sh "dist/${{ steps.meta_final.outputs.module_id }}-${{ steps.meta_final.outputs.version }}.zip"
-          tools/validate-zip.sh "dist/${{ steps.meta_final.outputs.module_id }}.zip"
+          for zip in \
+            "dist/${{ steps.meta_final.outputs.module_id }}-${{ steps.meta_final.outputs.version }}.zip" \
+            "dist/${{ steps.meta_final.outputs.module_id }}.zip"; do
+            tools/validate-zip.sh "$zip"
+            ZIP_VERSION="$(unzip -p "$zip" module.prop | grep '^version=' | cut -d= -f2 | tr -d '[:space:]')"
+            ZIP_CODE="$(unzip -p "$zip" module.prop | grep '^versionCode=' | cut -d= -f2 | tr -d '[:space:]')"
+            ZIP_UPDATE_VERSION="$(unzip -p "$zip" update.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+            ZIP_UPDATE_CODE="$(unzip -p "$zip" update.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["versionCode"])')"
+            if [ "$ZIP_VERSION" != "${{ steps.meta_final.outputs.version }}" ] || [ "$ZIP_CODE" != "${{ steps.meta_final.outputs.version_code }}" ]; then
+              echo "::error::$zip embeds module.prop version $ZIP_VERSION/$ZIP_CODE, expected ${{ steps.meta_final.outputs.version }}/${{ steps.meta_final.outputs.version_code }}."
+              exit 1
+            fi
+            if [ "$ZIP_UPDATE_VERSION" != "$ZIP_VERSION" ] || [ "$ZIP_UPDATE_CODE" != "$ZIP_CODE" ]; then
+              echo "::error::$zip embeds update.json $ZIP_UPDATE_VERSION/$ZIP_UPDATE_CODE but module.prop is $ZIP_VERSION/$ZIP_CODE."
+              exit 1
+            fi
+            echo "$zip embeds expected version $ZIP_VERSION ($ZIP_CODE)"
+          done
 
       - name: Create tag if missing
         run: |
