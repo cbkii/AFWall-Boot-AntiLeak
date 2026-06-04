@@ -66,7 +66,7 @@ def main() -> int:
     replace("reconfigure.sh", [(r"v\d+\.\d+\.\d+ ignores old external config paths", f"{version} ignores old external config paths")])
     replace("service.sh", [(r"v\d+\.\d+\.\d+ config-derived internal defaults", f"{version} config-derived internal defaults"), (r"watchdog clocks in v\d+\.\d+\.\d+", f"watchdog clocks in {version}")])
     for doc in ("README.md", "ADVANCED.md"):
-        replace(doc, [(r"v\d+\.\d+\.\d+", version)])
+        replace(doc, [(re.escape(current_version), version)])
     return 0
 
 if __name__ == "__main__":
