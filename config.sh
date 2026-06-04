@@ -1,6 +1,6 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v4.0.0 - User Configuration
-# Breaking-change note: v4.0.0 reads only this module-local file and optional
+# AFWall Boot AntiLeak v4.1.0 - User Configuration
+# Breaking-change note: v4.1.0 reads only this module-local file and optional
 # config.local.sh in the same directory. Old /data/adb/AFWall-Boot-AntiLeak
 # config files are ignored; clean uninstall, reboot, reinstall, and reconfigure
 # is recommended when upgrading from older releases.

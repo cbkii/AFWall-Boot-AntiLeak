@@ -241,9 +241,9 @@ Runtime config is module-local only:
 /data/adb/modules/AFWall-Boot-AntiLeak/config.local.sh
 ```
 
-Legacy `/data/adb/AFWall-Boot-AntiLeak/config.sh` and `/data/adb/AFWall-Boot-AntiLeak/installer.cfg` are ignored and logged. They are not sourced or migrated in v4.0.0; recreate needed settings manually in module-local `config.local.sh`.
+Legacy `/data/adb/AFWall-Boot-AntiLeak/config.sh` and `/data/adb/AFWall-Boot-AntiLeak/installer.cfg` are ignored and logged. They are not sourced or migrated in v4.1.0; recreate needed settings manually in module-local `config.local.sh`.
 
-Beginner options are grouped in `config.sh`: safety mode, release timing/watchdogs, boot suppression, AFWall package, VPN handling, and advanced/debug. Old timeout/readiness variables are unsupported in v4.0.0 and are ignored if present in `config.local.sh`.
+Beginner options are grouped in `config.sh`: safety mode, release timing/watchdogs, boot suppression, AFWall package, VPN handling, and advanced/debug. Old timeout/readiness variables are unsupported in v4.1.0 and are ignored if present in `config.local.sh`.
 
 ### VPN always-on install/update detection
 
@@ -260,7 +260,7 @@ If VPN handling is enabled and providers are set to `auto`, runtime tries to dis
 
 FORWARD protection is active only when the module chain exists, the DROP rule exists, the parent `FORWARD` jump exists, and loopback exemption is present. Orphaned FORWARD chains are degraded and repaired while configured active. IPv6 raw OUTPUT is also required to have loopback exemption before being considered healthy.
 
-### User-facing v4.0.0 keys
+### User-facing v4.1.0 keys
 
 | Key | Default | Meaning |
 |---|---:|---|

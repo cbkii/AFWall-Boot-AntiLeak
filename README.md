@@ -1,6 +1,6 @@
 # AFWall Boot AntiLeak
 
-> **v4.0.0 breaking config cleanup:** clean uninstall/reboot/reinstall is recommended when upgrading from older versions. Runtime config is module-local only (`config.sh` plus optional `config.local.sh`); old `/data/adb/AFWall-Boot-AntiLeak/config.sh` and `installer.cfg` files are ignored.
+> **v4.1.0 breaking config cleanup:** clean uninstall/reboot/reinstall is recommended when upgrading from older versions. Runtime config is module-local only (`config.sh` plus optional `config.local.sh`); old `/data/adb/AFWall-Boot-AntiLeak/config.sh` and `installer.cfg` files are ignored.
 
 AFWall Boot AntiLeak is a Magisk module that closes the boot-time network leak window before [AFWall+](https://github.com/ukanth/afwall) has finished applying its rules.
 
@@ -133,7 +133,7 @@ Runtime configuration has a single source of truth inside the installed module d
 /data/adb/modules/AFWall-Boot-AntiLeak/config.local.sh   # optional local override
 ```
 
-Old external paths such as `/data/adb/AFWall-Boot-AntiLeak/config.sh` and `/data/adb/AFWall-Boot-AntiLeak/installer.cfg` are **ignored** in v4.0.0. They are not sourced or migrated; recreate settings manually in module-local `config.local.sh`.
+Old external paths such as `/data/adb/AFWall-Boot-AntiLeak/config.sh` and `/data/adb/AFWall-Boot-AntiLeak/installer.cfg` are **ignored** in v4.1.0. They are not sourced or migrated; recreate settings manually in module-local `config.local.sh`.
 
 Beginner-facing options:
 

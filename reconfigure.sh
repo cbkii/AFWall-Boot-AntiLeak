@@ -8,7 +8,7 @@
 # installation and writes module-local overrides to:
 #   $MODDIR/config.local.sh
 #
-# v4.0.0 ignores old external config paths. The new settings take effect on the
+# v4.1.0 ignores old external config paths. The new settings take effect on the
 # next reboot. No reflash is needed to change module options.
 
 MODDIR="${0%/*}"
