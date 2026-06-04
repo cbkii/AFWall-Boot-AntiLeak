@@ -14,17 +14,21 @@ find "$ROOT" -type f \( -name '*.sh' -o -path '*/common/install.sh' \) | while I
 done
 pass "shell syntax"
 
-# Release metadata must be finalised for the v4.0.0 breaking-change release.
-grep -q '^version=v4.0.0$' "$ROOT/module.prop" || fail "module.prop version is not v4.0.0"
-grep -q '^versionCode=40000$' "$ROOT/module.prop" || fail "module.prop versionCode is not 40000"
-grep -q '"version": "v4.0.0"' "$ROOT/update.json" || fail "update.json version is not v4.0.0"
-grep -q '"versionCode": 40000' "$ROOT/update.json" || fail "update.json versionCode is not 40000"
-grep -q 'MODULE_VERSION="v4.0.0"' "$ROOT/bin/common.sh" || fail "MODULE_VERSION is not v4.0.0"
+# Release metadata must be internally consistent for the active breaking-change release.
+expected_version="$(grep '^version=' "$ROOT/module.prop" | cut -d= -f2 | tr -d '[:space:]')"
+expected_code="$(grep '^versionCode=' "$ROOT/module.prop" | cut -d= -f2 | tr -d '[:space:]')"
+[ -n "$expected_version" ] || fail "module.prop version is empty"
+[ -n "$expected_code" ] || fail "module.prop versionCode is empty"
+grep -q "^version=${expected_version}$" "$ROOT/module.prop" || fail "module.prop version mismatch"
+grep -q "^versionCode=${expected_code}$" "$ROOT/module.prop" || fail "module.prop versionCode mismatch"
+grep -q "\"version\": \"${expected_version}\"" "$ROOT/update.json" || fail "update.json version does not match module.prop"
+grep -q "\"versionCode\": ${expected_code}" "$ROOT/update.json" || fail "update.json versionCode does not match module.prop"
+grep -q "MODULE_VERSION=\"${expected_version}\"" "$ROOT/bin/common.sh" || fail "MODULE_VERSION does not match module.prop"
 stale_version_re='v2[.]6\|v2[.]6[.]0\|2[.]6[.]0\|20''600\|v3[.]2[.]1\|30''201'
 if find "$ROOT" -path "$ROOT/.git" -prune -o -type f ! -path "$ROOT/tools/mock-logic-tests.sh" -exec grep -n "$stale_version_re" {} + >/dev/null 2>&1; then
   fail "stale active version metadata remains"
 fi
-pass "v4.0.0 release metadata"
+pass "active release metadata consistency"
 
 # Repository text must not contain the early-boot parser that this project forbids.
 forbidden="$(printf '\141\167\153')"
@@ -146,13 +150,13 @@ if rooted_afwall_graph_from_snapshot "$multi_orphan_snap" | grep -q 'comment orp
 pass "rooted graph and transport reachability"
 
 # Config single-source and PID lifecycle invariants.
-grep -q 'legacy external config path ignored in v4.0.0' "$ROOT/bin/common.sh" || fail "legacy external config ignore warning missing"
+grep -q "legacy external config path ignored in ${expected_version}" "$ROOT/bin/common.sh" || fail "legacy external config ignore warning missing"
 grep -q 'config.local.sh' "$ROOT/bin/common.sh" || fail "module-local config override missing"
 grep -q 'pid_file written pid=${_svc_pid}' "$ROOT/service.sh" || fail "parent does not record actual background pid"
 grep -q 'action: service pid validated' "$ROOT/bin/common.sh" || fail "action pid validation log missing"
 pass "config and PID invariants"
 
-# v4.0.0 config surface checks.
+# Active release config surface checks.
 allowed='LEAK_PROTECTION_MODE INTEGRATION_MODE POLL_INTERVAL_SECS FAST_STABLE_SECS SLOW_STABLE_SECS WATCHDOG_SERVICE_SECS WATCHDOG_BOOT_COMPLETED_SECS WATCHDOG_POLICY BLOCK_FORWARD BLOCK_INPUT RADIO_SUPPRESSION AFWALL_PACKAGE VPN_LOCKDOWN_MODE VPN_PROVIDER_PACKAGES DEBUG TRANSPORT_ABSENCE_STABLE_SECS TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT TRANSPORT_ORPHAN_STABLE_SECS TRANSPORT_INCONCLUSIVE_SECS TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT BLACKOUT_REASSERT_INTERVAL RADIO_REASSERT_INTERVAL UNLOCK_POLL_INTERVAL AFWALL_RULE_DENSITY_MIN'
 vars=$(sed -n 's/^\([A-Z0-9_][A-Z0-9_]*\)=.*/\1/p' "$ROOT/config.sh")
 for v in $vars; do
@@ -176,7 +180,7 @@ grep -q '^VPN_LOCKDOWN_MODE=off$' "$ROOT/config.sh" || fail "default VPN mode is
 grep -q 'Common examples: ch.protonvpn.android com.wireguard.android' "$ROOT/config.sh" || fail "VPN examples missing Proton first"
 if grep -E '^(TIMEOUT_|AFWALL_READY_|LOWLEVEL_|VPN_LOCKDOWN_(BOOT|RELEASE|PROVIDER)|WIFI_AFWALL_GATE|MOBILE_AFWALL_GATE|ENABLE_)' "$ROOT/config.sh"; then fail "legacy/internal variables exposed in config.sh"; fi
 if grep -E 'diagnose_and_fail_closed|auto_unblock|fail_closed|release_on_restore' "$ROOT/config.sh" "$ROOT/README.md" "$ROOT/ADVANCED.md"; then fail "old policy values exposed in config/docs"; fi
-pass "v4.0.0 config surface"
+pass "active release config surface"
 
 # Config derivation and unsupported legacy variables.
 TMP="${TMPDIR:-/tmp}/aba-test-$$"
@@ -202,8 +206,8 @@ load_config
 [ "$LOWLEVEL_MODE" = strict ] || fail "RADIO_SUPPRESSION=strict did not derive strict lowlevel"
 [ "$VPN_LOCKDOWN_BOOT_ENFORCE" = 1 ] || fail "VPN restore mode did not enable boot enforcement"
 [ -z "${TIMEOUT_POLICY+x}" ] || fail "legacy TIMEOUT_POLICY still set after load"
-grep -q 'unsupported legacy variable ignored in v4.0.0: TIMEOUT_POLICY' "$LOG_FILE" || fail "legacy TIMEOUT_POLICY warning missing"
-grep -q 'unsupported legacy variable ignored in v4.0.0: AFWALL_READY_REQUIRE_UNLOCK' "$LOG_FILE" || fail "legacy readiness warning missing"
+grep -q "unsupported legacy variable ignored in ${expected_version}: TIMEOUT_POLICY" "$LOG_FILE" || fail "legacy TIMEOUT_POLICY warning missing"
+grep -q "unsupported legacy variable ignored in ${expected_version}: AFWALL_READY_REQUIRE_UNLOCK" "$LOG_FILE" || fail "legacy readiness warning missing"
 pass "config derivation and legacy ignore"
 
 # AFWall package detection must include donate, current free, and legacy IDs.
@@ -225,7 +229,7 @@ done
 pass "AFWall package candidates"
 
 # External legacy paths are mentioned as ignored, never sourced by installer/common.
-grep -q 'legacy external config path ignored in v4.0.0' "$ROOT/bin/common.sh" || fail "runtime legacy path ignore missing"
+grep -q "legacy external config path ignored in ${expected_version}" "$ROOT/bin/common.sh" || fail "runtime legacy path ignore missing"
 if grep -q 'ic_parse_external_config\|ic_load_existing_config\|_IC_INSTALLER_CFG\|_IC_PERSISTENT_CFG' "$ROOT/bin/installer_config.sh"; then fail "installer still has external config preservation/parser"; fi
 grep -q 'config.local.sh' "$ROOT/bin/installer_config.sh" || fail "installer does not write module-local config.local.sh"
 pass "external config ignored"
