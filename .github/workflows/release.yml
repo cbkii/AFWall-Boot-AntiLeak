@@ -232,7 +232,7 @@ jobs:
           RELEASE_TAG="${{ steps.tag.outputs.release_tag }}"
           RELEASE_VERSION="${{ steps.tag.outputs.release_version }}"
 
-          tools/sync-version-metadata.py "$RELEASE_VERSION" "$RELEASE_TAG"
+          python3 tools/sync-version-metadata.py "$RELEASE_VERSION" "$RELEASE_TAG"
 
           git add module.prop update.json bin/common.sh bin/lowlevel.sh bin/installer_config.sh config.sh common/install.sh reconfigure.sh service.sh README.md ADVANCED.md
           if git diff --cached --quiet; then
@@ -248,7 +248,7 @@ jobs:
           BRANCH="$(git symbolic-ref --short -q HEAD || true)"
           VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           VERSION_CODE="$(grep '^versionCode=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
-          tools/sync-version-metadata.py "$VERSION" "$VERSION_CODE"
+          python3 tools/sync-version-metadata.py "$VERSION" "$VERSION_CODE"
 
           if git diff --quiet -- module.prop update.json bin/common.sh bin/lowlevel.sh bin/installer_config.sh config.sh common/install.sh reconfigure.sh service.sh README.md ADVANCED.md; then
             echo "release metadata already in sync with module.prop."
