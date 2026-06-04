@@ -30,6 +30,27 @@ if find "$ROOT" -path "$ROOT/.git" -prune -o -type f ! -path "$ROOT/tools/mock-l
 fi
 pass "active release metadata consistency"
 
+# Release metadata synchroniser must bump exact active version text and not rewrite unrelated versions in docs.
+SYNC_TMP="${TMPDIR:-/tmp}/aba-sync-test-$$"
+rm -rf "$SYNC_TMP"
+mkdir -p "$SYNC_TMP"
+(
+  cd "$ROOT"
+  tar --exclude='.git' --exclude='dist' --exclude='tools/__pycache__' -cf - .
+) | (cd "$SYNC_TMP" && tar -xf -)
+printf '\nUnrelated external reference v9.9.9 must remain unchanged.\n' >> "$SYNC_TMP/README.md"
+python3 "$SYNC_TMP/tools/sync-version-metadata.py" v4.0.2 40002
+_tmp_version="$(grep '^version=' "$SYNC_TMP/module.prop" | cut -d= -f2 | tr -d '[:space:]')"
+_tmp_code="$(grep '^versionCode=' "$SYNC_TMP/module.prop" | cut -d= -f2 | tr -d '[:space:]')"
+[ "$_tmp_version" = v4.0.2 ] || fail "sync-version-metadata did not update module.prop version"
+[ "$_tmp_code" = 40002 ] || fail "sync-version-metadata did not update module.prop versionCode"
+grep -q '"version": "v4.0.2"' "$SYNC_TMP/update.json" || fail "sync-version-metadata did not update update.json version"
+grep -q '"versionCode": 40002' "$SYNC_TMP/update.json" || fail "sync-version-metadata did not update update.json versionCode"
+grep -q 'MODULE_VERSION="v4.0.2"' "$SYNC_TMP/bin/common.sh" || fail "sync-version-metadata did not update MODULE_VERSION"
+grep -q 'Unrelated external reference v9.9.9 must remain unchanged' "$SYNC_TMP/README.md" || fail "sync-version-metadata rewrote unrelated doc version reference"
+rm -rf "$SYNC_TMP"
+pass "release metadata synchroniser"
+
 # Repository text must not contain the early-boot parser that this project forbids.
 forbidden="$(printf '\141\167\153')"
 if find "$ROOT" -path "$ROOT/.git" -prune -o -type f ! -path "$ROOT/tools/mock-logic-tests.sh" -exec grep -n "$forbidden" {} + >/dev/null 2>&1; then
