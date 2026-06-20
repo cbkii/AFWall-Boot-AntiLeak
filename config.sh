@@ -11,7 +11,7 @@ LEAK_PROTECTION_MODE=balanced
 # Controls how this module coexists with AFWall's own startup-leak option; leave auto unless you intentionally want to force or disable module blocking. Accepted: auto, prefer_module, prefer_afwall, off.
 INTEGRATION_MODE=auto
 
-# Seconds between AFWall rule-graph checks; lower values react faster but call iptables more often during the short boot handoff. Default: 1.
+# Seconds between AFWall rule-graph checks; lower values react faster but call iptables more often during the short boot handoff. Default: 2.
 POLL_INTERVAL_SECS=2
 
 # Stable seconds needed for a quick release when the rooted graph also has a strong/dense corroborating signal. Default: 2; raise on very slow devices.
@@ -20,10 +20,10 @@ FAST_STABLE_SECS=2
 # Stable seconds needed when the rooted graph alone proves handoff; this prevents releasing during AFWall rule churn without making unlock mandatory. Default: 6.
 SLOW_STABLE_SECS=6
 
-# Maximum seconds from service start before watchdog action; block is safest, unblock is easier to recover. Default: 180.
+# Maximum seconds from service start before watchdog action; block is safest, unblock is easier to recover. Default: 300.
 WATCHDOG_SERVICE_SECS=300
 
-# Maximum seconds after Android reports boot complete before watchdog action; useful when the service started early but AFWall never appears. Default: 120.
+# Maximum seconds after Android reports boot complete before watchdog action; useful when the service started early but AFWall never appears. Default: 240.
 WATCHDOG_BOOT_COMPLETED_SECS=240
 
 # What to do when proof never arrives: block keeps unresolved protection and logs diagnostics; unblock is recovery-only and may expose traffic without proven AFWall readiness. Accepted: block, unblock. Default: block.
@@ -68,13 +68,13 @@ TRANSPORT_INCONCLUSIVE_SECS=20
 # Advanced: shorter post-boot inconclusive window for transport restore retries. Default: 8.
 TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT=8
 
-# Advanced: seconds between firewall integrity repairs while a family blackout is still active. Default: 5.
+# Advanced: seconds between firewall integrity repairs while a family blackout is still active. Default: 10.
 BLACKOUT_REASSERT_INTERVAL=10
 
-# Advanced: seconds between lower-layer radio/service suppression reassertions while restore is pending. Default: 10.
+# Advanced: seconds between lower-layer radio/service suppression reassertions while restore is pending. Default: 15.
 RADIO_REASSERT_INTERVAL=15
 
-# Advanced: seconds between unlock-confidence diagnostic probes; unlock never gates family release. Default: 5.
+# Advanced: seconds between unlock-confidence diagnostic probes; unlock never gates family release. Default: 10.
 UNLOCK_POLL_INTERVAL=10
 
 # Advanced: minimum rule count in AFWall's main chain used as a dense-graph accelerator, not a mandatory gate. Default: 3.

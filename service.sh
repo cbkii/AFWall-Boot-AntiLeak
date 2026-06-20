@@ -641,9 +641,10 @@ MODDIR="${0%/*}"
           if [ "$_m_absent_elapsed" -ge "$_m_absent_threshold" ]; then
             if [ "$_boot_complete_now" != "1" ]; then
               debug_log "service: mobile fallback ready but restore deferred until boot_complete"
-            elif [ "$device_unlocked" != "1" ]; then
-              debug_log "service: mobile fallback ready but deferred until unlock (weak path)"
             else
+              # AFWall family handoff and boot-complete are the authoritative safety
+              # conditions. Unlock confidence is diagnostic-only and must not deadlock
+              # restoration (it has produced false positives/negatives on Android 16).
               if [ "$_mobile_in_snap" = "1" ]; then
                 log "service: mobile transport accepted via unreachable-stable fallback after ${_m_absent_elapsed}s (subtree present but unreachable from AFWall graph); attempting restore"
               else
@@ -668,9 +669,8 @@ MODDIR="${0%/*}"
         if [ "$_m_pending_elapsed" -ge "$_m_pending_threshold" ]; then
           if [ "$_boot_complete_now" != "1" ]; then
             debug_log "service: mobile inconclusive-time fallback deferred until boot_complete"
-          elif [ "$device_unlocked" != "1" ]; then
-            debug_log "service: mobile inconclusive-time fallback deferred until unlock (weak path)"
           else
+            # Do not let unreliable unlock diagnostics hold a verified restore forever.
             log "service: mobile transport inconclusive for ${_m_pending_elapsed}s (in_snap=${_mobile_in_snap} reachable=${_mobile_reachable}); forcing verified restore attempt"
             if lowlevel_restore_mobile_data_if_allowed; then
               mobile_done=1

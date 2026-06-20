@@ -15,14 +15,29 @@ _ic_print() {
     esac
 }
 
+ic_cleanup_legacy_config_files() {
+    local legacy
+    for legacy in \
+        "${_IC_LEGACY_DATA}/config.sh" \
+        "${_IC_LEGACY_DATA}/installer.cfg"; do
+        [ -e "$legacy" ] || continue
+        if rm -f "$legacy" 2>/dev/null; then
+            _ic_print "  Removed ignored legacy config: $legacy"
+        else
+            _ic_print "  WARNING: Could not remove ignored legacy config: $legacy"
+        fi
+    done
+    return 0
+}
+
 ic_apply_defaults() {
     IC_LEAK_PROTECTION_MODE=balanced
     IC_INTEGRATION_MODE=auto
-    IC_POLL_INTERVAL_SECS=1
+    IC_POLL_INTERVAL_SECS=2
     IC_FAST_STABLE_SECS=2
     IC_SLOW_STABLE_SECS=6
-    IC_WATCHDOG_SERVICE_SECS=180
-    IC_WATCHDOG_BOOT_COMPLETED_SECS=120
+    IC_WATCHDOG_SERVICE_SECS=300
+    IC_WATCHDOG_BOOT_COMPLETED_SECS=240
     IC_WATCHDOG_POLICY=block
     IC_BLOCK_FORWARD=1
     IC_BLOCK_INPUT=0
@@ -36,9 +51,9 @@ ic_apply_defaults() {
     IC_TRANSPORT_ORPHAN_STABLE_SECS=3
     IC_TRANSPORT_INCONCLUSIVE_SECS=20
     IC_TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT=8
-    IC_BLACKOUT_REASSERT_INTERVAL=5
-    IC_RADIO_REASSERT_INTERVAL=10
-    IC_UNLOCK_POLL_INTERVAL=5
+    IC_BLACKOUT_REASSERT_INTERVAL=10
+    IC_RADIO_REASSERT_INTERVAL=15
+    IC_UNLOCK_POLL_INTERVAL=10
     IC_AFWALL_RULE_DENSITY_MIN=3
 }
 
@@ -281,8 +296,8 @@ ic_run_config_selection() {
     ic_apply_defaults
     _ic_print ""
     _ic_print "  v4.1.0 is a breaking config cleanup release."
-    _ic_print "  Old external config paths are ignored; recreate settings in config.local.sh."
-    [ -f "${_IC_LEGACY_DATA}/config.sh" ] && _ic_print "  WARNING: legacy external config ignored: ${_IC_LEGACY_DATA}/config.sh"
+    _ic_print "  Old external config paths are never sourced and are removed after a successful write."
+    [ -f "${_IC_LEGACY_DATA}/config.sh" ] && _ic_print "  Legacy external config scheduled for cleanup: ${_IC_LEGACY_DATA}/config.sh"
     [ -f "${_IC_LEGACY_DATA}/installer.cfg" ] && _ic_print "  WARNING: legacy external installer config ignored: ${_IC_LEGACY_DATA}/installer.cfg"
     ic_detect_keys
     _ic_select_profile
@@ -290,5 +305,9 @@ ic_run_config_selection() {
     ic_apply_auto_vpn_defaults
     ic_render_summary
     _ic_print "  Writing module-local config: $dest"
-    ic_write_config "$dest"
+    if ic_write_config "$dest"; then
+        ic_cleanup_legacy_config_files
+        return 0
+    fi
+    return 1
 }

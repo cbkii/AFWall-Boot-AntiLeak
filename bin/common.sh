@@ -190,20 +190,20 @@ derive_internal_config() {
   esac
 
   # Numeric config with defaults.
-  POLL_INTERVAL_SECS="$(_config_uint_or_default "${POLL_INTERVAL_SECS:-1}" 1 POLL_INTERVAL_SECS)"
+  POLL_INTERVAL_SECS="$(_config_uint_or_default "${POLL_INTERVAL_SECS:-2}" 2 POLL_INTERVAL_SECS)"
   [ "$POLL_INTERVAL_SECS" = "0" ] && { _config_warn "config: POLL_INTERVAL_SECS=0 is too aggressive; using 1"; POLL_INTERVAL_SECS=1; }
   FAST_STABLE_SECS="$(_config_uint_or_default "${FAST_STABLE_SECS:-2}" 2 FAST_STABLE_SECS)"
   SLOW_STABLE_SECS="$(_config_uint_or_default "${SLOW_STABLE_SECS:-6}" 6 SLOW_STABLE_SECS)"
-  WATCHDOG_SERVICE_SECS="$(_config_uint_or_default "${WATCHDOG_SERVICE_SECS:-180}" 180 WATCHDOG_SERVICE_SECS)"
-  WATCHDOG_BOOT_COMPLETED_SECS="$(_config_uint_or_default "${WATCHDOG_BOOT_COMPLETED_SECS:-120}" 120 WATCHDOG_BOOT_COMPLETED_SECS)"
+  WATCHDOG_SERVICE_SECS="$(_config_uint_or_default "${WATCHDOG_SERVICE_SECS:-300}" 300 WATCHDOG_SERVICE_SECS)"
+  WATCHDOG_BOOT_COMPLETED_SECS="$(_config_uint_or_default "${WATCHDOG_BOOT_COMPLETED_SECS:-240}" 240 WATCHDOG_BOOT_COMPLETED_SECS)"
   TRANSPORT_ABSENCE_STABLE_SECS="$(_config_uint_or_default "${TRANSPORT_ABSENCE_STABLE_SECS:-3}" 3 TRANSPORT_ABSENCE_STABLE_SECS)"
   TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT="$(_config_uint_or_default "${TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT:-2}" 2 TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT)"
   TRANSPORT_ORPHAN_STABLE_SECS="$(_config_uint_or_default "${TRANSPORT_ORPHAN_STABLE_SECS:-3}" 3 TRANSPORT_ORPHAN_STABLE_SECS)"
   TRANSPORT_INCONCLUSIVE_SECS="$(_config_uint_or_default "${TRANSPORT_INCONCLUSIVE_SECS:-20}" 20 TRANSPORT_INCONCLUSIVE_SECS)"
   TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT="$(_config_uint_or_default "${TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT:-8}" 8 TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT)"
-  BLACKOUT_REASSERT_INTERVAL="$(_config_uint_or_default "${BLACKOUT_REASSERT_INTERVAL:-5}" 5 BLACKOUT_REASSERT_INTERVAL)"
-  RADIO_REASSERT_INTERVAL="$(_config_uint_or_default "${RADIO_REASSERT_INTERVAL:-10}" 10 RADIO_REASSERT_INTERVAL)"
-  UNLOCK_POLL_INTERVAL="$(_config_uint_or_default "${UNLOCK_POLL_INTERVAL:-5}" 5 UNLOCK_POLL_INTERVAL)"
+  BLACKOUT_REASSERT_INTERVAL="$(_config_uint_or_default "${BLACKOUT_REASSERT_INTERVAL:-10}" 10 BLACKOUT_REASSERT_INTERVAL)"
+  RADIO_REASSERT_INTERVAL="$(_config_uint_or_default "${RADIO_REASSERT_INTERVAL:-15}" 15 RADIO_REASSERT_INTERVAL)"
+  UNLOCK_POLL_INTERVAL="$(_config_uint_or_default "${UNLOCK_POLL_INTERVAL:-10}" 10 UNLOCK_POLL_INTERVAL)"
   AFWALL_RULE_DENSITY_MIN="$(_config_uint_or_default "${AFWALL_RULE_DENSITY_MIN:-3}" 3 AFWALL_RULE_DENSITY_MIN)"
 
   BLOCK_FORWARD_EFFECTIVE="$(_config_bool "${BLOCK_FORWARD:-1}")"
@@ -1730,6 +1730,9 @@ cleanup_legacy() {
   local phase="${1:-unknown}"
   log "cleanup_legacy: phase=$phase"
   local f
+
+  # v1.x module-owned afwallstart hooks. Require an AntiLeak marker so an
+  # AFWall-owned startup script is never removed by name alone.
   for f in \
     "/data/adb/service.d/afwallstart" \
     "/data/adb/post-fs-data.d/afwallstart" \
@@ -1739,6 +1742,30 @@ cleanup_legacy() {
         "$f" 2>/dev/null; then
       rm -f "$f" 2>/dev/null || true
       log "cleanup: removed legacy $f"
+    fi
+  done
+
+  # Older MMT packaging copied the Magisk Action hook into service.d/action.sh.
+  # It is not a boot service and cannot resolve the module library from there.
+  for f in \
+    "/data/adb/service.d/action.sh" \
+    "/data/adb/service.d/AFWall-Boot-AntiLeak-action.sh"; do
+    [ -f "$f" ] || continue
+    if grep -qE 'AFWall Boot AntiLeak|write_manual_override|recover_connectivity.*action' \
+        "$f" 2>/dev/null; then
+      rm -f "$f" 2>/dev/null || true
+      log "cleanup: removed obsolete module Action copy $f"
+    fi
+  done
+
+  # v4.1.0 runtime config has only two possible sources, both module-local:
+  # config.sh and optional config.local.sh. These external files are ignored.
+  for f in "${MODULE_DATA}/config.sh" "${MODULE_DATA}/installer.cfg"; do
+    [ -e "$f" ] || continue
+    if rm -f "$f" 2>/dev/null; then
+      log "cleanup: removed ignored legacy config $f"
+    else
+      log "cleanup: WARN: could not remove ignored legacy config $f"
     fi
   done
   return 0

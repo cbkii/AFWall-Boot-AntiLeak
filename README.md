@@ -1,6 +1,6 @@
 # AFWall Boot AntiLeak
 
-> **v4.1.0 breaking config cleanup:** clean uninstall/reboot/reinstall is recommended when upgrading from older versions. Runtime config is module-local only (`config.sh` plus optional `config.local.sh`); old `/data/adb/AFWall-Boot-AntiLeak/config.sh` and `installer.cfg` files are ignored.
+> **v4.1.0 breaking config cleanup:** clean uninstall/reboot/reinstall is recommended when upgrading from older versions. Runtime config is module-local only (`config.sh` plus optional `config.local.sh`); old `/data/adb/AFWall-Boot-AntiLeak/config.sh` and `installer.cfg` files are never sourced and are removed after a successful configuration write or first-boot cleanup.
 
 AFWall Boot AntiLeak is a Magisk module that closes the boot-time network leak window before [AFWall+](https://github.com/ukanth/afwall) has finished applying its rules.
 
@@ -133,18 +133,18 @@ Runtime configuration has a single source of truth inside the installed module d
 /data/adb/modules/AFWall-Boot-AntiLeak/config.local.sh   # optional local override
 ```
 
-Old external paths such as `/data/adb/AFWall-Boot-AntiLeak/config.sh` and `/data/adb/AFWall-Boot-AntiLeak/installer.cfg` are **ignored** in v4.1.0. They are not sourced or migrated; recreate settings manually in module-local `config.local.sh`.
+Old external paths such as `/data/adb/AFWall-Boot-AntiLeak/config.sh` and `/data/adb/AFWall-Boot-AntiLeak/installer.cfg` are never sourced. A successful install/reconfiguration and first-boot cleanup remove them; recreate needed settings in module-local `config.local.sh`.
 
 Beginner-facing options:
 
 | Option | Default | Meaning |
 |---|---:|---|
 | `LEAK_PROTECTION_MODE` | `balanced` | `strict`, `balanced`, or `recovery_friendly`. |
-| `POLL_INTERVAL_SECS` | `1` | Snapshot loop interval. |
+| `POLL_INTERVAL_SECS` | `2` | Snapshot loop interval. |
 | `FAST_STABLE_SECS` | `2` | Stable window with corroboration/dense graph. |
 | `SLOW_STABLE_SECS` | `6` | Stable rooted-graph window without corroboration. |
-| `WATCHDOG_SERVICE_SECS` | `180` | Absolute watchdog from service start. |
-| `WATCHDOG_BOOT_COMPLETED_SECS` | `120` | Absolute watchdog from first `sys.boot_completed=1`. |
+| `WATCHDOG_SERVICE_SECS` | `300` | Absolute watchdog from service start. |
+| `WATCHDOG_BOOT_COMPLETED_SECS` | `240` | Absolute watchdog from first `sys.boot_completed=1`. |
 | `WATCHDOG_POLICY` | `block` | `block` keeps unresolved protection and logs diagnostics; `unblock` removes module suppression for recovery. |
 | `BLOCK_FORWARD` | `1` | Temporarily block tethered-client FORWARD traffic. |
 | `BLOCK_INPUT` | `0` | Optional inbound INPUT blackout. |
@@ -249,7 +249,7 @@ Troubleshooting details are in [ADVANCED.md → Troubleshooting](ADVANCED.md#tro
 
 | Path | Purpose |
 |---|---|
-| `/data/adb/AFWall-Boot-AntiLeak/config.sh` | Legacy external config; ignored if present. |
+| `/data/adb/AFWall-Boot-AntiLeak/config.sh` | Legacy external config; never sourced and removed by install/boot cleanup. |
 | `/data/adb/AFWall-Boot-AntiLeak/logs/boot.log` | Current boot log. |
 | `/data/adb/AFWall-Boot-AntiLeak/state/` | Current boot state files. |
 | `/data/adb/modules/AFWall-Boot-AntiLeak/action.sh` | Manual recovery action. |

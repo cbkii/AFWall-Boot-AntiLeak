@@ -262,7 +262,11 @@ for i in $(find $MODPATH -type f -name "*.sh" -o -name "*.prop" -o -name "*.rule
   [ -f $i ] && { sed -i -e "/^#/d" -e "/^ *$/d" $i; [ "$(tail -1 $i)" ] && echo "" >> $i; } || continue
   case $i in
     "$MODPATH/boot-completed.sh") install_script -b $i;;
-    "$MODPATH/action.sh") install_script $i;;
+    "$MODPATH/action.sh")
+      # Magisk reads action.sh from the module directory. It is not a service.d
+      # boot hook; copying it there makes a recovery action execute every boot.
+      [ "$(head -n1 "$i" 2>/dev/null)" = "#!/system/bin/sh" ] || sed -i "1i #!/system/bin/sh" "$i"
+      ;;
     "$MODPATH/service.sh") install_script -l $i;;
     "$MODPATH/post-fs-data.sh") install_script -p $i;;
     "$MODPATH/uninstall.sh") if [ -s $INFO ] || [ "$(head -n1 $MODPATH/uninstall.sh)" != "# Don't modify anything after this" ]; then                          

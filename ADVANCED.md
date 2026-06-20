@@ -241,7 +241,7 @@ Runtime config is module-local only:
 /data/adb/modules/AFWall-Boot-AntiLeak/config.local.sh
 ```
 
-Legacy `/data/adb/AFWall-Boot-AntiLeak/config.sh` and `/data/adb/AFWall-Boot-AntiLeak/installer.cfg` are ignored and logged. They are not sourced or migrated in v4.1.0; recreate needed settings manually in module-local `config.local.sh`.
+Legacy `/data/adb/AFWall-Boot-AntiLeak/config.sh` and `/data/adb/AFWall-Boot-AntiLeak/installer.cfg` are never sourced. A successful install/reconfiguration and first-boot cleanup remove them; recreate needed settings in module-local `config.local.sh`.
 
 Beginner options are grouped in `config.sh`: safety mode, release timing/watchdogs, boot suppression, AFWall package, VPN handling, and advanced/debug. Old timeout/readiness variables are unsupported in v4.1.0 and are ignored if present in `config.local.sh`.
 
@@ -269,10 +269,10 @@ FORWARD protection is active only when the module chain exists, the DROP rule ex
 | `BLOCK_FORWARD` | `1` | Temporary FORWARD blackout for tethered clients. |
 | `BLOCK_INPUT` | `0` | Optional temporary INPUT blackout; loopback stays exempt. |
 | `RADIO_SUPPRESSION` | `off` | Optional lower-layer suppression: `off`, `safe`, or `strict`. |
-| `WATCHDOG_SERVICE_SECS` | `180` | Absolute watchdog from service start. |
-| `WATCHDOG_BOOT_COMPLETED_SECS` | `120` | Absolute watchdog from first `sys.boot_completed=1`. |
+| `WATCHDOG_SERVICE_SECS` | `300` | Absolute watchdog from service start. |
+| `WATCHDOG_BOOT_COMPLETED_SECS` | `240` | Absolute watchdog from first `sys.boot_completed=1`. |
 | `WATCHDOG_POLICY` | `block` | `block` keeps unresolved protection and logs diagnostics; `unblock` removes module suppression for recovery. |
-| `POLL_INTERVAL_SECS` | `1` | Main snapshot poll interval. |
+| `POLL_INTERVAL_SECS` | `2` | Main snapshot poll interval. |
 | `FAST_STABLE_SECS` | `2` | Fast-path rooted graph stability window when corroboration exists. |
 | `SLOW_STABLE_SECS` | `6` | Conservative rooted graph stability window without mandatory corroboration. |
 | `AFWALL_PACKAGE` | `auto` | AFWall package hint: `auto`, free, donate, or legacy package. |
@@ -284,9 +284,9 @@ FORWARD protection is active only when the module chain exists, the DROP rule ex
 | `TRANSPORT_ORPHAN_STABLE_SECS` | `3` | Advanced orphan/unreachable transport fallback window. |
 | `TRANSPORT_INCONCLUSIVE_SECS` | `20` | Advanced inconclusive transport restore retry window. |
 | `TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT` | `8` | Advanced shorter post-boot inconclusive window. |
-| `RADIO_REASSERT_INTERVAL` | `10` | Seconds between lower-layer suppression reassertions. |
-| `BLACKOUT_REASSERT_INTERVAL` | `5` | Seconds between blackout integrity repair checks. |
-| `UNLOCK_POLL_INTERVAL` | `5` | Seconds between unlock-confidence diagnostic probes. |
+| `RADIO_REASSERT_INTERVAL` | `15` | Seconds between lower-layer suppression reassertions. |
+| `BLACKOUT_REASSERT_INTERVAL` | `10` | Seconds between blackout integrity repair checks. |
+| `UNLOCK_POLL_INTERVAL` | `10` | Seconds between unlock-confidence diagnostic probes. |
 | `AFWALL_RULE_DENSITY_MIN` | `3` | Dense graph accelerator threshold; not a mandatory release gate. |
 
 ### Diagnostics and behaviour flags
