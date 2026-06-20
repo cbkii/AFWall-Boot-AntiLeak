@@ -40,7 +40,7 @@ MODDIR="${0%/*}"
   # load_config/derive_internal_config in bin/common.sh owns validation and
   # internal mapping.  Keep service local defaults only for timing values that
   # may be absent if config.sh is missing.
-  POLL_INTERVAL_SECS="${POLL_INTERVAL_SECS:-2}"
+  POLL_INTERVAL_SECS="${POLL_INTERVAL_SECS:-1}"
   FAST_STABLE_SECS="${FAST_STABLE_SECS:-2}"
   SLOW_STABLE_SECS="${SLOW_STABLE_SECS:-6}"
   TRANSPORT_ABSENCE_STABLE_SECS="${TRANSPORT_ABSENCE_STABLE_SECS:-3}"
@@ -48,12 +48,12 @@ MODDIR="${0%/*}"
   TRANSPORT_ORPHAN_STABLE_SECS="${TRANSPORT_ORPHAN_STABLE_SECS:-3}"
   TRANSPORT_INCONCLUSIVE_SECS="${TRANSPORT_INCONCLUSIVE_SECS:-20}"
   TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT="${TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT:-8}"
-  WATCHDOG_SERVICE_SECS="${WATCHDOG_SERVICE_SECS:-300}"
-  WATCHDOG_BOOT_COMPLETED_SECS="${WATCHDOG_BOOT_COMPLETED_SECS:-240}"
+  WATCHDOG_SERVICE_SECS="${WATCHDOG_SERVICE_SECS:-180}"
+  WATCHDOG_BOOT_COMPLETED_SECS="${WATCHDOG_BOOT_COMPLETED_SECS:-120}"
   WATCHDOG_POLICY="${WATCHDOG_POLICY:-block}"
-  RADIO_REASSERT_INTERVAL="${RADIO_REASSERT_INTERVAL:-15}"
-  BLACKOUT_REASSERT_INTERVAL="${BLACKOUT_REASSERT_INTERVAL:-10}"
-  UNLOCK_POLL_INTERVAL="${UNLOCK_POLL_INTERVAL:-10}"
+  RADIO_REASSERT_INTERVAL="${RADIO_REASSERT_INTERVAL:-10}"
+  BLACKOUT_REASSERT_INTERVAL="${BLACKOUT_REASSERT_INTERVAL:-5}"
+  UNLOCK_POLL_INTERVAL="${UNLOCK_POLL_INTERVAL:-5}"
   AFWALL_RULE_DENSITY_MIN="${AFWALL_RULE_DENSITY_MIN:-3}"
   FAMILY_FAST_SECS_POST_BOOT_EFFECTIVE="${FAMILY_FAST_SECS_POST_BOOT_EFFECTIVE:-$FAST_STABLE_SECS}"
   FAMILY_SLOW_SECS_POST_BOOT_EFFECTIVE="${FAMILY_SLOW_SECS_POST_BOOT_EFFECTIVE:-$SLOW_STABLE_SECS}"
@@ -343,8 +343,8 @@ MODDIR="${0%/*}"
   unlock_ts=0
   timeout_start_ts="$START_TS"  # legacy diagnostic only; watchdogs are absolute
   timeout_deadline_ts=0
-  WATCHDOG_SERVICE_SECS="${WATCHDOG_SERVICE_SECS:-300}"
-  WATCHDOG_BOOT_COMPLETED_SECS="${WATCHDOG_BOOT_COMPLETED_SECS:-240}"
+  WATCHDOG_SERVICE_SECS="${WATCHDOG_SERVICE_SECS:-180}"
+  WATCHDOG_BOOT_COMPLETED_SECS="${WATCHDOG_BOOT_COMPLETED_SECS:-120}"
   watchdog_service_start_last_ts=0
   watchdog_boot_start_ts=0
   watchdog_boot_completed_last_ts=0
@@ -411,7 +411,7 @@ MODDIR="${0%/*}"
     elif output_block_present_v4; then
       log "service: ${context} v4 pre-remove integrity: block partially present (degraded)"
     else
-      log "service: INTEGRITY FAILURE: ${context} v4 block already absent before intentional removal; release accounting is invalid"
+      log "service: ${context} v4 pre-remove integrity: ERROR: block already absent before intentional removal"
     fi
     log_blackout_integrity "v4" "${context}_pre_remove"
   }
@@ -423,7 +423,7 @@ MODDIR="${0%/*}"
     elif output_block_present_v6; then
       log "service: ${context} v6 pre-remove integrity: block partially present (degraded)"
     else
-      log "service: INTEGRITY FAILURE: ${context} v6 block already absent before intentional removal; release accounting is invalid"
+      log "service: ${context} v6 pre-remove integrity: ERROR: block already absent before intentional removal"
     fi
     log_blackout_integrity "v6" "${context}_pre_remove"
   }
@@ -511,20 +511,15 @@ MODDIR="${0%/*}"
         if [ "$wifi_absent_since" != "0" ] && [ "$now_ts" != "0" ]; then
           local _w_absent_elapsed _w_absent_threshold
           _w_absent_elapsed=$((now_ts - wifi_absent_since))
-          if [ "$_wifi_in_snap" = "1" ]; then
-            _w_absent_threshold="${TRANSPORT_ORPHAN_STABLE_SECS:-$TRANSPORT_ABSENCE_STABLE_SECS}"
-          elif [ "$_boot_complete_now" = "1" ]; then
-            _w_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT"
-          else
-            _w_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS"
-          fi
+          _w_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS"
+          [ "$_wifi_in_snap" = "1" ] && _w_absent_threshold="${TRANSPORT_ORPHAN_STABLE_SECS:-$TRANSPORT_ABSENCE_STABLE_SECS}"
+          [ "$_boot_complete_now" = "1" ] && _w_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT"
           if [ "$_w_absent_elapsed" -ge "$_w_absent_threshold" ]; then
             if [ "$_boot_complete_now" != "1" ]; then
               debug_log "service: wifi fallback ready but restore deferred until boot_complete"
+            elif [ "$device_unlocked" != "1" ]; then
+              debug_log "service: wifi fallback ready but deferred until unlock (weak path)"
             else
-              # AFWall family handoff and boot-complete are the authoritative safety
-              # conditions. Unlock confidence is diagnostic-only and must not deadlock
-              # restoration (it has produced false positives/negatives on Android 16).
               if [ "$_wifi_in_snap" = "1" ]; then
                 log "service: wifi transport accepted via unreachable-stable fallback after ${_w_absent_elapsed}s (subtree present but unreachable from AFWall graph); attempting restore"
               else
@@ -553,8 +548,9 @@ MODDIR="${0%/*}"
         if [ "$_w_pending_elapsed" -ge "$_w_pending_threshold" ]; then
           if [ "$_boot_complete_now" != "1" ]; then
             debug_log "service: wifi inconclusive-time fallback deferred until boot_complete"
+          elif [ "$device_unlocked" != "1" ]; then
+            debug_log "service: wifi inconclusive-time fallback deferred until unlock (weak path)"
           else
-            # Do not let unreliable unlock diagnostics hold a verified restore forever.
             log "service: wifi transport inconclusive for ${_w_pending_elapsed}s (in_snap=${_wifi_in_snap} reachable=${_wifi_reachable}); forcing verified restore attempt"
             if lowlevel_restore_wifi_if_allowed; then
               wifi_done=1
@@ -631,13 +627,9 @@ MODDIR="${0%/*}"
         if [ "$mobile_absent_since" != "0" ] && [ "$now_ts" != "0" ]; then
           local _m_absent_elapsed _m_absent_threshold
           _m_absent_elapsed=$((now_ts - mobile_absent_since))
-          if [ "$_mobile_in_snap" = "1" ]; then
-            _m_absent_threshold="${TRANSPORT_ORPHAN_STABLE_SECS:-$TRANSPORT_ABSENCE_STABLE_SECS}"
-          elif [ "$_boot_complete_now" = "1" ]; then
-            _m_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT"
-          else
-            _m_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS"
-          fi
+          _m_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS"
+          [ "$_mobile_in_snap" = "1" ] && _m_absent_threshold="${TRANSPORT_ORPHAN_STABLE_SECS:-$TRANSPORT_ABSENCE_STABLE_SECS}"
+          [ "$_boot_complete_now" = "1" ] && _m_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT"
           if [ "$_m_absent_elapsed" -ge "$_m_absent_threshold" ]; then
             if [ "$_boot_complete_now" != "1" ]; then
               debug_log "service: mobile fallback ready but restore deferred until boot_complete"
