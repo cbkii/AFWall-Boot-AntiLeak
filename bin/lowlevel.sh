@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v4.1.0 - Lower-layer suppression subsystem
+# AFWall Boot AntiLeak v4.2.0 - Lower-layer suppression subsystem
 # POSIX/ash compatible. No bashisms. Sourced by common.sh; do not execute directly.
 #
 # PURPOSE
@@ -582,7 +582,7 @@ lowlevel_restore_bluetooth() {
 #   - During transport restore (after AFWall takeover), disable lockdown again
 #     for the currently active provider and restore pre-boot always-on state.
 #
-# Internal behaviour is derived from v4.1.0 VPN_LOCKDOWN_MODE and
+# Internal behaviour is derived from v4.2.0 VPN_LOCKDOWN_MODE and
 # VPN_PROVIDER_PACKAGES in bin/common.sh; these are not user-facing knobs here.
 
 _ll_split_words() {
@@ -667,21 +667,17 @@ lowlevel_vpn_lockdown_enforce() {
   local pkgs pkg active
   pkgs=""
   active="$(_ll_vpn_get_active_pkg)"
-  [ -n "$active" ] && pkgs="$pkgs $active"
 
+  # Restore mode is explicitly opt-in and single-provider. Prefer an explicit
+  # package, otherwise the already-selected always-on provider. Never scan or
+  # replace all installed VPN providers during normal preserve/default handling.
   if [ -n "${VPN_LOCKDOWN_PROVIDER_PACKAGES:-}" ]; then
-    while IFS= read -r pkg; do
-      [ -n "$pkg" ] && pkgs="$pkgs $pkg"
-    done <<EOF
-$(_ll_split_words "${VPN_LOCKDOWN_PROVIDER_PACKAGES}")
-EOF
+    pkgs="$(_ll_split_words "${VPN_LOCKDOWN_PROVIDER_PACKAGES}" | head -1)"
+  elif [ -n "$active" ]; then
+    pkgs="$active"
+  else
+    pkgs=""
   fi
-
-  while IFS= read -r pkg; do
-    [ -n "$pkg" ] && pkgs="$pkgs $pkg"
-  done <<EOF
-$(_ll_vpn_discover_providers 2>/dev/null)
-EOF
 
   # Deduplicate and enforce lockdown where possible.
   case "$pkgs" in
@@ -692,20 +688,27 @@ EOF
       ;;
   esac
 
-  local seen=" " ok=0
+  local seen=" " ok=0 after_pkg after_lock
   for pkg in $pkgs; do
     case "$seen" in *" $pkg "*) continue ;; esac
     seen="$seen$pkg "
     if cmd connectivity set-always-on-vpn "$pkg" true >/dev/null 2>&1; then
-      log "vpn_lockdown: enabled 'block connections without VPN' for provider $pkg"
-      ok=1
+      after_pkg="$(_ll_vpn_get_active_pkg)"
+      after_lock="$(_ll_vpn_get_lockdown_state)"
+      if [ "$after_pkg" = "$pkg" ] && [ "$after_lock" = "1" ]; then
+        log "vpn_lockdown: restore mode verified always-on+lockdown for provider $pkg"
+        ok=1
+      else
+        log "vpn_lockdown: WARN: restore write for $pkg not verified (active=${after_pkg:-none} lockdown=${after_lock:-unknown})"
+      fi
     else
       debug_log "vpn_lockdown: provider $pkg could not be set always-on+lockdown"
     fi
+    break
   done
 
   if [ "$ok" = "0" ]; then
-    log "vpn_lockdown: WARN: providers discovered/listed but none accepted lockdown command (active=${active:-none} providers='${pkgs}')"
+    log "vpn_lockdown: WARN: provider selected for restore mode but lockdown command was not verified (active=${active:-none} providers='${pkgs}')"
   fi
 }
 
@@ -725,20 +728,19 @@ lowlevel_vpn_lockdown_release_if_needed() {
   current_lock="$(_ll_vpn_get_lockdown_state)"
   log "vpn_lockdown: restore check pre_active=${pre_pkg:-none} pre_lockdown=${pre_lock:-unknown} current_active=${active:-none} current_lockdown=${current_lock:-unknown}"
 
-  if [ -n "$active" ]; then
-    if cmd connectivity set-always-on-vpn "$active" false >/dev/null 2>&1; then
-      log "vpn_lockdown: disabled lockdown for active provider $active during restore"
-    else
-      debug_log "vpn_lockdown: could not disable lockdown for active provider $active"
-    fi
-  fi
-
-  # Restore pre-boot always-on baseline where available.
+  # Restore pre-boot always-on baseline where available. Do not temporarily
+  # disable lockdown for the current provider; make one transactional write back
+  # to the recorded provider/lockdown pair and verify by readback.
   if [ -n "$pre_pkg" ] && [ "$pre_pkg" != "null" ]; then
     case "$pre_lock" in
       1|0)
         if cmd connectivity set-always-on-vpn "$pre_pkg" "$pre_lock" >/dev/null 2>&1; then
-          log "vpn_lockdown: restored pre-boot always-on baseline for $pre_pkg (lockdown=$pre_lock)"
+          active="$(_ll_vpn_get_active_pkg)"; current_lock="$(_ll_vpn_get_lockdown_state)"
+          if [ "$active" = "$pre_pkg" ] && [ "$current_lock" = "$pre_lock" ]; then
+            log "vpn_lockdown: restored and verified pre-boot always-on baseline for $pre_pkg (lockdown=$pre_lock)"
+          else
+            log "vpn_lockdown: WARN: pre-boot restore not verified (want=$pre_pkg/$pre_lock got=${active:-none}/${current_lock:-unknown})"
+          fi
         fi
         ;;
     esac
@@ -810,7 +812,7 @@ lowlevel_prepare_environment_early() {
   local mode="${LOWLEVEL_MODE:-off}"
   _ll_init_dirs
   lowlevel_clear_stale_vpn_state
-  lowlevel_vpn_lockdown_enforce
+  log "vpn_lockdown: post-fs-data observes only; no VPN setting writes in early boot"
   case "$mode" in
     off)
       debug_log "lowlevel_early: LOWLEVEL_MODE=off; lower-layer suppression disabled"
@@ -859,8 +861,7 @@ lowlevel_prepare_environment_early() {
 
   # Framework radio commands are NOT used here; defer to late phase.
   log "lowlevel_early: framework radio disable deferred to late phase (service.sh)"
-  # Best-effort earliest possible VPN lockdown arm (may no-op before framework).
-  lowlevel_vpn_lockdown_enforce
+  # VPN setting writes are intentionally not performed from post-fs-data.
   log "lowlevel_early: done"
 }
 
@@ -997,7 +998,7 @@ device_unlock_state() {
     esac
   fi
 
-  if has_cmd dumpsys; then
+  if [ "${DEBUG:-0}" = "1" ] && has_cmd dumpsys; then
     _du="$(dumpsys user 2>/dev/null | grep -E "UserInfo\{$user:|RUNNING_UNLOCKED|unlock" | head -20)"
     if printf '%s' "$_du" | grep -q 'RUNNING_UNLOCKED\|unlocked=true\|unlockTime'; then
       dumpsys_user="RUNNING_UNLOCKED"
@@ -1020,6 +1021,10 @@ device_unlock_state() {
     elif [ -n "$_tr" ]; then
       trust="seen"
     fi
+  elif [ "${DEBUG:-0}" != "1" ]; then
+    dumpsys_user="debug_only"
+    keyguard="debug_only"
+    trust="debug_only"
   fi
 
   # CE proof: readable current-user CE root plus at least one AFWall/app CE dir
@@ -1089,7 +1094,6 @@ lowlevel_prepare_environment() {
   local mode="${LOWLEVEL_MODE:-off}"
   _ll_init_dirs
   lowlevel_clear_stale_vpn_state
-  lowlevel_vpn_lockdown_enforce
   case "$mode" in
     off)
       debug_log "lowlevel_prepare_environment: LOWLEVEL_MODE=off; lower-layer suppression disabled"

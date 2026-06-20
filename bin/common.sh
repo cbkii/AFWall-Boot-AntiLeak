@@ -1,16 +1,17 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v4.1.0 - Common library
+# AFWall Boot AntiLeak v4.2.0 - Common library
 # POSIX/ash compatible. No bashisms. Sourced by all module scripts; do not
 # execute directly.
 
 # ── Module identity ────────────────────────────────────────────────────────────
 MODULE_ID="AFWall-Boot-AntiLeak"
-MODULE_VERSION="v4.1.0"
+MODULE_VERSION="v4.2.0"
 MODULE_DATA="/data/adb/${MODULE_ID}"
 LOG_DIR="${MODULE_DATA}/logs"
 LOG_FILE="${LOG_DIR}/boot.log"
 STATE_DIR="${MODULE_DATA}/state"
 SERVICE_PID_FILE="${STATE_DIR}/aba_service.pid"
+SERVICE_LOCK_FILE="${STATE_DIR}/aba_service.lock"
 
 # ── Module-owned chain names ───────────────────────────────────────────────────
 # Each traffic direction gets its own named chain so ownership is unambiguous.
@@ -44,9 +45,22 @@ log() {
     chmod 600 "$LOG_FILE" 2>/dev/null || true
     _LOG_FILE_INIT=1
   fi
-  printf '[%s] %s\n' \
+  printf '[%s +%ss] %s\n' \
     "$(date +'%F %T' 2>/dev/null || printf 'unknown-time')" \
+    "$(monotonic_seconds 2>/dev/null || printf 0)" \
     "$*" >> "$LOG_FILE" 2>/dev/null || true
+}
+
+monotonic_seconds() {
+  local up
+  up="$(cat /proc/uptime 2>/dev/null)"
+  up="${up%% *}"
+  up="${up%%.*}"
+  case "$up" in ''|*[!0-9]*) date +%s 2>/dev/null || printf 0 ;; *) printf '%s' "$up" ;; esac
+}
+
+kernel_boot_id() {
+  cat /proc/sys/kernel/random/boot_id 2>/dev/null || printf unknown
 }
 
 debug_log() {
@@ -107,10 +121,23 @@ has_cmd() { _find_cmd "$1" >/dev/null 2>&1; }
 # avoid racing AFWall+ while it applies rules, then fall back cleanly for older
 # binaries that reject -w.  Keep all arguments after the binary path unchanged.
 _ipt() {
-  local cmd="$1"
+  local cmd="$1" base cache state
   shift
   [ -x "$cmd" ] || return 127
-  "$cmd" -w "$@" 2>/dev/null || "$cmd" "$@" 2>/dev/null
+  base="$(basename "$cmd" | tr -c 'A-Za-z0-9_' '_')"
+  cache="_IPT_WAIT_${base}"
+  eval "state=\${${cache}:-unknown}"
+  case "$state" in
+    yes) "$cmd" -w "$@" 2>/dev/null; return $? ;;
+    no) "$cmd" "$@" 2>/dev/null; return $? ;;
+  esac
+  if "$cmd" -w -L >/dev/null 2>&1; then
+    eval "${cache}=yes"
+    "$cmd" -w "$@" 2>/dev/null
+    return $?
+  fi
+  eval "${cache}=no"
+  "$cmd" "$@" 2>/dev/null
 }
 
 _ipt_out() {
@@ -119,7 +146,7 @@ _ipt_out() {
 
 
 # ── Config loading ─────────────────────────────────────────────────────────────
-# v4.1.0 breaking-change config model: only module-local config is read.
+# v4.2.0 breaking-change config model: only module-local config is read.
 # Sources, in order:
 #   1. $MODDIR/config.sh        (packaged defaults)
 #   2. $MODDIR/config.local.sh  (optional user overrides)
@@ -156,7 +183,7 @@ _warn_and_unset_legacy_config_vars() {
     WIFI_AFWALL_GATE MOBILE_AFWALL_GATE ENABLE_FORWARD_BLOCK ENABLE_INPUT_BLOCK; do
     eval "set=\${${v}+set}"
     if [ "$set" = "set" ]; then
-      _config_warn "config: unsupported legacy variable ignored in v4.1.0: $v"
+      _config_warn "config: unsupported legacy variable ignored in v4.2.0: $v"
       unset "$v"
     fi
   done
@@ -211,15 +238,14 @@ derive_internal_config() {
   DEBUG="$(_config_bool "${DEBUG:-0}")"
 
   # Internal knobs consumed by the existing lower-layer/firewall implementation.
-  # They are derived only from v4.1.0 user-facing settings and are not user config.
+  # They are derived only from v4.2.0 user-facing settings and are not user config.
   ENABLE_FORWARD_BLOCK="$BLOCK_FORWARD_EFFECTIVE"
   ENABLE_INPUT_BLOCK="$BLOCK_INPUT_EFFECTIVE"
   TRANSPORT_RESTORE_GATING_EFFECTIVE=1
 
-  case "$LEAK_PROTECTION_MODE" in
-    strict) [ "$RADIO_SUPPRESSION" = "off" ] && RADIO_SUPPRESSION=strict ;;
-    recovery_friendly) : ;;
-  esac
+  # LEAK_PROTECTION_MODE controls firewall proof only. It must not implicitly
+  # force disruptive radio handling; strict radio suppression is opt-in via
+  # RADIO_SUPPRESSION=strict or the installer strict profile.
   case "$RADIO_SUPPRESSION" in
     off)
       LOWLEVEL_MODE=off; LOWLEVEL_WIFI_DATA_OFF=0; LOWLEVEL_INTERFACE_QUIESCE=0
@@ -278,7 +304,7 @@ load_config() {
   for legacy in "${MODULE_DATA}/config.sh" "${MODULE_DATA}/installer.cfg"; do
     if [ -f "$legacy" ]; then
       CONFIG_IGNORED_FILES="${CONFIG_IGNORED_FILES}${CONFIG_IGNORED_FILES:+ }$legacy"
-      _config_warn "config: legacy external config path ignored in v4.1.0 breaking-change release: $legacy"
+      _config_warn "config: legacy external config path ignored in v4.2.0 breaking-change release: $legacy"
     fi
   done
 
@@ -293,6 +319,36 @@ log_effective_config() {
   log "config: sourced=${CONFIG_SOURCED_FILES:-unknown} ignored_legacy=${CONFIG_IGNORED_FILES:-none}"
   log "config: effective mode=${LEAK_PROTECTION_MODE:-balanced} poll=${POLL_INTERVAL_SECS}s fast=${FAST_STABLE_SECS}s slow=${SLOW_STABLE_SECS}s watchdog_service=${WATCHDOG_SERVICE_SECS}s watchdog_boot=${WATCHDOG_BOOT_COMPLETED_SECS}s watchdog_policy=${WATCHDOG_POLICY}"
   log "config: effective blocks forward=${BLOCK_FORWARD_EFFECTIVE} input=${BLOCK_INPUT_EFFECTIVE} radio=${RADIO_SUPPRESSION} afwall_package=${AFWALL_PACKAGE:-auto} vpn_mode=${VPN_LOCKDOWN_MODE} vpn_providers=${VPN_PROVIDER_PACKAGES:-auto}"
+}
+
+write_service_lock() {
+  _init_dirs
+  local pid="$1" now boot tmp
+  now="$(monotonic_seconds)"
+  boot="$(kernel_boot_id)"
+  tmp="${SERVICE_LOCK_FILE}.$$"
+  {
+    printf 'pid=%s\n' "$pid"
+    printf 'boot_id=%s\n' "$boot"
+    printf 'module_version=%s\n' "$MODULE_VERSION"
+    printf 'start_mono=%s\n' "$now"
+  } > "$tmp" 2>/dev/null || return 1
+  mv -f "$tmp" "$SERVICE_LOCK_FILE" 2>/dev/null || return 1
+  chmod 600 "$SERVICE_LOCK_FILE" 2>/dev/null || true
+}
+
+service_lock_active() {
+  [ -f "$SERVICE_LOCK_FILE" ] || return 1
+  local pid="" boot_id="" module_version="" current_boot
+  . "$SERVICE_LOCK_FILE" 2>/dev/null || return 1
+  current_boot="$(kernel_boot_id)"
+  [ "$boot_id" = "$current_boot" ] || return 1
+  [ "$module_version" = "$MODULE_VERSION" ] || return 1
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+clear_service_lock() {
+  rm -f "$SERVICE_LOCK_FILE" 2>/dev/null || true
 }
 
 # ── IPTables low-level helpers ─────────────────────────────────────────────────
@@ -1758,7 +1814,7 @@ cleanup_legacy() {
     fi
   done
 
-  # v4.1.0 runtime config has only two possible sources, both module-local:
+  # v4.2.0 runtime config has only two possible sources, both module-local:
   # config.sh and optional config.local.sh. These external files are ignored.
   for f in "${MODULE_DATA}/config.sh" "${MODULE_DATA}/installer.cfg"; do
     [ -e "$f" ] || continue
@@ -1842,11 +1898,13 @@ write_service_pid() {
   _init_dirs
   # Write module-unique pid marker.
   printf '%s' "$pid" > "$SERVICE_PID_FILE" 2>/dev/null || true
+  write_service_lock "$pid" || true
   debug_log "write_service_pid: pid=$pid written"
 }
 
 remove_service_pid() {
   rm -f "$SERVICE_PID_FILE" 2>/dev/null || true
+  clear_service_lock
   debug_log "remove_service_pid: pid marker removed"
 }
 

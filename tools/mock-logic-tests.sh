@@ -229,6 +229,15 @@ load_config
 [ -z "${TIMEOUT_POLICY+x}" ] || fail "legacy TIMEOUT_POLICY still set after load"
 grep -q "unsupported legacy variable ignored in ${expected_version}: TIMEOUT_POLICY" "$LOG_FILE" || fail "legacy TIMEOUT_POLICY warning missing"
 grep -q "unsupported legacy variable ignored in ${expected_version}: AFWALL_READY_REQUIRE_UNLOCK" "$LOG_FILE" || fail "legacy readiness warning missing"
+
+# Strict firewall proof alone must not force disruptive radio suppression.
+cat > "$TMP/mod/config.local.sh" <<'SH'
+LEAK_PROTECTION_MODE=strict
+RADIO_SUPPRESSION=off
+SH
+_MODULE_CFG_LOADED=0
+load_config
+[ "$LOWLEVEL_MODE" = off ] || fail "LEAK_PROTECTION_MODE=strict forced radio suppression"
 pass "config derivation and legacy ignore"
 
 # AFWall package detection must include donate, current free, and legacy IDs.

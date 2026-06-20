@@ -32,11 +32,15 @@
 # Runs in a background subshell so Magisk's service phase is not held up.
 MODDIR="${0%/*}"
 . "$MODDIR/bin/common.sh"
+if service_lock_active; then
+  log "service: existing active worker detected from same boot/version; not starting duplicate"
+  exit 0
+fi
 (
 
   load_config
 
-  # ── v4.1.0 config-derived internal defaults ────────────────────────────────
+  # ── v4.2.0 config-derived internal defaults ────────────────────────────────
   # load_config/derive_internal_config in bin/common.sh owns validation and
   # internal mapping.  Keep service local defaults only for timing values that
   # may be absent if config.sh is missing.
@@ -114,7 +118,7 @@ MODDIR="${0%/*}"
   # This re-asserts any early-phase quiesce and adds service-level suppression.
   lowlevel_prepare_environment
 
-  START_TS="$(date +%s 2>/dev/null)" || START_TS=0
+  START_TS="$(monotonic_seconds 2>/dev/null)" || START_TS=0
   last_reassert_ts="$START_TS"
   last_blackout_reassert_ts="$START_TS"
 
@@ -382,7 +386,7 @@ MODDIR="${0%/*}"
 
   _update_readiness_gate() {
     # Diagnostic-only state for logs.  It never gates AFWall graph evaluation,
-    # family release, or watchdog clocks in v4.1.0.
+    # family release, or watchdog clocks in v4.2.0.
     [ "$readiness_gate_open" = "1" ] && return 0
     local _reason=""
     [ "$_boot_complete_now" != "1" ] && _reason="${_reason} boot_completed"
@@ -688,7 +692,7 @@ MODDIR="${0%/*}"
 
   # ── Main polling loop ───────────────────────────────────────────────────────
   while :; do
-    NOW="$(date +%s 2>/dev/null)" || NOW=0
+    NOW="$(monotonic_seconds 2>/dev/null)" || NOW=0
 
     # ── Override / stop check ────────────────────────────────────────────────
     # Check before any state-modifying operation.  Manual action (action.sh)
@@ -839,6 +843,9 @@ MODDIR="${0%/*}"
         log_transition_snapshot "v4" "watchdog_${_watchdog_reason}"
         log_transition_snapshot "v6" "watchdog_${_watchdog_reason}"
       fi
+      log "service: watchdog degraded monitor sleeping ${WATCHDOG_DEGRADED_INTERVAL_SECS:-30}s; Action recovery remains available"
+      sleep "${WATCHDOG_DEGRADED_INTERVAL_SECS:-30}"
+      continue
     fi
 
     # Readiness/unlock gate is diagnostic-only; never skip AFWall graph checks.
@@ -1078,8 +1085,12 @@ MODDIR="${0%/*}"
       if [ -f "${STATE_DIR}/ipv4_in_active" ] || input_block_present_v4; then
         remove_input_block_v4
       fi
-      v4_released=1
-      log "service: v4 handoff confirmed — family block removed (OUTPUT/FORWARD/INPUT)"
+      if output_block_present_v4 || forward_block_present_v4 || input_block_present_v4; then
+        log "service: ERROR: v4 release verification failed — module-owned layer still present; retrying"
+      else
+        v4_released=1
+        log "service: v4 release verified absent — family block removed (OUTPUT/FORWARD/INPUT)"
+      fi
       log "service: v4 block removed (intentional handoff)"
       [ "$wifi_done" = "0" ] && log "service: block removed; wifi restore deferred"
       [ "$mobile_done" = "0" ] && log "service: block removed; mobile restore deferred"
@@ -1096,8 +1107,12 @@ MODDIR="${0%/*}"
       if [ -f "${STATE_DIR}/ipv6_in_active" ] || input_block_present_v6; then
         remove_input_block_v6
       fi
-      v6_released=1
-      log "service: v6 handoff confirmed — family block removed (OUTPUT/FORWARD/INPUT)"
+      if output_block_present_v6 || forward_block_present_v6 || input_block_present_v6; then
+        log "service: ERROR: v6 release verification failed — module-owned layer still present; retrying"
+      else
+        v6_released=1
+        log "service: v6 release verified absent — family block removed (OUTPUT/FORWARD/INPUT)"
+      fi
       log "service: v6 block removed (intentional handoff)"
       [ "$wifi_done" = "0" ] && log "service: block removed; wifi restore deferred"
       [ "$mobile_done" = "0" ] && log "service: block removed; mobile restore deferred"
@@ -1151,6 +1166,11 @@ MODDIR="${0%/*}"
       lowlevel_restore_bluetooth 2>/dev/null || true
       lowlevel_restore_tethering_note 2>/dev/null || true
       _ll_state_rm "mode" 2>/dev/null || true
+      {
+        printf 'completed_mono=%s\n' "$(monotonic_seconds)"
+        printf 'v4_path=%s\n' "${v4_path:-skipped}"
+        printf 'v6_path=%s\n' "${v6_path:-skipped}"
+      } > "${STATE_DIR}/service_complete" 2>/dev/null || true
       remove_service_pid
       log "service: handoff complete — AFWall is now sole active protection"
       exit 0
