@@ -1,293 +1,277 @@
 # AFWall Boot AntiLeak
 
-> **v4.1.0 breaking config cleanup:** clean uninstall/reboot/reinstall is recommended when upgrading from older versions. Runtime config is module-local only (`config.sh` plus optional `config.local.sh`); old `/data/adb/AFWall-Boot-AntiLeak/config.sh` and `installer.cfg` files are never sourced and are removed after a successful configuration write or first-boot cleanup.
+AFWall Boot AntiLeak is a Magisk module for rooted Android devices that blocks device network traffic during boot until AFWall+ has actually applied its firewall rules.
 
-AFWall Boot AntiLeak is a Magisk module that closes the boot-time network leak window before [AFWall+](https://github.com/ukanth/afwall) has finished applying its rules.
+It is intended for users who already rely on AFWall+ and want the boot handoff to be fail-closed, inspectable, and recoverable.
 
-It installs an early fail-closed netfilter block, keeps that block repaired during boot, then removes it only after AFWall's actual iptables rule graph is present and stable.
+## What it protects against
 
-This README is the quick-start guide. For the full boot model, configuration reference, log/state details, installer internals, and development notes, see [ADVANCED.md](ADVANCED.md).
+Android can bring Wi-Fi, mobile data, VPN, DNS, Google services, app sync, and other network activity up before AFWall+ finishes applying its rules. That creates a short boot-time leak window.
 
-## Contents
+This module closes that window by installing temporary module-owned firewall rules early in boot, then removing them only after AFWall+ is proven ready from the live iptables rule graph.
 
-- [What problem this solves](#what-problem-this-solves)
-- [How it works](#how-it-works)
-- [Requirements](#requirements)
-- [Before you install](#before-you-install)
-- [Install](#install)
-- [Profiles](#profiles)
-- [First boot timeline](#first-boot-timeline)
-- [Basic configuration](#basic-configuration)
-- [Recovery](#recovery)
-- [Useful checks](#useful-checks)
-- [Useful paths](#useful-paths)
-- [Advanced documentation](#advanced-documentation)
+## How this fork differs from the original upstream module
 
-## What problem this solves
+The original AFWall boot anti-leak module was intentionally simple: during late boot it repeatedly disabled Wi-Fi and mobile data until the AFWall process appeared, waited briefly, then re-enabled connectivity.
 
-Android networking can become usable before AFWall+ has loaded and applied its firewall rules. On some devices, Wi-Fi or mobile data may reconnect during boot while AFWall is still starting.
+This fork is a much stricter and more observable handoff system.
 
-This module prevents normal device-originated traffic from escaping during that gap.
-
-It is designed for users who already rely on AFWall+ and want the boot handoff to be reproducible, inspectable, and fail-closed by default.
-
-## How it works
-
-The module uses a staged handoff model:
-
-1. `post-fs-data.sh` installs early module-owned netfilter blackout rules.
-2. `service.sh` immediately starts coherent IPv4/IPv6 filter snapshots.
-3. AFWall readiness is proven from the rooted live `OUTPUT -> afwall` rule graph, not from unlock state, process presence, file timestamps, Wi-Fi/mobile transport chains, or VPN routes.
-4. As soon as a family graph is present, non-trivial, rooted, and stable, that family's module OUTPUT/FORWARD/INPUT blackout is removed.
-5. Optional Wi-Fi/mobile/VPN/lower-layer restoration is staged separately and never delays family release.
-6. Absolute watchdogs run from service start and from `sys.boot_completed=1`, regardless of unlock/readiness state.
-
-The default profile favours fast reconnect: Wi-Fi and mobile-data framework state are left alone, but traffic remains blocked by the early netfilter hard block until AFWall is proven ready.
-
-Aggressive Wi-Fi/mobile-data OFF mode is available for devices that need it, but it can slow reconnect after boot because Android must re-associate and revalidate networks.
+| Area | Original module | This fork |
+|---|---|---|
+| Main proof of AFWall readiness | AFWall process exists | Live rooted `OUTPUT -> afwall` iptables graph is present, non-trivial, and stable |
+| Primary protection | Disable Wi-Fi/mobile data with `svc` | Kernel firewall blackout using module-owned iptables chains |
+| IPv4/IPv6 handling | Not family-aware | IPv4 and IPv6 are handled independently |
+| OUTPUT protection | No dedicated temporary OUTPUT chain model | Temporary OUTPUT blackout, with raw preferred and filter fallback/shadow coverage |
+| Tethering/forwarded traffic | Not covered | Optional temporary FORWARD blackout |
+| Inbound traffic | Not covered | Optional temporary INPUT blackout |
+| AFWall process state | Treated as enough | Diagnostic/corroborating only; not sufficient for release |
+| Unlock state | Not modelled | Diagnostic only; family release does not require unlock |
+| Stale/orphan AFWall chains | Not modelled | Only chains reachable from the live AFWall graph count |
+| Recovery | Disable/remove module manually | Magisk Action button, watchdog policy, logs, state files, emergency cleanup |
+| Configuration | Minimal | Installer profiles plus module-local `config.sh` and optional `config.local.sh` |
 
 ## Requirements
 
-Make sure all of these are true before installing:
+Before installing, make sure these are true:
 
 - Android 8.0 or newer.
-- Magisk installed.
-- AFWall+ already installed.
-- AFWall firewall enabled.
-- AFWall rules created and applied at least once.
-- A recovery path available, such as ADB, root shell, or Magisk's module Action button.
+- Magisk is installed and working.
+- AFWall+ is installed.
+- AFWall+ firewall is enabled.
+- AFWall+ rules have been applied at least once.
+- You have a recovery path: Magisk app, root shell, ADB, or recovery module removal.
 
-This repo mainly targets modern Magisk and current Android releases.
+This module is developed and tested primarily on modern Android/Pixel-style devices. It should not be installed on a device where you cannot recover from a fail-closed network block.
 
-## Before you install
+## Required AFWall+ settings
 
-> [!WARNING]
-> Read this before first install.
->
-> - Do **not** install this before AFWall+ is working.
-> - Turn off AFWall's `Fix Startup Data Leak` option. This module replaces that job; using both can cause conflicts.
-> - The default behaviour is fail-closed. If AFWall never becomes ready, the device may stay offline until you recover it.
-> - Config changes apply on reboot. Do not expect live changes to affect an already-running boot handoff.
-> - The module only restores state that it changed itself.
-
-Recommended AFWall+ settings:
+Open AFWall+ before first boot with this module and check:
 
 | AFWall+ setting | Recommended value |
 |---|---|
-| Firewall enabled | **Enabled** |
-| Rules applied | **Yes** |
-| Firewall enabled on boot | **Enabled** |
-| Fix Startup Data Leak | **Disabled** |
-| Startup Delay | `0` unless you intentionally need delay |
-| IPv6 support | Enable if you use IPv6 |
+| Firewall enabled | Enabled |
+| Apply rules | Apply once before installing |
+| Enable firewall on boot | Enabled |
+| Fix Startup Data Leak | Disabled |
+| Startup delay | `0`, unless you intentionally need a delay |
+| IPv6 support | Enabled if your network/VPN uses IPv6 |
 
-Why these settings matter is explained in [ADVANCED.md → AFWall readiness and handoff](ADVANCED.md#afwall-readiness-and-handoff).
+Disable AFWall+'s own startup-leak option because this module replaces that job. Running both can create confusing handoff behaviour.
 
 ## Install
 
-1. Download the latest ZIP from the [Releases page](https://github.com/cbkii/AFWall-Boot-AntiLeak/releases).
-2. Flash the ZIP in Magisk.
-3. Choose an installer profile when prompted.
+1. Download the latest release ZIP.
+2. Flash it in Magisk.
+3. Choose a profile when prompted.
 4. Reboot.
-5. Allow the handoff to complete. Unlock is useful diagnostic evidence, but family release no longer waits for unlock.
+5. Let the first boot settle before changing settings again.
 
-If the installer cannot read input, it falls back to module-local/default installer settings. Legacy external runtime config is ignored by boot scripts. Full details are in [ADVANCED.md → Installer, profiles, and reconfiguration](ADVANCED.md#installer-profiles-and-reconfiguration).
-
-To run the setup flow again after install:
-
-```sh
-sh /data/adb/modules/AFWall-Boot-AntiLeak/reconfigure.sh
-```
+The installer writes module-local configuration only. Old external files under `/data/adb/AFWall-Boot-AntiLeak/` are ignored and should be removed when upgrading from older releases.
 
 ## Profiles
 
 | Profile | Behaviour | Use when |
 |---|---|---|
-| `standard` | Fast reconnect. Early netfilter block only; Wi-Fi/mobile-data are left alone by default. | Recommended for most users. |
-| `minimal` | Reduced optional coverage with the same firewall-first handoff model. | You want the smallest practical intervention. |
-| `strict` | Enables stronger optional suppression, including Wi-Fi/mobile-data OFF mode. | You accept slower reconnect in exchange for more aggressive suppression. |
-| `custom` | Lets you choose individual options. | You know exactly which trade-offs you want. |
+| Standard | Recommended default. Uses the firewall blackout as primary protection and leaves Wi-Fi/mobile service state alone by default. | Most users, especially modern Pixel-style devices. |
+| Minimal | Keeps the core OUTPUT handoff but reduces optional coverage such as tether/inbound extras. | You want fewer moving parts and do not need tether-client protection. |
+| Strict | Enables stronger optional suppression such as radio/service handling and INPUT coverage. | You accept slower reconnects for more aggressive temporary suppression. |
+| Recovery-friendly | Uses recovery-oriented watchdog behaviour. | You are testing and want easier automatic recovery if AFWall proof never arrives. |
+| Custom | Lets you choose the main options. | You know which trade-offs you want. |
 
-During install/update, the module also checks Android always-on VPN settings. If an always-on VPN app is configured and the module VPN options were not explicitly configured already, the installer enables the module VPN lockdown integration. Existing explicit user config is preserved.
+## What happens during boot
 
-## First boot timeline
+A normal boot follows this model:
 
-A normal boot with the default profile looks like this:
+1. `post-fs-data.sh` runs early and installs the temporary module firewall blackout.
+2. The module records state showing which blackout layers were installed.
+3. `service.sh` starts later and verifies that the blackout is still intact.
+4. If the expected blackout is damaged or missing, the module attempts to repair it.
+5. The service loop snapshots AFWall's live filter-table graph.
+6. AFWall is accepted only when the rooted `OUTPUT -> afwall` graph is present, non-trivial, and stable.
+7. IPv4 and IPv6 are released independently when each family is ready.
+8. Optional transport/radio/VPN restoration is handled after, and does not block family firewall release.
+9. Once handoff is complete, AFWall+ is the only active firewall layer.
 
-1. `post-fs-data.sh` installs IPv4/IPv6 OUTPUT blackout rules as early as possible.
-2. `service.sh` starts and verifies the module-owned block.
-3. Wi-Fi or mobile data may reconnect, but traffic remains blocked by the module rules.
-4. `service.sh` snapshots the AFWall filter graph every poll, including before unlock.
-5. Android reports `sys.boot_completed=1` and optional unlock heuristics are logged as diagnostics.
-6. Once the rooted `OUTPUT -> afwall` graph is valid and stable, the module removes its own block.
-7. AFWall+ becomes the sole active firewall layer.
+Unlock state, AFWall process presence, VPN routes, and AFWall file timestamps may be logged as diagnostics or used as corroboration, but they are not enough by themselves to release the blackout.
 
-If AFWall does not become ready, the absolute watchdog applies. The default `WATCHDOG_POLICY=block` keeps unresolved protection active and logs diagnostics rather than silently unblocking.
+## Configuration files
 
-## Basic configuration
-
-Runtime configuration has a single source of truth inside the installed module directory:
+Runtime configuration is module-local:
 
 ```sh
 /data/adb/modules/AFWall-Boot-AntiLeak/config.sh
-/data/adb/modules/AFWall-Boot-AntiLeak/config.local.sh   # optional local override
+/data/adb/modules/AFWall-Boot-AntiLeak/config.local.sh
 ```
 
-Old external paths such as `/data/adb/AFWall-Boot-AntiLeak/config.sh` and `/data/adb/AFWall-Boot-AntiLeak/installer.cfg` are never sourced. A successful install/reconfiguration and first-boot cleanup remove them; recreate needed settings in module-local `config.local.sh`.
+`config.sh` is the packaged default file. Do not edit it unless you are deliberately modifying the installed module.
 
-Beginner-facing options:
+`config.local.sh` is optional local override state, usually generated by the installer or `reconfigure.sh`. Put user overrides there.
 
-| Option | Default | Meaning |
+Old external paths such as these are legacy and are not runtime configuration sources:
+
+```sh
+/data/adb/AFWall-Boot-AntiLeak/config.sh
+/data/adb/AFWall-Boot-AntiLeak/installer.cfg
+```
+
+If those files exist after upgrading, remove them or perform a clean uninstall/reboot/reinstall.
+
+## Main options
+
+| Key | Recommended/default | Meaning |
 |---|---:|---|
-| `LEAK_PROTECTION_MODE` | `balanced` | `strict`, `balanced`, or `recovery_friendly`. |
-| `POLL_INTERVAL_SECS` | `2` | Snapshot loop interval. |
-| `FAST_STABLE_SECS` | `2` | Stable window with corroboration/dense graph. |
-| `SLOW_STABLE_SECS` | `6` | Stable rooted-graph window without corroboration. |
+| `LEAK_PROTECTION_MODE` | `balanced` | Main safety profile: `balanced`, `strict`, or `recovery_friendly`. |
+| `INTEGRATION_MODE` | `auto` | How to coexist with AFWall's own startup script handling. |
+| `POLL_INTERVAL_SECS` | `2` | Seconds between AFWall graph checks during handoff. |
+| `FAST_STABLE_SECS` | `2` | Stability window when strong corroboration exists. |
+| `SLOW_STABLE_SECS` | `6` | Conservative graph-only stability window. |
 | `WATCHDOG_SERVICE_SECS` | `300` | Absolute watchdog from service start. |
-| `WATCHDOG_BOOT_COMPLETED_SECS` | `240` | Absolute watchdog from first `sys.boot_completed=1`. |
-| `WATCHDOG_POLICY` | `block` | `block` keeps unresolved protection and logs diagnostics; `unblock` removes module suppression for recovery. |
-| `BLOCK_FORWARD` | `1` | Temporarily block tethered-client FORWARD traffic. |
-| `BLOCK_INPUT` | `0` | Optional inbound INPUT blackout. |
-| `RADIO_SUPPRESSION` | `off` | `off`, `safe`, or `strict` lower-layer suppression. |
-| `AFWALL_PACKAGE` | `auto` | Auto, free, donate, or legacy package. |
-| `VPN_LOCKDOWN_MODE` | `off` | `off` leaves VPN alone; `preserve` respects existing lockdown; `restore` enforces/restores module-managed lockdown. |
+| `WATCHDOG_BOOT_COMPLETED_SECS` | `240` | Absolute watchdog after Android reports boot complete. |
+| `WATCHDOG_POLICY` | `block` | `block` keeps unresolved protection; `unblock` removes module suppression for recovery. |
+| `BLOCK_FORWARD` | `1` | Temporarily protect tethered clients with a FORWARD blackout. |
+| `BLOCK_INPUT` | `0` | Optional temporary INPUT blackout. |
+| `RADIO_SUPPRESSION` | `off` | Optional lower-layer suppression: `off`, `safe`, or `strict`. |
+| `AFWALL_PACKAGE` | `auto` | AFWall package hint: auto, free, donate, or legacy package. |
+| `VPN_LOCKDOWN_MODE` | `off` | Optional Android always-on VPN lockdown handling. |
+| `VPN_PROVIDER_PACKAGES` | `auto` | Auto-detect or specify VPN package names. |
+| `DEBUG` | `0` | Verbose logs for diagnostics. |
 
-Examples:
+Most users should change only the profile, watchdog policy, tether/INPUT coverage, radio suppression, VPN handling, and debug logging.
 
-```sh
-# Balanced recommended
-LEAK_PROTECTION_MODE=balanced
-RADIO_SUPPRESSION=off
-WATCHDOG_POLICY=block
+## Reconfigure after install
 
-# Strict maximum protection
-LEAK_PROTECTION_MODE=strict
-RADIO_SUPPRESSION=strict
-VPN_LOCKDOWN_MODE=restore
-
-# Recovery-friendly
-LEAK_PROTECTION_MODE=recovery_friendly
-WATCHDOG_POLICY=unblock
-
-# Firewall-only/no radio suppression
-LEAK_PROTECTION_MODE=balanced
-RADIO_SUPPRESSION=off
-```
-
-Unlock detection uses multiple low-cost signals (`cmd user`, `dumpsys user`, CE readability, keyguard/trust hints). Unknown unlock state is logged as `unknown` and does not block AFWall family handoff.
-
-### Always-on VPN detection
-
-If VPN lockdown handling is enabled and no provider is configured, the module attempts auto-detection. If detection fails, it logs a loud warning and does not pretend VPN handling is complete. Restore logs include pre-active provider, pre-lockdown state, current lockdown state, and the provider/action used.
-
-## Recovery
-
-### Quick recovery
-
-If the device is stuck offline, use the module **Action** button in Magisk, or run:
+Run as root:
 
 ```sh
-sh /data/adb/modules/AFWall-Boot-AntiLeak/action.sh
-```
-
-That stops the service loop, removes module-owned blackout rules, and restores lower-layer state that the module recorded for the current boot.
-
-### Disable the module from root shell
-
-If needed:
-
-```sh
-touch /data/adb/modules/AFWall-Boot-AntiLeak/disable
+sh /data/adb/modules/AFWall-Boot-AntiLeak/reconfigure.sh
 reboot
 ```
 
-### Remove local user overrides
+Configuration changes apply on the next boot. They do not reconfigure a handoff already in progress.
 
-To return to built-in defaults on next boot:
+## Recovery
+
+### Use the Magisk Action button
+
+In Magisk, press the module's Action button. It latches manual override, stops the service loop, removes module-owned blackout rules, and restores lower-layer state that the module changed.
+
+### Run the action script manually
 
 ```sh
-rm -f /data/adb/modules/AFWall-Boot-AntiLeak/config.local.sh
+su -c 'sh /data/adb/modules/AFWall-Boot-AntiLeak/action.sh'
+```
+
+### Disable the module before reboot
+
+```sh
+su -c 'touch /data/adb/modules/AFWall-Boot-AntiLeak/disable'
+reboot
+```
+
+### Remove local overrides
+
+```sh
+su -c 'rm -f /data/adb/modules/AFWall-Boot-AntiLeak/config.local.sh'
 reboot
 ```
 
 ## Useful checks
 
-Check the module log:
+View the module log:
 
 ```sh
-tail -100 /data/adb/AFWall-Boot-AntiLeak/logs/boot.log
+su -c 'tail -120 /data/adb/AFWall-Boot-AntiLeak/logs/boot.log'
 ```
 
-Check whether AFWall rules are present:
+Check AFWall rules:
 
 ```sh
-iptables -t filter -S | grep afwall
-ip6tables -t filter -S | grep afwall
+su -c 'iptables -t filter -S | grep afwall'
+su -c 'ip6tables -t filter -S | grep afwall'
 ```
 
 Check module-owned rules:
 
 ```sh
-iptables -t raw -S | grep MOD_PRE_AFW
-iptables -t filter -S | grep MOD_PRE_AFW
-ip6tables -t raw -S | grep MOD_PRE_AFW
-ip6tables -t filter -S | grep MOD_PRE_AFW
+su -c 'iptables -t raw -S | grep MOD_PRE_AFW'
+su -c 'iptables -t filter -S | grep MOD_PRE_AFW'
+su -c 'ip6tables -t raw -S | grep MOD_PRE_AFW'
+su -c 'ip6tables -t filter -S | grep MOD_PRE_AFW'
 ```
 
-Common causes of delayed or failed release:
+## Common problems
 
-1. AFWall+ firewall is not enabled.
-2. AFWall+ rules were never applied.
-3. AFWall+ `Fix Startup Data Leak` is still enabled.
-4. AFWall+ rules are still changing during boot.
-5. The rooted AFWall graph is absent/trivial or still churning.
-6. A watchdog fired and the default diagnostic fail-closed policy kept unresolved blocks active while logging why.
+### Device stays offline after boot
 
-Troubleshooting details are in [ADVANCED.md → Troubleshooting](ADVANCED.md#troubleshooting).
+Likely causes:
 
-## Useful paths
+- AFWall+ firewall is disabled.
+- AFWall+ rules were never applied.
+- AFWall+ did not start or did not apply rules during boot.
+- AFWall+ `Fix Startup Data Leak` is still enabled and conflicting.
+- AFWall's rule graph is present but trivial or still changing.
+- `WATCHDOG_POLICY=block` kept unresolved protection active.
+
+Use the Action button to recover, then inspect `boot.log`.
+
+### Network comes back only after watchdog recovery
+
+AFWall is starting too slowly or applying rules late. Prefer fixing AFWall startup/rule application over setting watchdog policy to `unblock`. Watchdog unblock is recovery behaviour, not proof that AFWall was ready.
+
+### IPv6 tests fail
+
+That does not automatically mean a leak or module failure. It may mean your network, VPN, AFWall policy, or test target does not support IPv6/ICMPv6. Check the module log and AFWall IPv6 settings.
+
+### There are three config files
+
+Only these two are current runtime config sources:
+
+```sh
+/data/adb/modules/AFWall-Boot-AntiLeak/config.sh
+/data/adb/modules/AFWall-Boot-AntiLeak/config.local.sh
+```
+
+If this exists, it is legacy and ignored:
+
+```sh
+/data/adb/AFWall-Boot-AntiLeak/config.sh
+```
+
+Remove the legacy file after a clean uninstall/reinstall.
+
+## Clean upgrade from old versions
+
+For upgrades from older v2/v3/v4 development builds:
+
+1. Remove the module in Magisk.
+2. Reboot once.
+3. Remove stale external files under `/data/adb/AFWall-Boot-AntiLeak/` if present.
+4. Reboot again if old service hooks were removed.
+5. Install the new ZIP.
+6. Reboot.
+7. Check `boot.log`.
+
+## Installed paths
 
 | Path | Purpose |
 |---|---|
-| `/data/adb/AFWall-Boot-AntiLeak/config.sh` | Legacy external config; never sourced and removed by install/boot cleanup. |
-| `/data/adb/AFWall-Boot-AntiLeak/logs/boot.log` | Current boot log. |
-| `/data/adb/AFWall-Boot-AntiLeak/state/` | Current boot state files. |
+| `/data/adb/modules/AFWall-Boot-AntiLeak/` | Installed Magisk module files. |
+| `/data/adb/modules/AFWall-Boot-AntiLeak/config.sh` | Packaged defaults. |
+| `/data/adb/modules/AFWall-Boot-AntiLeak/config.local.sh` | Local overrides. |
 | `/data/adb/modules/AFWall-Boot-AntiLeak/action.sh` | Manual recovery action. |
-| `/data/adb/modules/AFWall-Boot-AntiLeak/reconfigure.sh` | Re-run setup. |
-| [`config.sh`](config.sh) | Built-in defaults shipped with the module. |
-| [`ADVANCED.md`](ADVANCED.md) | Full technical reference. |
+| `/data/adb/modules/AFWall-Boot-AntiLeak/reconfigure.sh` | Re-run configuration. |
+| `/data/adb/AFWall-Boot-AntiLeak/logs/boot.log` | Current boot log. |
+| `/data/adb/AFWall-Boot-AntiLeak/state/` | Current boot state. |
 
-## Advanced documentation
+## What this module does not do
 
-Use [ADVANCED.md](ADVANCED.md) for deeper detail:
+- It does not replace AFWall+.
+- It does not create your AFWall rules.
+- It does not prove VPN privacy by itself.
+- It does not blindly re-enable radios the user had disabled before boot.
+- It does not treat AFWall process presence as sufficient readiness proof.
+- It does not remove AFWall-owned scripts or application data.
 
-- [Boot flow](ADVANCED.md#boot-flow)
-- [AFWall readiness and handoff](ADVANCED.md#afwall-readiness-and-handoff)
-- [Timeout and unlock semantics](ADVANCED.md#timeout-and-unlock-semantics)
-- [Configuration reference](ADVANCED.md#configuration-reference)
-- [Logs, state, and manual recovery](ADVANCED.md#logs-state-and-manual-recovery)
-- [Troubleshooting](ADVANCED.md#troubleshooting)
-- [Installer, profiles, and reconfiguration](ADVANCED.md#installer-profiles-and-reconfiguration)
+## Safety model in one sentence
 
-If you are developing or auditing the module, start with [ADVANCED.md → Boot flow](ADVANCED.md#boot-flow), [ADVANCED.md → AFWall readiness and handoff](ADVANCED.md#afwall-readiness-and-handoff), and the scripts under `bin/`, `post-fs-data.sh`, and `service.sh`.
-
-## Android 16 Proton VPN handoff notes
-
-On Android always-on VPN with lockdown, Proton/WireGuard protects its gateway socket from VPN routing so packets do not loop back into the TUN. That socket still traverses netfilter. During boot this module may therefore deny early WireGuard sends with `EPERM` until the rooted live AFWall `OUTPUT -> afwall` graph is present and stable. A brief pre-handoff denial is expected; a long delay after graph stability is not expected and should be diagnosed.
-
-Recommended Proton/AFWall setup:
-
-- Keep Android always-on VPN and lockdown configured in Android settings if you use them.
-- Keep Proton selected as the active always-on provider; the default/preserve module behaviour is read-only and does not replace it.
-- Keep AFWall enabled on boot, apply rules at least once before rebooting, and keep AFWall's own `Fix Startup Data Leak` disabled while this module is installed.
-- Use the standard profile unless you explicitly need strict radio suppression. Strict radio suppression can slow reconnection because it toggles Wi-Fi/mobile state beneath the firewall; strict firewall proof alone no longer forces that mode.
-
-Expected handoff with defaults is one poll plus the configured stability window: typically about 2–6 seconds after the final rooted AFWall graph appears. IPv4 and IPv6 release independently and do not wait for boot completion, unlock, transport restoration, VPN provider detection, or the other family.
-
-For a bounded read-only real-device report, run:
-
-```sh
-su -c sh /data/adb/modules/AFWall-Boot-AntiLeak/diagnostics.sh > /sdcard/afwall-boot-antileak-diagnostics.txt
-```
-
-Upgrading from v4.1.x to v4.3.0 is a normal Magisk module update. Reconfigure only if you want to change profile/options. Clean uninstall/reboot/reinstall is only needed when migrating from much older releases that used external `/data/adb/AFWall-Boot-AntiLeak/config.sh` runtime configuration and you want to discard stale state completely.
+The module blocks first, proves AFWall from the live rooted firewall graph, releases each IP family only after stable proof, and provides explicit recovery if proof never arrives.
