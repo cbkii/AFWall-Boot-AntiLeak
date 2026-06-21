@@ -68,28 +68,48 @@ debug_log() {
   log "[DEBUG] $*"
 }
 
-# Helper to log a message only once per boot phase (early, boot_complete, unlock).
+# log_on_transition GROUP STATE MESSAGE [MIN_INTERVAL_SECS]
+# Logs MESSAGE at normal level if:
+#   - STATE for GROUP changed since last call;
+#   - OR boot phase changed (early -> boot_complete -> unlocked);
+#   - OR MIN_INTERVAL_SECS elapsed since last normal log for this GROUP.
+# Otherwise logs at debug level.
 # Expects _boot_complete_now and device_unlocked to be available in caller scope.
-log_once_per_phase() {
-  local key="$1" msg="$2" pfx v v_bc v_unl do_log
-  pfx="_L1P_${key}"
-  eval "v=\${${pfx}:-0}"
-  eval "v_bc=\${${pfx}_bc:-0}"
-  eval "v_unl=\${${pfx}_unl:-0}"
+log_on_transition() {
+  local group="$1" state="$2" msg="$3" min_int="${4:-}"
+  local pfx cur_phase cur_ts last_state last_phase last_ts do_log
+
+  # Sanitize group name for shell variable compatibility (replace non-alphanumeric with _)
+  pfx="_LT_$(printf '%s' "$group" | tr -c 'A-Za-z0-9' '_')"
+
+  # Phase: 0=early, 1=boot_complete, 2=unlocked
+  cur_phase=0
+  [ "${_boot_complete_now:-0}" = "1" ] && cur_phase=1
+  [ "${device_unlocked:-0}" = "1" ] && cur_phase=2
+
+  cur_ts="${NOW:-0}"
+  [ "$cur_ts" = "0" ] && cur_ts="$(monotonic_seconds)"
+
+  eval "last_state=\${${pfx}_S:-}"
+  eval "last_phase=\${${pfx}_P:- -1}"
+  eval "last_ts=\${${pfx}_T:-0}"
 
   do_log=0
-  if [ "$v" = "0" ]; then
-    do_log=1; eval "${pfx}=1"
-  fi
-  if [ "${_boot_complete_now:-0}" = "1" ] && [ "$v_bc" = "0" ]; then
-    do_log=1; eval "${pfx}_bc=1"
-  fi
-  if [ "${device_unlocked:-0}" = "1" ] && [ "$v_unl" = "0" ]; then
-    do_log=1; eval "${pfx}_unl=1"
+  if [ "$state" != "$last_state" ]; then
+    do_log=1
+  elif [ "$cur_phase" -gt "$last_phase" ]; then
+    do_log=1
+  elif [ -n "$min_int" ] && [ "$min_int" -gt 0 ]; then
+    if [ $((cur_ts - last_ts)) -ge "$min_int" ]; then
+      do_log=1
+    fi
   fi
 
   if [ "$do_log" = "1" ]; then
     log "$msg"
+    eval "${pfx}_S=\"\$state\""
+    eval "${pfx}_P=\$cur_phase"
+    eval "${pfx}_T=\$cur_ts"
   else
     debug_log "$msg"
   fi

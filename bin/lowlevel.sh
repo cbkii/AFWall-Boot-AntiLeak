@@ -115,17 +115,17 @@ lowlevel_quiesce_interfaces() {
 
   local ip_cmd
   ip_cmd="$(_find_cmd ip 2>/dev/null)" || {
-    log "lowlevel_quiesce_interfaces: ip command not found; skipping"
+    debug_log "lowlevel_quiesce_interfaces: ip command not found; skipping"
     return 0
   }
 
   [ -d "/sys/class/net" ] || {
-    log "lowlevel_quiesce_interfaces: /sys/class/net not found; skipping"
+    debug_log "lowlevel_quiesce_interfaces: /sys/class/net not found; skipping"
     return 0
   }
 
   _ll_init_dirs
-  log "lowlevel_quiesce_interfaces: start"
+  debug_log "lowlevel_quiesce_interfaces: start"
 
   local iface operstate count=0
   for iface in /sys/class/net/*/; do
@@ -150,7 +150,7 @@ lowlevel_quiesce_interfaces() {
     fi
   done
 
-  log "lowlevel_quiesce_interfaces: done (${count} interfaces quiesced)"
+  debug_log "lowlevel_quiesce_interfaces: done (${count} interfaces quiesced)"
 }
 
 lowlevel_restore_interfaces() {
@@ -161,11 +161,11 @@ lowlevel_restore_interfaces() {
 
   local ip_cmd
   ip_cmd="$(_find_cmd ip 2>/dev/null)" || {
-    log "lowlevel_restore_interfaces: ip command not found; cannot restore interfaces"
+    debug_log "lowlevel_restore_interfaces: ip command not found; cannot restore interfaces"
     return 0
   }
 
-  log "lowlevel_restore_interfaces: start"
+  debug_log "lowlevel_restore_interfaces: start"
   local iface count=0
   while IFS= read -r iface; do
     [ -n "$iface" ] || continue
@@ -173,12 +173,12 @@ lowlevel_restore_interfaces() {
       debug_log "lowlevel: interface $iface brought UP (restored)"
       count=$((count + 1))
     else
-      log "lowlevel: WARN: could not restore interface $iface"
+      debug_log "lowlevel: WARN: could not restore interface $iface"
     fi
   done < "${LL_STATE_DIR}/ifaces_down"
 
   _ll_state_rm "ifaces_down"
-  log "lowlevel_restore_interfaces: done (${count} interfaces restored)"
+  debug_log "lowlevel_restore_interfaces: done (${count} interfaces restored)"
 }
 
 # ── Wi-Fi control ──────────────────────────────────────────────────────────────
@@ -232,14 +232,14 @@ lowlevel_disable_wifi() {
   # Step 1: cmd wifi set-wifi-enabled disabled (preferred, Android 10+)
   if has_cmd cmd && cmd wifi set-wifi-enabled disabled >/dev/null 2>&1; then
     disabled=1
-    log "lowlevel: Wi-Fi disable cmd sent via cmd wifi"
+    debug_log "lowlevel: Wi-Fi disable cmd sent via cmd wifi"
   fi
 
   # Step 2: fallback via svc wifi
   if [ "$disabled" = "0" ] && has_cmd svc; then
     if svc wifi disable 2>/dev/null; then
       disabled=1
-      log "lowlevel: Wi-Fi disable cmd sent via svc wifi (fallback)"
+      debug_log "lowlevel: Wi-Fi disable cmd sent via svc wifi (fallback)"
     fi
   fi
 
@@ -269,10 +269,10 @@ lowlevel_disable_wifi() {
       esac
     done
     if [ "$verified" -ge 1 ]; then
-      log "lowlevel: Wi-Fi off-state confirmed (probes_passed=$verified)"
+      debug_log "lowlevel: Wi-Fi off-state confirmed (probes_passed=$verified)"
       [ "$wifi_state" = "on" ] && _ll_state_set "wifi_was_enabled" "1"
     else
-      log "lowlevel: Wi-Fi disable sent but off-state not yet confirmed; tracking anyway"
+      debug_log "lowlevel: Wi-Fi disable sent but off-state not yet confirmed; tracking anyway"
       [ "$wifi_state" = "on" ] && _ll_state_set "wifi_was_enabled" "1"
     fi
     # Step 4: reinforce by bringing wlan interfaces down if present
@@ -291,7 +291,7 @@ lowlevel_disable_wifi() {
       done
     fi
   else
-    log "lowlevel: WARN: could not disable Wi-Fi (best-effort)"
+    debug_log "lowlevel: WARN: could not disable Wi-Fi (best-effort)"
   fi
 }
 
@@ -306,16 +306,16 @@ lowlevel_restore_wifi() {
   local restored=0 verified_on=0 val wl_state wl_iface
   if has_cmd cmd && cmd wifi set-wifi-enabled enabled >/dev/null 2>&1; then
     restored=1
-    log "lowlevel: Wi-Fi re-enabled via cmd wifi"
+    debug_log "lowlevel: Wi-Fi re-enabled via cmd wifi"
   fi
   if [ "$restored" = "0" ] && has_cmd svc; then
     if svc wifi enable 2>/dev/null; then
       restored=1
-      log "lowlevel: Wi-Fi re-enabled via svc wifi (fallback)"
+      debug_log "lowlevel: Wi-Fi re-enabled via svc wifi (fallback)"
     fi
   fi
   if [ "$restored" = "0" ]; then
-    log "lowlevel: WARN: could not re-enable Wi-Fi; manual recovery may be needed"
+    log_on_transition "wifi_restore_error" "fail" "lowlevel: WARN: could not re-enable Wi-Fi; manual recovery may be needed"
     return 1
   fi
 
@@ -337,13 +337,13 @@ lowlevel_restore_wifi() {
   done
 
   if [ "$verified_on" -ge 1 ]; then
-    log "lowlevel: Wi-Fi restore verified (probes_passed=$verified_on)"
+    debug_log "lowlevel: Wi-Fi restore verified (probes_passed=$verified_on)"
     _ll_state_rm "wifi_was_enabled"
     _ll_state_rm "wifi_initial_state"
     return 0
   fi
 
-  log "lowlevel: WARN: Wi-Fi enable sent but ON-state not yet verified; keeping marker for retry"
+  debug_log "lowlevel: Wi-Fi enable sent but ON-state not yet verified; keeping marker for retry"
   return 1
 }
 
@@ -398,14 +398,14 @@ lowlevel_disable_mobile_data() {
   # Step 1: cmd phone data disable (preferred, Android 9+)
   if has_cmd cmd && cmd phone data disable >/dev/null 2>&1; then
     disabled=1
-    log "lowlevel: mobile data disable cmd sent via cmd phone"
+    debug_log "lowlevel: mobile data disable cmd sent via cmd phone"
   fi
 
   # Step 2: fallback via svc data
   if [ "$disabled" = "0" ] && has_cmd svc; then
     if svc data disable 2>/dev/null; then
       disabled=1
-      log "lowlevel: mobile data disable cmd sent via svc data (fallback)"
+      debug_log "lowlevel: mobile data disable cmd sent via svc data (fallback)"
     fi
   fi
 
@@ -430,9 +430,9 @@ lowlevel_disable_mobile_data() {
       fi
     fi
     if [ "$verified" -ge 1 ]; then
-      log "lowlevel: mobile data off-state confirmed (probes_passed=$verified)"
+      debug_log "lowlevel: mobile data off-state confirmed (probes_passed=$verified)"
     else
-      log "lowlevel: mobile data disable sent but off-state not yet confirmed; tracking anyway"
+      debug_log "lowlevel: mobile data disable sent but off-state not yet confirmed; tracking anyway"
     fi
     [ "$data_state" = "on" ] && _ll_state_set "data_was_enabled" "1"
     # Step 4: reinforce by bringing cellular data interfaces down where safe
@@ -451,7 +451,7 @@ lowlevel_disable_mobile_data() {
       done
     fi
   else
-    log "lowlevel: WARN: could not disable mobile data (best-effort)"
+    debug_log "lowlevel: WARN: could not disable mobile data (best-effort)"
   fi
 }
 
@@ -466,16 +466,16 @@ lowlevel_restore_mobile_data() {
   local restored=0 verified_on=0 val ip_cmd rt_out
   if has_cmd cmd && cmd phone data enable >/dev/null 2>&1; then
     restored=1
-    log "lowlevel: mobile data re-enabled via cmd phone"
+    debug_log "lowlevel: mobile data re-enabled via cmd phone"
   fi
   if [ "$restored" = "0" ] && has_cmd svc; then
     if svc data enable 2>/dev/null; then
       restored=1
-      log "lowlevel: mobile data re-enabled via svc data (fallback)"
+      debug_log "lowlevel: mobile data re-enabled via svc data (fallback)"
     fi
   fi
   if [ "$restored" = "0" ]; then
-    log "lowlevel: WARN: could not re-enable mobile data; manual recovery may be needed"
+    log_on_transition "mobile_restore_error" "fail" "lowlevel: WARN: could not re-enable mobile data; manual recovery may be needed"
     return 1
   fi
 
@@ -493,13 +493,13 @@ lowlevel_restore_mobile_data() {
   fi
 
   if [ "$verified_on" -ge 1 ]; then
-    log "lowlevel: mobile data restore verified (probes_passed=$verified_on)"
+    debug_log "lowlevel: mobile data restore verified (probes_passed=$verified_on)"
     _ll_state_rm "data_was_enabled"
     _ll_state_rm "data_initial_state"
     return 0
   fi
 
-  log "lowlevel: WARN: mobile data enable sent but ON-state not yet verified; keeping marker for retry"
+  debug_log "lowlevel: mobile data enable sent but ON-state not yet verified; keeping marker for retry"
   return 1
 }
 
@@ -533,21 +533,21 @@ lowlevel_disable_bluetooth() {
   # Preferred: cmd bluetooth_manager (Android 12+).
   if has_cmd cmd && cmd bluetooth_manager disable >/dev/null 2>&1; then
     disabled=1
-    log "lowlevel: Bluetooth disabled via cmd bluetooth_manager"
+    debug_log "lowlevel: Bluetooth disabled via cmd bluetooth_manager"
   fi
 
   # Fallback: svc bluetooth (older Android).
   if [ "$disabled" = "0" ] && has_cmd svc; then
     if svc bluetooth disable 2>/dev/null; then
       disabled=1
-      log "lowlevel: Bluetooth disabled via svc bluetooth (fallback)"
+      debug_log "lowlevel: Bluetooth disabled via svc bluetooth (fallback)"
     fi
   fi
 
   if [ "$disabled" = "1" ]; then
     _ll_state_set "bt_was_enabled" "1"
   else
-    log "lowlevel: WARN: could not disable Bluetooth (best-effort)"
+    debug_log "lowlevel: WARN: could not disable Bluetooth (best-effort)"
   fi
 }
 
@@ -557,16 +557,16 @@ lowlevel_restore_bluetooth() {
   local restored=0
   if has_cmd cmd && cmd bluetooth_manager enable >/dev/null 2>&1; then
     restored=1
-    log "lowlevel: Bluetooth re-enabled via cmd bluetooth_manager"
+    debug_log "lowlevel: Bluetooth re-enabled via cmd bluetooth_manager"
   fi
   if [ "$restored" = "0" ] && has_cmd svc; then
     if svc bluetooth enable 2>/dev/null; then
       restored=1
-      log "lowlevel: Bluetooth re-enabled via svc bluetooth (fallback)"
+      debug_log "lowlevel: Bluetooth re-enabled via svc bluetooth (fallback)"
     fi
   fi
   if [ "$restored" = "0" ]; then
-    log "lowlevel: WARN: could not re-enable Bluetooth; manual recovery may be needed"
+    log_on_transition "bt_restore_error" "fail" "lowlevel: WARN: could not re-enable Bluetooth; manual recovery may be needed"
   fi
   _ll_state_rm "bt_was_enabled"
 }
@@ -644,7 +644,7 @@ lowlevel_clear_stale_vpn_state() {
       cleared=1
     fi
   done
-  [ "$cleared" = "1" ] && log "vpn_lockdown: cleared stale per-boot VPN state markers"
+  [ "$cleared" = "1" ] && debug_log "vpn_lockdown: cleared stale per-boot VPN state markers"
 }
 
 lowlevel_vpn_lockdown_enforce() {
@@ -660,7 +660,7 @@ lowlevel_vpn_lockdown_enforce() {
   fi
 
   if [ "${VPN_LOCKDOWN_BOOT_ENFORCE:-0}" != "1" ]; then
-    [ "${VPN_LOCKDOWN_PRESERVE_ONLY:-0}" = "1" ] && log "vpn_lockdown: preserve mode active; recorded state without changing lockdown"
+    [ "${VPN_LOCKDOWN_PRESERVE_ONLY:-0}" = "1" ] && debug_log "vpn_lockdown: preserve mode active; recorded state without changing lockdown"
     return 0
   fi
 
@@ -683,7 +683,7 @@ lowlevel_vpn_lockdown_enforce() {
   case "$pkgs" in
     *[![:space:]]*) ;;
     *)
-      log "vpn_lockdown: WARN: handling enabled but provider list is empty and auto-detection found no providers; VPN lockdown state cannot be managed"
+      log_on_transition "vpn_lockdown_warn" "no_providers" "vpn_lockdown: WARN: handling enabled but provider list is empty and auto-detection found no providers; VPN lockdown state cannot be managed"
       return 0
       ;;
   esac
@@ -696,10 +696,10 @@ lowlevel_vpn_lockdown_enforce() {
       after_pkg="$(_ll_vpn_get_active_pkg)"
       after_lock="$(_ll_vpn_get_lockdown_state)"
       if [ "$after_pkg" = "$pkg" ] && [ "$after_lock" = "1" ]; then
-        log "vpn_lockdown: restore mode verified always-on+lockdown for provider $pkg"
+            log_on_transition "vpn_lockdown_enforce" "$pkg" "vpn_lockdown: restore mode verified always-on+lockdown for provider $pkg"
         ok=1
       else
-        log "vpn_lockdown: WARN: restore write for $pkg not verified (active=${after_pkg:-none} lockdown=${after_lock:-unknown})"
+            log_on_transition "vpn_lockdown_enforce" "fail:$pkg" "vpn_lockdown: WARN: restore write for $pkg not verified (active=${after_pkg:-none} lockdown=${after_lock:-unknown})"
       fi
     else
       debug_log "vpn_lockdown: provider $pkg could not be set always-on+lockdown"
@@ -708,7 +708,7 @@ lowlevel_vpn_lockdown_enforce() {
   done
 
   if [ "$ok" = "0" ]; then
-    log "vpn_lockdown: WARN: provider selected for restore mode but lockdown command was not verified (active=${active:-none} providers='${pkgs}')"
+    log_on_transition "vpn_lockdown_warn" "unverified" "vpn_lockdown: WARN: provider selected for restore mode but lockdown command was not verified (active=${active:-none} providers='${pkgs}')"
   fi
 }
 
@@ -726,7 +726,7 @@ lowlevel_vpn_lockdown_release_if_needed() {
   pre_pkg="$(_ll_state_get vpn_pre_active_pkg)"
   pre_lock="$(_ll_state_get vpn_pre_lockdown)"
   current_lock="$(_ll_vpn_get_lockdown_state)"
-  log "vpn_lockdown: restore check pre_active=${pre_pkg:-none} pre_lockdown=${pre_lock:-unknown} current_active=${active:-none} current_lockdown=${current_lock:-unknown}"
+  debug_log "vpn_lockdown: restore check pre_active=${pre_pkg:-none} pre_lockdown=${pre_lock:-unknown} current_active=${active:-none} current_lockdown=${current_lock:-unknown}"
 
   # Restore pre-boot always-on baseline where available. Do not temporarily
   # disable lockdown for the current provider; make one transactional write back
@@ -737,9 +737,9 @@ lowlevel_vpn_lockdown_release_if_needed() {
         if cmd connectivity set-always-on-vpn "$pre_pkg" "$pre_lock" >/dev/null 2>&1; then
           active="$(_ll_vpn_get_active_pkg)"; current_lock="$(_ll_vpn_get_lockdown_state)"
           if [ "$active" = "$pre_pkg" ] && [ "$current_lock" = "$pre_lock" ]; then
-            log "vpn_lockdown: restored and verified pre-boot always-on baseline for $pre_pkg (lockdown=$pre_lock)"
+            log_on_transition "vpn_lockdown_restore" "success" "vpn_lockdown: restored and verified pre-boot always-on baseline for $pre_pkg (lockdown=$pre_lock)"
           else
-            log "vpn_lockdown: WARN: pre-boot restore not verified (want=$pre_pkg/$pre_lock got=${active:-none}/${current_lock:-unknown})"
+            log_on_transition "vpn_lockdown_restore" "fail" "vpn_lockdown: WARN: pre-boot restore not verified (want=$pre_pkg/$pre_lock got=${active:-none}/${current_lock:-unknown})"
           fi
         fi
         ;;
@@ -761,7 +761,7 @@ lowlevel_stop_tethering() {
   # Try the connectivity service command (Android 12+ tethering API).
   if has_cmd cmd && cmd connectivity stop-tethering >/dev/null 2>&1; then
     stopped=1
-    log "lowlevel: tethering stopped via cmd connectivity"
+    debug_log "lowlevel: tethering stopped via cmd connectivity"
   fi
 
   # Bring down known tethering interfaces directly (belt-and-suspenders,
@@ -779,7 +779,7 @@ lowlevel_stop_tethering() {
           if "$ip_cmd" link set "$tether_iface" down 2>/dev/null; then
             _ll_state_append "tether_ifaces_down" "$tether_iface"
             stopped=1
-            log "lowlevel: tether interface $tether_iface brought DOWN"
+            debug_log "lowlevel: tether interface $tether_iface brought DOWN"
           fi
           ;;
       esac
@@ -797,7 +797,7 @@ lowlevel_stop_tethering() {
 # tethering; we do NOT auto-restart it.
 lowlevel_restore_tethering_note() {
   _ll_state_exists "tether_was_active" || return 0
-  log "lowlevel: NOTE: tethering was stopped during boot; user must re-enable manually if needed"
+  log_on_transition "tether_stop_note" "stopped" "lowlevel: NOTE: tethering was stopped during boot; user must re-enable manually if needed"
   _ll_state_rm "tether_was_active"
   _ll_state_rm "tether_ifaces_down"
 }
@@ -812,7 +812,7 @@ lowlevel_prepare_environment_early() {
   local mode="${LOWLEVEL_MODE:-off}"
   _ll_init_dirs
   lowlevel_clear_stale_vpn_state
-  log "vpn_lockdown: post-fs-data observes only; no VPN setting writes in early boot"
+  debug_log "vpn_lockdown: post-fs-data observes only; no VPN setting writes in early boot"
   case "$mode" in
     off)
       debug_log "lowlevel_early: LOWLEVEL_MODE=off; lower-layer suppression disabled"
@@ -820,13 +820,13 @@ lowlevel_prepare_environment_early() {
       ;;
     safe|strict) ;;
     *)
-      log "lowlevel_early: unknown LOWLEVEL_MODE='$mode'; treating as off"
+      debug_log "lowlevel_early: unknown LOWLEVEL_MODE='$mode'; treating as off"
       return 0
       ;;
   esac
 
   _ll_state_set "mode" "$mode"
-  log "lowlevel_early: start (mode=$mode)"
+  debug_log "lowlevel_early: start (mode=$mode)"
 
   # Record that radios must be forced off in the late phase.
   # This state persists across the post-fs-data → service boundary.
@@ -850,19 +850,19 @@ lowlevel_prepare_environment_early() {
         up|unknown)
           if "$ip_cmd" link set "$iface" down 2>/dev/null; then
             _ll_state_append "ifaces_down_early" "$iface"
-            log "lowlevel_early: interface $iface brought DOWN"
+            debug_log "lowlevel_early: interface $iface brought DOWN"
           fi
           ;;
       esac
     done
   else
-    log "lowlevel_early: ip command or /sys/class/net not available; interface quiesce skipped"
+    debug_log "lowlevel_early: ip command or /sys/class/net not available; interface quiesce skipped"
   fi
 
   # Framework radio commands are NOT used here; defer to late phase.
-  log "lowlevel_early: framework radio disable deferred to late phase (service.sh)"
+  debug_log "lowlevel_early: framework radio disable deferred to late phase (service.sh)"
   # VPN setting writes are intentionally not performed from post-fs-data.
-  log "lowlevel_early: done"
+  debug_log "lowlevel_early: done"
 }
 
 # ── Late phase: framework-aware service suppression ─────────────────────────────
@@ -875,7 +875,7 @@ lowlevel_prepare_environment_late() {
     off) return 0 ;;
     safe|strict) ;;
     *)
-      log "lowlevel_late: unknown LOWLEVEL_MODE='$mode'; treating as off"
+      debug_log "lowlevel_late: unknown LOWLEVEL_MODE='$mode'; treating as off"
       return 0
       ;;
   esac
@@ -889,7 +889,7 @@ lowlevel_prepare_environment_late() {
     _ll_state_rm "ifaces_down_early"
   fi
 
-  log "lowlevel_late: start (mode=$mode)"
+  debug_log "lowlevel_late: start (mode=$mode)"
 
   # Interface quiesce: bring down any remaining UP interfaces only when explicitly enabled.
   if [ "${LOWLEVEL_INTERFACE_QUIESCE:-0}" = "1" ]; then
@@ -906,7 +906,7 @@ lowlevel_prepare_environment_late() {
       lowlevel_disable_wifi
       lowlevel_disable_mobile_data
     else
-      log "lowlevel_late: fast reconnect mode; Wi-Fi/mobile-data left unchanged behind netfilter hard block"
+      debug_log "lowlevel_late: fast reconnect mode; Wi-Fi/mobile-data left unchanged behind netfilter hard block"
     fi
     lowlevel_vpn_lockdown_enforce
     if [ "${LOWLEVEL_USE_BLUETOOTH_MANAGER:-0}" = "1" ]; then
@@ -915,13 +915,13 @@ lowlevel_prepare_environment_late() {
     if [ "${LOWLEVEL_USE_TETHER_STOP:-0}" = "1" ]; then
       lowlevel_stop_tethering
     fi
-    log "lowlevel_late: opportunistic service suppression done"
+    debug_log "lowlevel_late: opportunistic service suppression done"
   else
-    log "lowlevel_late: framework not ready; skipping service suppression this pass (iptables hard block remains)"
+    debug_log "lowlevel_late: framework not ready; skipping service suppression this pass (iptables hard block remains)"
   fi
 
   _ll_state_rm "radio_off_pending_early"
-  log "lowlevel_late: done"
+  debug_log "lowlevel_late: done"
 }
 
 # ── Periodic reassertion: keep radios off while waiting ───────────────────────
@@ -938,7 +938,7 @@ lowlevel_reassert_radios_off() {
     local wifi_state_now
     wifi_state_now="$(_ll_wifi_state)"
     if [ "$wifi_state_now" != "off" ]; then
-      log "lowlevel_reassert: Wi-Fi state=${wifi_state_now}; re-disabling"
+      log_on_transition "wifi_reassert" "$wifi_state_now" "lowlevel_reassert: Wi-Fi state=${wifi_state_now}; re-disabling"
       if has_cmd cmd && cmd wifi set-wifi-enabled disabled >/dev/null 2>&1; then
         debug_log "lowlevel_reassert: Wi-Fi re-disabled via cmd wifi"
       elif has_cmd svc; then
@@ -966,7 +966,7 @@ lowlevel_reassert_radios_off() {
     local data_state_now
     data_state_now="$(_ll_data_state)"
     if [ "$data_state_now" != "off" ]; then
-      log "lowlevel_reassert: mobile data state=${data_state_now}; re-disabling"
+      log_on_transition "mobile_reassert" "$data_state_now" "lowlevel_reassert: mobile data state=${data_state_now}; re-disabling"
       if has_cmd cmd && cmd phone data disable >/dev/null 2>&1; then
         debug_log "lowlevel_reassert: mobile data re-disabled via cmd phone"
       elif has_cmd svc; then
@@ -1049,7 +1049,7 @@ device_unlock_state() {
       ;;
   esac
 
-  log "unlock: user=${user} cmd_user=${cmd_user} dumpsys_user=${dumpsys_user} ce=${ce} keyguard=${keyguard} trust=${trust} => ${result}"
+  log_on_transition "unlock_probe" "$result" "unlock: user=${user} cmd_user=${cmd_user} dumpsys_user=${dumpsys_user} ce=${ce} keyguard=${keyguard} trust=${trust} => ${result}"
   printf '%s' "$result"
 }
 
@@ -1101,7 +1101,7 @@ lowlevel_prepare_environment() {
       ;;
     safe|strict) ;;
     *)
-      log "lowlevel: unknown LOWLEVEL_MODE='$mode'; treating as off"
+      debug_log "lowlevel: unknown LOWLEVEL_MODE='$mode'; treating as off"
       return 0
       ;;
   esac
@@ -1120,9 +1120,9 @@ lowlevel_prepare_environment() {
   _ll_state_rm "vpn_lockdown_released"
 
   _ll_state_set "mode" "$mode"
-  log "lowlevel_prepare_environment: start (mode=$mode)"
+  debug_log "lowlevel_prepare_environment: start (mode=$mode)"
   lowlevel_prepare_environment_late
-  log "lowlevel_prepare_environment: done"
+  debug_log "lowlevel_prepare_environment: done"
 }
 
 # Stage C of the staged release.  Called AFTER remove_block (Stage B) from
@@ -1134,7 +1134,7 @@ lowlevel_restore_changed_state() {
     return 0
   }
 
-  log "lowlevel_restore_changed_state: start"
+  debug_log "lowlevel_restore_changed_state: start"
   lowlevel_restore_interfaces
   lowlevel_vpn_lockdown_release_if_needed
   lowlevel_restore_wifi
@@ -1144,7 +1144,7 @@ lowlevel_restore_changed_state() {
   _ll_state_rm "wifi_initial_state"
   _ll_state_rm "data_initial_state"
   _ll_state_rm "mode"
-  log "lowlevel_restore_changed_state: done"
+  debug_log "lowlevel_restore_changed_state: done"
 }
 
 # Emergency / manual recovery (action.sh and uninstall.sh).
@@ -1155,7 +1155,7 @@ lowlevel_restore_changed_state() {
 # marker is only removed on success.  If all fallbacks fail the marker is
 # intentionally kept so a subsequent action-button press can retry.
 lowlevel_emergency_restore() {
-  log "lowlevel_emergency_restore: start"
+  log_on_transition "emergency_restore" "start" "lowlevel_emergency_restore: start"
 
   # ── Restore interfaces the module brought down ──────────────────────────────
   if _ll_state_exists "ifaces_down"; then
@@ -1166,14 +1166,14 @@ lowlevel_emergency_restore() {
       while IFS= read -r iface; do
         [ -n "$iface" ] || continue
         if "$ip_cmd" link set "$iface" up 2>/dev/null; then
-          log "lowlevel: emergency: interface $iface brought UP"
+          log_on_transition "emergency_iface_${iface}" "up" "lowlevel: emergency: interface $iface brought UP"
           iface_ok=$((iface_ok + 1))
         else
-          log "lowlevel: emergency: WARN: could not restore interface $iface"
+          log_on_transition "emergency_iface_${iface}" "fail" "lowlevel: emergency: WARN: could not restore interface $iface"
         fi
       done < "${LL_STATE_DIR}/ifaces_down"
     else
-      log "lowlevel: emergency: WARN: ip command not found; cannot restore interfaces"
+      log_on_transition "emergency_iface_error" "no_ip" "lowlevel: emergency: WARN: ip command not found; cannot restore interfaces"
     fi
     _ll_state_rm "ifaces_down"
   fi
@@ -1185,19 +1185,19 @@ lowlevel_emergency_restore() {
     local restored=0
     if has_cmd cmd && cmd wifi set-wifi-enabled enabled >/dev/null 2>&1; then
       restored=1
-      log "lowlevel: emergency: Wi-Fi re-enabled via cmd wifi"
+      log_on_transition "emergency_wifi" "success_cmd" "lowlevel: emergency: Wi-Fi re-enabled via cmd wifi"
     fi
     if [ "$restored" = "0" ] && has_cmd svc; then
       if svc wifi enable 2>/dev/null; then
         restored=1
-        log "lowlevel: emergency: Wi-Fi re-enabled via svc wifi (fallback)"
+        log_on_transition "emergency_wifi" "success_svc" "lowlevel: emergency: Wi-Fi re-enabled via svc wifi (fallback)"
       fi
     fi
     if [ "$restored" = "1" ]; then
       _ll_state_rm "wifi_was_enabled"
       _ll_state_rm "wifi_initial_state"
     else
-      log "lowlevel: emergency: WARN: could not re-enable Wi-Fi; marker kept for retry"
+      log_on_transition "emergency_wifi" "fail" "lowlevel: emergency: WARN: could not re-enable Wi-Fi; marker kept for retry"
     fi
   fi
 
@@ -1206,19 +1206,19 @@ lowlevel_emergency_restore() {
     local restored=0
     if has_cmd cmd && cmd phone data enable >/dev/null 2>&1; then
       restored=1
-      log "lowlevel: emergency: mobile data re-enabled via cmd phone"
+      log_on_transition "emergency_mobile" "success_cmd" "lowlevel: emergency: mobile data re-enabled via cmd phone"
     fi
     if [ "$restored" = "0" ] && has_cmd svc; then
       if svc data enable 2>/dev/null; then
         restored=1
-        log "lowlevel: emergency: mobile data re-enabled via svc data (fallback)"
+        log_on_transition "emergency_mobile" "success_svc" "lowlevel: emergency: mobile data re-enabled via svc data (fallback)"
       fi
     fi
     if [ "$restored" = "1" ]; then
       _ll_state_rm "data_was_enabled"
       _ll_state_rm "data_initial_state"
     else
-      log "lowlevel: emergency: WARN: could not re-enable mobile data; marker kept for retry"
+      log_on_transition "emergency_mobile" "fail" "lowlevel: emergency: WARN: could not re-enable mobile data; marker kept for retry"
     fi
   fi
 
@@ -1227,25 +1227,25 @@ lowlevel_emergency_restore() {
     local restored=0
     if has_cmd cmd && cmd bluetooth_manager enable >/dev/null 2>&1; then
       restored=1
-      log "lowlevel: emergency: Bluetooth re-enabled via cmd bluetooth_manager"
+      log_on_transition "emergency_bt" "success_cmd" "lowlevel: emergency: Bluetooth re-enabled via cmd bluetooth_manager"
     fi
     if [ "$restored" = "0" ] && has_cmd svc; then
       if svc bluetooth enable 2>/dev/null; then
         restored=1
-        log "lowlevel: emergency: Bluetooth re-enabled via svc bluetooth (fallback)"
+        log_on_transition "emergency_bt" "success_svc" "lowlevel: emergency: Bluetooth re-enabled via svc bluetooth (fallback)"
       fi
     fi
     if [ "$restored" = "1" ]; then
       _ll_state_rm "bt_was_enabled"
     else
-      log "lowlevel: emergency: WARN: could not re-enable Bluetooth; marker kept for retry"
+      log_on_transition "emergency_bt" "fail" "lowlevel: emergency: WARN: could not re-enable Bluetooth; marker kept for retry"
     fi
   fi
 
   # ── Note tethering status ───────────────────────────────────────────────────
   # Tethering is never auto-restarted; just note and clean up.
   if _ll_state_exists "tether_was_active"; then
-    log "lowlevel: emergency: NOTE: tethering was stopped; user must re-enable manually"
+    log_on_transition "emergency_tether_note" "stopped" "lowlevel: emergency: NOTE: tethering was stopped; user must re-enable manually"
     _ll_state_rm "tether_was_active"
     _ll_state_rm "tether_ifaces_down"
   fi
@@ -1253,5 +1253,5 @@ lowlevel_emergency_restore() {
   _ll_state_rm "wifi_initial_state"
   _ll_state_rm "data_initial_state"
   _ll_state_rm "mode"
-  log "lowlevel_emergency_restore: done"
+  log_on_transition "emergency_restore" "done" "lowlevel_emergency_restore: done"
 }

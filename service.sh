@@ -65,14 +65,14 @@ fi
   TRANSPORT_SETTLE_SECS_POST_BOOT_EFFECTIVE="${TRANSPORT_SETTLE_SECS_POST_BOOT_EFFECTIVE:-1}"
   BOOT_COMPLETE_ACCELERATE=1
 
-  log "service: start ($MODULE_VERSION)"
+  debug_log "service: start ($MODULE_VERSION)"
   log_effective_config
-  log "service: config: poll=${POLL_INTERVAL_SECS}s fast=${FAST_STABLE_SECS}s slow=${SLOW_STABLE_SECS}s transport_absence=${TRANSPORT_ABSENCE_STABLE_SECS}s orphan=${TRANSPORT_ORPHAN_STABLE_SECS}s absence_pb=${TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT}s transport_inconclusive=${TRANSPORT_INCONCLUSIVE_SECS}s inconclusive_pb=${TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT}s"
-  log "service: config: reassert=${RADIO_REASSERT_INTERVAL}s blackout_reassert=${BLACKOUT_REASSERT_INTERVAL}s density_min=${AFWALL_RULE_DENSITY_MIN} liveness_pb=${FAMILY_FAST_SECS_POST_BOOT_EFFECTIVE}s fallback_pb=${FAMILY_SLOW_SECS_POST_BOOT_EFFECTIVE}s settle_pb=${TRANSPORT_SETTLE_SECS_POST_BOOT_EFFECTIVE}s"
-  log "service: snapshot backend v4=iptables-S"
-  log "service: snapshot backend v6=ip6tables-S"
+  debug_log "service: config: poll=${POLL_INTERVAL_SECS}s fast=${FAST_STABLE_SECS}s slow=${SLOW_STABLE_SECS}s transport_absence=${TRANSPORT_ABSENCE_STABLE_SECS}s orphan=${TRANSPORT_ORPHAN_STABLE_SECS}s absence_pb=${TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT}s transport_inconclusive=${TRANSPORT_INCONCLUSIVE_SECS}s inconclusive_pb=${TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT}s"
+  debug_log "service: config: reassert=${RADIO_REASSERT_INTERVAL}s blackout_reassert=${BLACKOUT_REASSERT_INTERVAL}s density_min=${AFWALL_RULE_DENSITY_MIN} liveness_pb=${FAMILY_FAST_SECS_POST_BOOT_EFFECTIVE}s fallback_pb=${FAMILY_SLOW_SECS_POST_BOOT_EFFECTIVE}s settle_pb=${TRANSPORT_SETTLE_SECS_POST_BOOT_EFFECTIVE}s"
+  debug_log "service: snapshot backend v4=iptables-S"
+  debug_log "service: snapshot backend v6=ip6tables-S"
 
-  log "service: worker started"
+  debug_log "service: worker started"
 
   case "$WATCHDOG_POLICY" in
     block|unblock) ;;
@@ -129,10 +129,10 @@ fi
   _block_was_installed=0
   if [ -f "${STATE_DIR}/block_installed" ]; then
     _block_was_installed=1
-    log "service: block_installed=1 from state file"
-    log "service: blackout_active=$([ -f "${STATE_DIR}/blackout_active" ] && printf 1 || printf 0) radio_off_pending=$([ -f "${STATE_DIR}/radio_off_pending" ] && printf 1 || printf 0)"
+    debug_log "service: block_installed=1 from state file"
+    debug_log "service: blackout_active=$([ -f "${STATE_DIR}/blackout_active" ] && printf 1 || printf 0) radio_off_pending=$([ -f "${STATE_DIR}/radio_off_pending" ] && printf 1 || printf 0)"
   else
-    log "service: block_installed not set (post-fs-data did not install block this boot)"
+    debug_log "service: block_installed not set (post-fs-data did not install block this boot)"
   fi
 
   # ── C/E) Blackout integrity check and repair on startup ─────────────────────
@@ -140,20 +140,20 @@ fi
   # repair it.  Do NOT treat missing live block as "no handoff needed" when the
   # state says the block should be present.
   if [ "$_block_was_installed" = "1" ]; then
-    log "service: integrity check: verifying live OUTPUT blackout state"
-    log_blackout_integrity "v4" "startup"
-    log_blackout_integrity "v6" "startup"
+    debug_log "service: integrity check: verifying live OUTPUT blackout state"
+    log_blackout_integrity "v4" "startup" 1
+    log_blackout_integrity "v6" "startup" 1
     if ! output_block_intact_v4; then
-      log "service: INTEGRITY FAILURE: v4 block_installed=1 but v4 OUTPUT block not intact — repairing"
-      repair_output_block_v4 || log "service: v4 startup repair FAILED"
+      log_on_transition "v4_integrity" "degraded" "service: INTEGRITY FAILURE: v4 block_installed=1 but v4 OUTPUT block not intact — repairing"
+      repair_output_block_v4 || log_on_transition "v4_integrity" "repair_failed" "service: v4 startup repair FAILED"
     else
-      log "service: integrity check: v4 OUTPUT block intact"
+      debug_log "service: integrity check: v4 OUTPUT block intact"
     fi
     if ! output_block_intact_v6; then
-      log "service: INTEGRITY FAILURE: v6 block_installed=1 but v6 OUTPUT block not intact — repairing"
-      repair_output_block_v6 || log "service: v6 startup repair FAILED"
+      log_on_transition "v6_integrity" "degraded" "service: INTEGRITY FAILURE: v6 block_installed=1 but v6 OUTPUT block not intact — repairing"
+      repair_output_block_v6 || log_on_transition "v6_integrity" "repair_failed" "service: v6 startup repair FAILED"
     else
-      log "service: integrity check: v6 OUTPUT block intact"
+      debug_log "service: integrity check: v6 OUTPUT block intact"
     fi
   fi
 
@@ -170,76 +170,76 @@ fi
   # Use strong integrity check: chain + DROP rule + OUTPUT jump required.
   if output_block_intact_v4; then
     v4_blocked=1
-    log "service: v4 OUTPUT block intact (table=${_v4_table:-unknown})"
+    debug_log "service: v4 OUTPUT block intact (table=${_v4_table:-unknown})"
   elif output_block_present_v4; then
     # Chain exists but integrity degraded; count as blocked and repair will run.
     v4_blocked=1
-    log "service: v4 OUTPUT block partially present (degraded; chain exists but DROP/jump incomplete)"
-    log_blackout_integrity "v4" "degraded_startup"
+    log_on_transition "v4_startup_status" "degraded" "service: v4 OUTPUT block partially present (degraded; chain exists but DROP/jump incomplete)"
+    log_blackout_integrity "v4" "degraded_startup" 1
   elif [ "$_block_was_installed" = "1" ] && [ "$_v4_state_exists" = "1" ]; then
     # block_installed=1 and per-family state file confirms v4 was installed, but
     # the live block is absent even after repair attempt: fail-closed.
     v4_blocked=1
-    log "service: v4 OUTPUT block ABSENT after repair attempt — treating as blocked (fail-closed)"
+    log_on_transition "v4_startup_status" "absent_fail_closed" "service: v4 OUTPUT block ABSENT after repair attempt — treating as blocked (fail-closed)"
   else
-    log "service: v4 OUTPUT block not detected — no v4 handoff needed"
+    debug_log "service: v4 OUTPUT block not detected — no v4 handoff needed"
   fi
 
   if output_block_intact_v6; then
     v6_blocked=1
-    log "service: v6 OUTPUT block intact (table=${_v6_table:-unknown})"
+    debug_log "service: v6 OUTPUT block intact (table=${_v6_table:-unknown})"
   elif output_block_present_v6; then
     v6_blocked=1
-    log "service: v6 OUTPUT block partially present (degraded; chain exists but DROP/jump incomplete)"
-    log_blackout_integrity "v6" "degraded_startup"
+    log_on_transition "v6_startup_status" "degraded" "service: v6 OUTPUT block partially present (degraded; chain exists but DROP/jump incomplete)"
+    log_blackout_integrity "v6" "degraded_startup" 1
   elif [ "$_block_was_installed" = "1" ] && [ "$_v6_state_exists" = "1" ]; then
     v6_blocked=1
-    log "service: v6 OUTPUT block ABSENT after repair attempt — treating as blocked (fail-closed)"
+    log_on_transition "v6_startup_status" "absent_fail_closed" "service: v6 OUTPUT block ABSENT after repair attempt — treating as blocked (fail-closed)"
   else
-    log "service: v6 OUTPUT block not detected — no v6 handoff needed"
+    debug_log "service: v6 OUTPUT block not detected — no v6 handoff needed"
   fi
 
   if forward_block_intact_v4; then
     v4_fwd_blocked=1
     printf '1' > "${STATE_DIR}/ipv4_fwd_active" 2>/dev/null || true
-    log "service: v4 FORWARD block active (verified parent jump)"
+    debug_log "service: v4 FORWARD block active (verified parent jump)"
   elif forward_block_degraded_v4 || [ -f "${STATE_DIR}/ipv4_fwd_active" ]; then
     rm -f "${STATE_DIR}/ipv4_fwd_active" 2>/dev/null || true
-    log "service: v4 FORWARD block degraded/orphaned — repairing"
+    log_on_transition "v4_fwd_startup" "degraded" "service: v4 FORWARD block degraded/orphaned — repairing"
     if repair_forward_block_v4 && forward_block_intact_v4; then
       v4_fwd_blocked=1
       printf '1' > "${STATE_DIR}/ipv4_fwd_active" 2>/dev/null || true
-      log "service: v4 FORWARD startup repair restored parent jump"
+      log_on_transition "v4_fwd_startup" "repaired" "service: v4 FORWARD startup repair restored parent jump"
     else
-      log "service: v4 FORWARD startup repair FAILED"
+      log_on_transition "v4_fwd_startup" "fail" "service: v4 FORWARD startup repair FAILED"
     fi
   fi
   if forward_block_intact_v6; then
     v6_fwd_blocked=1
     printf '1' > "${STATE_DIR}/ipv6_fwd_active" 2>/dev/null || true
-    log "service: v6 FORWARD block active (verified parent jump)"
+    debug_log "service: v6 FORWARD block active (verified parent jump)"
   elif forward_block_degraded_v6 || [ -f "${STATE_DIR}/ipv6_fwd_active" ]; then
     rm -f "${STATE_DIR}/ipv6_fwd_active" 2>/dev/null || true
-    log "service: v6 FORWARD block degraded/orphaned — repairing"
+    log_on_transition "v6_fwd_startup" "degraded" "service: v6 FORWARD block degraded/orphaned — repairing"
     if repair_forward_block_v6 && forward_block_intact_v6; then
       v6_fwd_blocked=1
       printf '1' > "${STATE_DIR}/ipv6_fwd_active" 2>/dev/null || true
-      log "service: v6 FORWARD startup repair restored parent jump"
+      log_on_transition "v6_fwd_startup" "repaired" "service: v6 FORWARD startup repair restored parent jump"
     else
-      log "service: v6 FORWARD startup repair FAILED"
+      log_on_transition "v6_fwd_startup" "fail" "service: v6 FORWARD startup repair FAILED"
     fi
   fi
   if input_block_present_v4; then
-    log "service: v4 INPUT block active (verified parent jump)"
+    debug_log "service: v4 INPUT block active (verified parent jump)"
   elif input_block_degraded_v4 || [ -f "${STATE_DIR}/ipv4_in_active" ]; then
-    log "service: v4 INPUT block degraded/orphaned — repairing"
-    repair_input_block_v4 || log "service: v4 INPUT startup repair FAILED"
+    log_on_transition "v4_in_startup" "degraded" "service: v4 INPUT block degraded/orphaned — repairing"
+    repair_input_block_v4 || log_on_transition "v4_in_startup" "repair_failed" "service: v4 INPUT startup repair FAILED"
   fi
   if input_block_present_v6; then
-    log "service: v6 INPUT block active (verified parent jump)"
+    debug_log "service: v6 INPUT block active (verified parent jump)"
   elif input_block_degraded_v6 || [ -f "${STATE_DIR}/ipv6_in_active" ]; then
-    log "service: v6 INPUT block degraded/orphaned — repairing"
-    repair_input_block_v6 || log "service: v6 INPUT startup repair FAILED"
+    log_on_transition "v6_in_startup" "degraded" "service: v6 INPUT block degraded/orphaned — repairing"
+    repair_input_block_v6 || log_on_transition "v6_in_startup" "repair_failed" "service: v6 INPUT startup repair FAILED"
   fi
 
   # ── E) Safe early-exit gate ──────────────────────────────────────────────────
@@ -252,16 +252,16 @@ fi
       # block_installed=1 but no per-family state files or live blocks found.
       # This is an unusual state (state files lost or cleared).  Fail-closed:
       # assume both families were blocked and perform full handoff wait.
-      log "service: WARN: block_installed=1 but no per-family state/live blocks detected — failing closed (assuming both families blocked)"
+      debug_log "service: WARN: block_installed=1 but no per-family state/live blocks detected — failing closed (assuming both families blocked)"
       v4_blocked=1
       v6_blocked=1
     else
-      log "service: no OUTPUT blocks detected and block_installed not set — skipping handoff"
+      debug_log "service: no OUTPUT blocks detected and block_installed not set — skipping handoff"
       if ! sys_boot_completed; then
-        log "service: deferring lower-layer restore until sys.boot_completed=1"
+        log_on_transition "startup_handoff" "defer_restore" "service: deferring lower-layer restore until sys.boot_completed=1"
         while :; do
           if manual_override_active || stop_requested_active; then
-            log "service: stop/override detected while waiting for boot_complete"
+            debug_log "service: stop/override detected while waiting for boot_complete"
             clear_blackout_active
             rm -f "${STATE_DIR}/block_installed" 2>/dev/null || true
             remove_service_pid
@@ -271,7 +271,7 @@ fi
           sleep 1
         done
       fi
-      log "service: boot_complete reached — restoring lower-layer"
+      log_on_transition "startup_handoff" "restoring" "service: boot_complete reached — restoring lower-layer"
       clear_blackout_active
       lowlevel_restore_changed_state
       remove_service_pid
@@ -318,11 +318,11 @@ fi
   # If not gating or not suppressed, mark as done immediately.
   if [ "$_wifi_was_suppressed" = "0" ]; then
     wifi_done=1
-    log "service: wifi transport restore: skipped (module did not suppress Wi-Fi)"
+    debug_log "service: wifi transport restore: skipped (module did not suppress Wi-Fi)"
   fi
   if [ "$_mobile_was_suppressed" = "0" ]; then
     mobile_done=1
-    log "service: mobile transport restore: skipped (module did not suppress mobile data)"
+    debug_log "service: mobile transport restore: skipped (module did not suppress mobile data)"
   fi
 
   # Per-transport fingerprint stable-since tracking.
@@ -394,7 +394,7 @@ fi
     if [ "$_boot_complete_now" = "1" ] && [ "$device_unlocked" = "1" ]; then
       readiness_gate_open=1
       readiness_gate_ts="$NOW"
-      log "service: diagnostic readiness state observed (boot_completed=1 unlocked=${device_unlocked}); graph handoff was already active"
+      debug_log "service: diagnostic readiness state observed (boot_completed=1 unlocked=${device_unlocked}); graph handoff was already active"
       _refresh_afwall_pkg "diagnostic_readiness" || true
       return 0
     fi
@@ -411,11 +411,11 @@ fi
   _log_pre_remove_integrity_v4() {
     local context="${1:-remove}"
     if output_block_intact_v4; then
-      log "service: ${context} v4 pre-remove integrity: block intact — proceeding"
+      debug_log "service: ${context} v4 pre-remove integrity: block intact — proceeding"
     elif output_block_present_v4; then
-      log "service: ${context} v4 pre-remove integrity: block partially present (degraded)"
+      debug_log "service: ${context} v4 pre-remove integrity: block partially present (degraded)"
     else
-      log "service: INTEGRITY FAILURE: ${context} v4 block already absent before intentional removal; release accounting is invalid"
+      log_on_transition "v4_integrity" "fail" "service: INTEGRITY FAILURE: ${context} v4 block already absent before intentional removal; release accounting is invalid"
     fi
     log_blackout_integrity "v4" "${context}_pre_remove"
   }
@@ -423,11 +423,11 @@ fi
   _log_pre_remove_integrity_v6() {
     local context="${1:-remove}"
     if output_block_intact_v6; then
-      log "service: ${context} v6 pre-remove integrity: block intact — proceeding"
+      debug_log "service: ${context} v6 pre-remove integrity: block intact — proceeding"
     elif output_block_present_v6; then
-      log "service: ${context} v6 pre-remove integrity: block partially present (degraded)"
+      debug_log "service: ${context} v6 pre-remove integrity: block partially present (degraded)"
     else
-      log "service: INTEGRITY FAILURE: ${context} v6 block already absent before intentional removal; release accounting is invalid"
+      log_on_transition "v6_integrity" "fail" "service: INTEGRITY FAILURE: ${context} v6 block already absent before intentional removal; release accounting is invalid"
     fi
     log_blackout_integrity "v6" "${context}_pre_remove"
   }
@@ -474,9 +474,9 @@ fi
         if [ -z "$wifi_last_fp" ]; then
           wifi_last_fp="$_new_wifi_fp"
           wifi_fp_stable_since="$now_ts"
-          log_once_per_phase "wifi_seen" "service: wifi subtree first seen fp=$_new_wifi_fp reachable=1"
+          log_on_transition "wifi_seen" "seen" "service: wifi subtree first seen fp=$_new_wifi_fp reachable=1"
         elif [ "$_new_wifi_fp" != "$wifi_last_fp" ]; then
-          log_once_per_phase "wifi_drift" "service: wifi subtree drift old=$wifi_last_fp new=$_new_wifi_fp reset"
+          log_on_transition "wifi_seen" "drift" "service: wifi subtree drift old=$wifi_last_fp new=$_new_wifi_fp reset"
           wifi_last_fp="$_new_wifi_fp"
           wifi_fp_stable_since="$now_ts"
         fi
@@ -487,7 +487,7 @@ fi
         local _wifi_settle="$TRANSPORT_SETTLE_SECS_EFFECTIVE"
         [ "$_boot_complete_now" = "1" ] && _wifi_settle="$TRANSPORT_SETTLE_SECS_POST_BOOT_EFFECTIVE"
         if [ "$_wifi_stable" -ge "$_wifi_settle" ]; then
-          log "service: wifi transport: subtree stable=${_wifi_stable}s fp=$wifi_last_fp — Wi-Fi ready; attempting restore"
+          log_on_transition "wifi_restore" "stable" "service: wifi transport: subtree stable=${_wifi_stable}s fp=$wifi_last_fp — Wi-Fi ready; attempting restore"
           if lowlevel_restore_wifi_if_allowed; then
             wifi_done=1
             wifi_pending_since=0
@@ -523,9 +523,9 @@ fi
             # Unlock confidence and boot-complete diagnostics must not deadlock
             # restoration.
             if [ "$_wifi_in_snap" = "1" ]; then
-                log_once_per_phase "wifi_unreachable_fallback" "service: wifi transport accepted via unreachable-stable fallback after ${_w_absent_elapsed}s (subtree present but unreachable from AFWall graph); attempting restore"
+                log_on_transition "wifi_fallback" "unreachable" "service: wifi transport accepted via unreachable-stable fallback after ${_w_absent_elapsed}s (subtree present but unreachable from AFWall graph); attempting restore"
             else
-                log_once_per_phase "wifi_absence_fallback" "service: wifi transport accepted via absence-stable fallback after ${_w_absent_elapsed}s (no wifi-prefixed subtree detected in snapshot); attempting restore"
+                log_on_transition "wifi_fallback" "absence" "service: wifi transport accepted via absence-stable fallback after ${_w_absent_elapsed}s (no wifi-prefixed subtree detected in snapshot); attempting restore"
             fi
             if lowlevel_restore_wifi_if_allowed; then
               wifi_done=1
@@ -550,11 +550,11 @@ fi
         fi
         if [ "$_w_pending_elapsed" -ge "$_w_pending_threshold" ]; then
           # Do not let unreliable unlock diagnostics hold a verified restore forever.
-          log_once_per_phase "wifi_inconclusive" "service: wifi transport inconclusive for ${_w_pending_elapsed}s (in_snap=${_wifi_in_snap} reachable=${_wifi_reachable}); forcing verified restore attempt"
+          log_on_transition "wifi_inconclusive" "inconclusive" "service: wifi transport inconclusive for ${_w_pending_elapsed}s (in_snap=${_wifi_in_snap} reachable=${_wifi_reachable}); forcing verified restore attempt"
           if lowlevel_restore_wifi_if_allowed; then
             wifi_done=1
             wifi_pending_since=0
-            log "service: wifi transport resolved via inconclusive-time fallback"
+            log_on_transition "wifi_restore" "success_fallback" "service: wifi transport resolved via inconclusive-time fallback"
           else
             debug_log "service: wifi inconclusive-time fallback restore not yet confirmed; continuing retries"
           fi
@@ -586,9 +586,9 @@ fi
         if [ -z "$mobile_last_fp" ]; then
           mobile_last_fp="$_new_mobile_fp"
           mobile_fp_stable_since="$now_ts"
-          log_once_per_phase "mobile_seen" "service: mobile subtree first seen fp=$_new_mobile_fp reachable=1"
+          log_on_transition "mobile_seen" "seen" "service: mobile subtree first seen fp=$_new_mobile_fp reachable=1"
         elif [ "$_new_mobile_fp" != "$mobile_last_fp" ]; then
-          log_once_per_phase "mobile_drift" "service: mobile subtree drift old=$mobile_last_fp new=$_new_mobile_fp reset"
+          log_on_transition "mobile_seen" "drift" "service: mobile subtree drift old=$mobile_last_fp new=$_new_mobile_fp reset"
           mobile_last_fp="$_new_mobile_fp"
           mobile_fp_stable_since="$now_ts"
         fi
@@ -599,7 +599,7 @@ fi
         local _mobile_settle="$TRANSPORT_SETTLE_SECS_EFFECTIVE"
         [ "$_boot_complete_now" = "1" ] && _mobile_settle="$TRANSPORT_SETTLE_SECS_POST_BOOT_EFFECTIVE"
         if [ "$_mobile_stable" -ge "$_mobile_settle" ]; then
-          log "service: mobile transport: subtree stable=${_mobile_stable}s fp=$mobile_last_fp — mobile ready; attempting restore"
+          log_on_transition "mobile_restore" "stable" "service: mobile transport: subtree stable=${_mobile_stable}s fp=$mobile_last_fp — mobile ready; attempting restore"
           if lowlevel_restore_mobile_data_if_allowed; then
             mobile_done=1
             mobile_pending_since=0
@@ -633,9 +633,9 @@ fi
             # Unlock confidence and boot-complete diagnostics must not deadlock
             # restoration.
             if [ "$_mobile_in_snap" = "1" ]; then
-                log_once_per_phase "mobile_unreachable_fallback" "service: mobile transport accepted via unreachable-stable fallback after ${_m_absent_elapsed}s (subtree present but unreachable from AFWall graph); attempting restore"
+                log_on_transition "mobile_fallback" "unreachable" "service: mobile transport accepted via unreachable-stable fallback after ${_m_absent_elapsed}s (subtree present but unreachable from AFWall graph); attempting restore"
             else
-                log_once_per_phase "mobile_absence_fallback" "service: mobile transport accepted via absence-stable fallback after ${_m_absent_elapsed}s (no mobile-prefixed subtree detected in snapshot); attempting restore"
+                log_on_transition "mobile_fallback" "absence" "service: mobile transport accepted via absence-stable fallback after ${_m_absent_elapsed}s (no mobile-prefixed subtree detected in snapshot); attempting restore"
             fi
             if lowlevel_restore_mobile_data_if_allowed; then
               mobile_done=1
@@ -656,11 +656,11 @@ fi
         fi
         if [ "$_m_pending_elapsed" -ge "$_m_pending_threshold" ]; then
           # Do not let unreliable unlock diagnostics hold a verified restore forever.
-          log_once_per_phase "mobile_inconclusive" "service: mobile transport inconclusive for ${_m_pending_elapsed}s (in_snap=${_mobile_in_snap} reachable=${_mobile_reachable}); forcing verified restore attempt"
+          log_on_transition "mobile_inconclusive" "inconclusive" "service: mobile transport inconclusive for ${_m_pending_elapsed}s (in_snap=${_mobile_in_snap} reachable=${_mobile_reachable}); forcing verified restore attempt"
           if lowlevel_restore_mobile_data_if_allowed; then
             mobile_done=1
             mobile_pending_since=0
-            log "service: mobile transport resolved via inconclusive-time fallback"
+            log_on_transition "mobile_restore" "success_fallback" "service: mobile transport resolved via inconclusive-time fallback"
           else
             debug_log "service: mobile inconclusive-time fallback restore not yet confirmed; continuing retries"
           fi
@@ -742,8 +742,8 @@ fi
         last_blackout_reassert_ts="$NOW"
         if [ "$v4_blocked" = "1" ] && [ "$v4_released" = "0" ]; then
           if ! output_block_intact_v4; then
-            log_once_per_phase "v4_integrity_repair" "service: INTEGRITY REPAIR v4: OUTPUT block missing or degraded — repairing"
-            repair_output_block_v4 || log_once_per_phase "v4_integrity_fail" "service: v4 periodic repair FAILED"
+            log_on_transition "v4_repair" "out_degraded" "service: INTEGRITY REPAIR v4: OUTPUT block missing or degraded — repairing"
+            repair_output_block_v4 || log_on_transition "v4_repair" "out_failed" "service: v4 periodic repair FAILED"
             # Re-assert blackout state markers (must not be cleared by repair).
             mark_blackout_active
           else
@@ -752,8 +752,8 @@ fi
         fi
         if [ "$v6_blocked" = "1" ] && [ "$v6_released" = "0" ]; then
           if ! output_block_intact_v6; then
-            log_once_per_phase "v6_integrity_repair" "service: INTEGRITY REPAIR v6: OUTPUT block missing or degraded — repairing"
-            repair_output_block_v6 || log_once_per_phase "v6_integrity_fail" "service: v6 periodic repair FAILED"
+            log_on_transition "v6_repair" "out_degraded" "service: INTEGRITY REPAIR v6: OUTPUT block missing or degraded — repairing"
+            repair_output_block_v6 || log_on_transition "v6_repair" "out_failed" "service: v6 periodic repair FAILED"
             mark_blackout_active
           else
             debug_log "service: blackout_reassert v6: intact"
@@ -761,22 +761,22 @@ fi
         fi
         if [ "${ENABLE_FORWARD_BLOCK:-1}" != "0" ]; then
           if [ "$v4_fwd_blocked" = "1" ] && ! forward_block_intact_v4; then
-            log_once_per_phase "v4_fwd_repair" "service: INTEGRITY REPAIR v4: FORWARD block degraded/orphaned — repairing"
-            repair_forward_block_v4 || log_once_per_phase "v4_fwd_fail" "service: v4 FORWARD periodic repair FAILED"
+            log_on_transition "v4_repair" "fwd_degraded" "service: INTEGRITY REPAIR v4: FORWARD block degraded/orphaned — repairing"
+            repair_forward_block_v4 || log_on_transition "v4_repair" "fwd_failed" "service: v4 FORWARD periodic repair FAILED"
           fi
           if [ "$v6_fwd_blocked" = "1" ] && ! forward_block_intact_v6; then
-            log_once_per_phase "v6_fwd_repair" "service: INTEGRITY REPAIR v6: FORWARD block degraded/orphaned — repairing"
-            repair_forward_block_v6 || log_once_per_phase "v6_fwd_fail" "service: v6 FORWARD periodic repair FAILED"
+            log_on_transition "v6_repair" "fwd_degraded" "service: INTEGRITY REPAIR v6: FORWARD block degraded/orphaned — repairing"
+            repair_forward_block_v6 || log_on_transition "v6_repair" "fwd_failed" "service: v6 FORWARD periodic repair FAILED"
           fi
         fi
         if [ "${ENABLE_INPUT_BLOCK:-0}" = "1" ]; then
           if [ -f "${STATE_DIR}/ipv4_in_active" ] && ! input_block_intact_v4; then
-            log_once_per_phase "v4_in_repair" "service: INTEGRITY REPAIR v4: INPUT block degraded/orphaned — repairing"
-            repair_input_block_v4 || log_once_per_phase "v4_in_fail" "service: v4 INPUT periodic repair FAILED"
+            log_on_transition "v4_repair" "in_degraded" "service: INTEGRITY REPAIR v4: INPUT block degraded/orphaned — repairing"
+            repair_input_block_v4 || log_on_transition "v4_repair" "in_failed" "service: v4 INPUT periodic repair FAILED"
           fi
           if [ -f "${STATE_DIR}/ipv6_in_active" ] && ! input_block_intact_v6; then
-            log_once_per_phase "v6_in_repair" "service: INTEGRITY REPAIR v6: INPUT block degraded/orphaned — repairing"
-            repair_input_block_v6 || log_once_per_phase "v6_in_fail" "service: v6 INPUT periodic repair FAILED"
+            log_on_transition "v6_repair" "in_degraded" "service: INTEGRITY REPAIR v6: INPUT block degraded/orphaned — repairing"
+            repair_input_block_v6 || log_on_transition "v6_repair" "in_failed" "service: v6 INPUT periodic repair FAILED"
           fi
         fi
       fi
@@ -850,11 +850,11 @@ fi
           v4_last_fp="$_new_v4_fp"
           v4_fp_stable_since="$NOW"
           v4_graph_seen_ts="$NOW"
-          log_once_per_phase "v4_seen" "service: v4 graph first seen fp=$_new_v4_fp"
+          log_on_transition "v4_graph" "seen" "service: v4 graph first seen fp=$_new_v4_fp"
           log_transition_snapshot "v4" "takeover_first"
         elif [ "$_new_v4_fp" != "$v4_last_fp" ]; then
           # Fingerprint drifted — AFWall is still populating rules.
-          log_once_per_phase "v4_drift" "service: v4 graph drift old=$v4_last_fp new=$_new_v4_fp reset"
+          log_on_transition "v4_graph" "drift" "service: v4 graph drift old=$v4_last_fp new=$_new_v4_fp reset"
           v4_last_fp="$_new_v4_fp"
           v4_fp_stable_since="$NOW"
         fi
@@ -923,7 +923,7 @@ fi
       else
         # Graph absent or trivial — reset fingerprint state.
         if [ -n "$v4_last_fp" ]; then
-          log_once_per_phase "v4_lost" "service: v4 AFWall graph gone/trivial — resetting stability"
+          log_on_transition "v4_graph" "lost" "service: v4 AFWall graph gone/trivial — resetting stability"
           log_transition_snapshot "v4" "takeover_lost"
         fi
         v4_last_fp=""; v4_fp_stable_since=0
@@ -943,10 +943,10 @@ fi
           v6_last_fp="$_new_v6_fp"
           v6_fp_stable_since="$NOW"
           v6_graph_seen_ts="$NOW"
-          log_once_per_phase "v6_seen" "service: v6 graph first seen fp=$_new_v6_fp"
+          log_on_transition "v6_graph" "seen" "service: v6 graph first seen fp=$_new_v6_fp"
           log_transition_snapshot "v6" "takeover_first"
         elif [ "$_new_v6_fp" != "$v6_last_fp" ]; then
-          log "service: v6 graph drift old=$v6_last_fp new=$_new_v6_fp reset"
+          log_on_transition "v6_graph" "drift" "service: v6 graph drift old=$v6_last_fp new=$_new_v6_fp reset"
           v6_last_fp="$_new_v6_fp"
           v6_fp_stable_since="$NOW"
         fi
@@ -1009,7 +1009,7 @@ fi
 
       else
         if [ -n "$v6_last_fp" ]; then
-          log_once_per_phase "v6_lost" "service: v6 AFWall graph gone/trivial — resetting stability"
+          log_on_transition "v6_graph" "lost" "service: v6 AFWall graph gone/trivial — resetting stability"
           log_transition_snapshot "v6" "takeover_lost"
         fi
         v6_last_fp=""; v6_fp_stable_since=0
@@ -1032,7 +1032,7 @@ fi
     # Retry even before boot_complete if the transport is already marked done.
     if [ "$wifi_done" = "1" ] && _ll_state_exists "wifi_was_enabled"; then
       if [ "$_wifi_restore_logged" = "0" ]; then
-        log "service: wifi marker still present after done=1 — retrying Wi-Fi restore"
+        debug_log "service: wifi marker still present after done=1 — retrying Wi-Fi restore"
         _wifi_restore_logged=1
       fi
       lowlevel_restore_wifi_if_allowed || debug_log "service: wifi retry restore not yet confirmed"
@@ -1041,7 +1041,7 @@ fi
     fi
     if [ "$mobile_done" = "1" ] && _ll_state_exists "data_was_enabled"; then
       if [ "$_mobile_restore_logged" = "0" ]; then
-        log "service: mobile marker still present after done=1 — retrying mobile restore"
+        debug_log "service: mobile marker still present after done=1 — retrying mobile restore"
         _mobile_restore_logged=1
       fi
       lowlevel_restore_mobile_data_if_allowed || debug_log "service: mobile retry restore not yet confirmed"
@@ -1056,7 +1056,7 @@ fi
     # F) Integrity check immediately before removal: if block is already missing
     # at this point, log as an error condition (not a silent "success").
     if [ "$v4_done" = "1" ] && [ "$v4_released" = "0" ]; then
-      log_once_per_phase "v4_release_start" "service: v4 release preconditions satisfied: afwall_takeover=1 path=${v4_path:-confirmed}"
+      log_on_transition "v4_release" "start" "service: v4 release preconditions satisfied: afwall_takeover=1 path=${v4_path:-confirmed}"
       _log_pre_remove_integrity_v4 "handoff"
       log_transition_snapshot "v4" "pre_remove"
       remove_output_block_v4
@@ -1067,18 +1067,17 @@ fi
         remove_input_block_v4
       fi
       if output_block_present_v4 || forward_block_present_v4 || input_block_present_v4; then
-        log_once_per_phase "v4_release_fail" "service: ERROR: v4 release verification failed — module-owned layer still present; retrying"
+        log_on_transition "v4_release" "fail" "service: ERROR: v4 release verification failed — module-owned layer still present; retrying"
       else
         v4_released=1
-        log "service: v4 release verified absent — family block removed (OUTPUT/FORWARD/INPUT)"
-        log "service: v4 block removed (intentional handoff)"
-        [ "$wifi_done" = "0" ] && log_once_per_phase "v4_wifi_defer" "service: block removed; wifi restore deferred"
-        [ "$mobile_done" = "0" ] && log_once_per_phase "v4_mobile_defer" "service: block removed; mobile restore deferred"
+        log_on_transition "v4_release" "released" "service: v4 release verified absent — family block removed (OUTPUT/FORWARD/INPUT)"
+        [ "$wifi_done" = "0" ] && debug_log "service: v4_restore_defer wifi deferred"
+        [ "$mobile_done" = "0" ] && debug_log "service: v4_restore_defer mobile deferred"
       fi
     fi
 
     if [ "$v6_done" = "1" ] && [ "$v6_released" = "0" ]; then
-      log_once_per_phase "v6_release_start" "service: v6 release preconditions satisfied: afwall_takeover=1 path=${v6_path:-confirmed}"
+      log_on_transition "v6_release" "start" "service: v6 release preconditions satisfied: afwall_takeover=1 path=${v6_path:-confirmed}"
       _log_pre_remove_integrity_v6 "handoff"
       log_transition_snapshot "v6" "pre_remove"
       remove_output_block_v6
@@ -1089,13 +1088,12 @@ fi
         remove_input_block_v6
       fi
       if output_block_present_v6 || forward_block_present_v6 || input_block_present_v6; then
-        log_once_per_phase "v6_release_fail" "service: ERROR: v6 release verification failed — module-owned layer still present; retrying"
+        log_on_transition "v6_release" "fail" "service: ERROR: v6 release verification failed — module-owned layer still present; retrying"
       else
         v6_released=1
-        log "service: v6 release verified absent — family block removed (OUTPUT/FORWARD/INPUT)"
-        log "service: v6 block removed (intentional handoff)"
-        [ "$wifi_done" = "0" ] && log_once_per_phase "v6_wifi_defer" "service: block removed; wifi restore deferred"
-        [ "$mobile_done" = "0" ] && log_once_per_phase "v6_mobile_defer" "service: block removed; mobile restore deferred"
+        log_on_transition "v6_release" "released" "service: v6 release verified absent — family block removed (OUTPUT/FORWARD/INPUT)"
+        [ "$wifi_done" = "0" ] && debug_log "service: v6_restore_defer wifi deferred"
+        [ "$mobile_done" = "0" ] && debug_log "service: v6_restore_defer mobile deferred"
       fi
     fi
 
@@ -1109,7 +1107,7 @@ fi
 
     if [ "$_v4_complete" = "1" ] && [ "$_v6_complete" = "1" ]; then
       if [ "$wifi_done" = "0" ] || [ "$mobile_done" = "0" ]; then
-        log "service: family handoff complete; transport gates not fully satisfied (wifi=${wifi_done} mobile=${mobile_done})"
+        log_on_transition "handoff_status" "family_complete" "service: family handoff complete; transport gates not fully satisfied (wifi=${wifi_done} mobile=${mobile_done})" 30
       else
         log "service: handoff complete (v4=${v4_path:-skipped} v6=${v6_path:-skipped} wifi=done mobile=done)"
       fi
@@ -1135,7 +1133,7 @@ fi
         _ll_state_exists "wifi_was_enabled" && _wifi_marker=1
         _ll_state_exists "data_was_enabled" && _mobile_marker=1
         if [ "$_finalize_defer_logged" = "0" ]; then
-          log "service: finalization deferred: verified restore pending (wifi=${_wifi_marker} mobile=${_mobile_marker})"
+          log_on_transition "finalize" "pending" "service: finalization deferred: verified restore pending (wifi=${_wifi_marker} mobile=${_mobile_marker})" 30
           _finalize_defer_logged=1
         else
           debug_log "service: finalization still deferred (wifi=${_wifi_marker} mobile=${_mobile_marker})"
@@ -1164,5 +1162,5 @@ fi
 _svc_pid="$!"
 write_service_pid "$_svc_pid"
 _svc_cmdline="$(tr '\0' ' ' < "/proc/${_svc_pid}/cmdline" 2>/dev/null)"
-log "service: pid_file written pid=${_svc_pid} cmdline=${_svc_cmdline:-unreadable}"
+debug_log "service: pid_file written pid=${_svc_pid} cmdline=${_svc_cmdline:-unreadable}"
 exit 0
