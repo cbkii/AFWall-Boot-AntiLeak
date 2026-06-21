@@ -187,28 +187,113 @@ ic_volkey() {
     return 2
 }
 
+_ic_question_header() {
+    _ic_print ""
+    _ic_print "========================================"
+    _ic_print "$1"
+}
+
+_ic_option_desc() {
+    case "$1:$2" in
+        profile:standard) printf '%s' 'recommended balanced defaults' ;;
+        profile:minimal) printf '%s' 'core OUTPUT protection, fewer extras' ;;
+        profile:strict) printf '%s' 'more temporary blocks, slower reconnects' ;;
+        profile:recovery) printf '%s' 'watchdog unblocks on timeout' ;;
+        profile:custom) printf '%s' 'choose each main setting' ;;
+        LEAK_PROTECTION_MODE:balanced) printf '%s' 'safe default for most devices' ;;
+        LEAK_PROTECTION_MODE:strict) printf '%s' 'stronger boot blocking, slower reconnects' ;;
+        LEAK_PROTECTION_MODE:recovery_friendly) printf '%s' 'easier recovery, less aggressive' ;;
+        WATCHDOG_POLICY:block) printf '%s' 'keep blocked; use Magisk Action to unblock' ;;
+        WATCHDOG_POLICY:unblock) printf '%s' 'watchdog releases blocks on timeout' ;;
+        RADIO_SUPPRESSION:off) printf '%s' 'netfilter only; do not toggle radios' ;;
+        RADIO_SUPPRESSION:safe) printf '%s' 'temporary common radio/service holds' ;;
+        RADIO_SUPPRESSION:strict) printf '%s' 'stronger holds; may delay reconnects' ;;
+        BLOCK_FORWARD:1) printf '%s' 'also block tether/client forwarding' ;;
+        BLOCK_FORWARD:0) printf '%s' 'only protect local device OUTPUT' ;;
+        BLOCK_INPUT:1) printf '%s' 'also block inbound during boot' ;;
+        BLOCK_INPUT:0) printf '%s' 'leave inbound handling to AFWall' ;;
+        VPN_LOCKDOWN_MODE:off) printf '%s' 'leave VPN lockdown alone' ;;
+        VPN_LOCKDOWN_MODE:preserve) printf '%s' 'only undo changes this module made' ;;
+        VPN_LOCKDOWN_MODE:restore) printf '%s' 'turn saved lockdown back on after handoff' ;;
+        DEBUG:1) printf '%s' 'verbose logs for troubleshooting' ;;
+        DEBUG:0) printf '%s' 'normal concise logs' ;;
+        *) printf '%s' '' ;;
+    esac
+}
+
+
+_ic_scope_synopsis() {
+    case "$1" in
+        profile)
+            _ic_print "Choose a ready-made setup, or custom to answer each setting yourself."
+            ;;
+        LEAK_PROTECTION_MODE)
+            _ic_print "Controls how strongly boot traffic is blocked before AFWall is ready."
+            ;;
+        WATCHDOG_POLICY)
+            _ic_print "Decides what happens if AFWall readiness is never proven during boot."
+            ;;
+        RADIO_SUPPRESSION)
+            _ic_print "Optionally pauses radios/services while firewall protection starts."
+            _ic_print "Most users can leave this off unless they need stricter boot blocking."
+            ;;
+        BLOCK_FORWARD)
+            _ic_print "Adds temporary protection for devices using this phone as a hotspot."
+            ;;
+        BLOCK_INPUT)
+            _ic_print "Adds temporary protection for incoming connections during boot."
+            ;;
+        VPN_LOCKDOWN_MODE)
+            _ic_print "Controls Android's 'block connections without VPN' setting during boot."
+            _ic_print "Only matters if you use always-on VPN or VPN lockdown."
+            ;;
+        DEBUG)
+            _ic_print "Controls how much troubleshooting detail is written to logs."
+            ;;
+    esac
+}
+
+_ic_print_option() {
+    local scope="$1" idx="$2" value="$3" desc
+    desc="$(_ic_option_desc "$scope" "$value")"
+    if [ -n "$desc" ]; then
+        _ic_print "$idx) \`$value\`  ($desc)"
+    else
+        _ic_print "$idx) \`$value\`"
+    fi
+}
+
 ic_select_bool() {
-    IC_BOOL_RESULT="${2:-1}"
+    local question="$1" default="${2:-1}" scope="${3:-}"
+    IC_BOOL_RESULT="$default"
     _ic_any_input_avail || return 0
     _ic_flush_events
-    _ic_print "  $1"
-    _ic_print "  VOL+: YES   VOL-: NO   (${_IC_KEY_TIMEOUT}s timeout keeps ${IC_BOOL_RESULT})"
+    _ic_question_header "$question"
+    _ic_scope_synopsis "$scope"
+    _ic_print_option "$scope" 1 1
+    _ic_print_option "$scope" 2 0
+    _ic_print "VOL+: choose `1`   VOL-: choose `0`   (${_IC_KEY_TIMEOUT}s keeps `${IC_BOOL_RESULT}`)"
     ic_volkey; case $? in 0) IC_BOOL_RESULT=1 ;; 1) IC_BOOL_RESULT=0 ;; esac
 }
 
 ic_select_enum() {
-    local question="$1" options="$2" default="$3" opt count idx total current i
+    local question="$1" options="$2" default="$3" scope="${4:-}" opt count idx total current i
     IC_ENUM_RESULT="$default"
     _ic_any_input_avail || return 0
     _ic_flush_events
-    _ic_print "  $question"
+    _ic_question_header "$question"
+    _ic_scope_synopsis "$scope"
     total=0
     for opt in $options; do total=$((total+1)); done
     idx=1; count=0
-    for opt in $options; do count=$((count+1)); [ "$opt" = "$default" ] && idx=$count; _ic_print "   $count) $opt"; done
+    for opt in $options; do
+        count=$((count+1))
+        [ "$opt" = "$default" ] && idx=$count
+        _ic_print_option "$scope" "$count" "$opt"
+    done
     while :; do
         i=0; for opt in $options; do i=$((i+1)); [ "$i" = "$idx" ] && { current="$opt"; break; }; done
-        _ic_print "  Current: [$idx/$total] $current"
+        _ic_print "Current: [$idx/$total] \`$current\`"
         ic_volkey; case $? in
           0) IC_ENUM_RESULT="$current"; return 0 ;;
           1) idx=$((idx+1)); [ "$idx" -gt "$total" ] && idx=1 ;;
@@ -220,23 +305,23 @@ ic_select_enum() {
 _ic_select_profile() {
     _ic_print ""
     _ic_print "  v4.3.0 profiles: standard, minimal, strict, recovery, custom"
-    ic_select_enum "Select a protection profile:" "standard minimal strict recovery custom" standard
+    ic_select_enum "Protection profile:" "standard minimal strict recovery custom" standard profile
 }
 
 _ic_select_custom() {
-    ic_select_enum "Leak protection mode:" "balanced strict recovery_friendly" "${IC_LEAK_PROTECTION_MODE}"
+    ic_select_enum "LEAK_PROTECTION_MODE: boot leak protection style:" "balanced strict recovery_friendly" "${IC_LEAK_PROTECTION_MODE}" LEAK_PROTECTION_MODE
     IC_LEAK_PROTECTION_MODE="$IC_ENUM_RESULT"
-    ic_select_enum "Watchdog action if AFWall proof never arrives:" "block unblock" "${IC_WATCHDOG_POLICY}"
+    ic_select_enum "WATCHDOG_POLICY: action if AFWall proof never arrives:" "block unblock" "${IC_WATCHDOG_POLICY}" WATCHDOG_POLICY
     IC_WATCHDOG_POLICY="$IC_ENUM_RESULT"
-    ic_select_enum "Radio/service suppression:" "off safe strict" "${IC_RADIO_SUPPRESSION}"
+    ic_select_enum "RADIO_SUPPRESSION: lower-layer radio/service handling:" "off safe strict" "${IC_RADIO_SUPPRESSION}" RADIO_SUPPRESSION
     IC_RADIO_SUPPRESSION="$IC_ENUM_RESULT"
-    ic_select_bool "Enable temporary FORWARD block for tethering clients?" "${IC_BLOCK_FORWARD}"
+    ic_select_bool "BLOCK_FORWARD: temporary tether/client forwarding block:" "${IC_BLOCK_FORWARD}" BLOCK_FORWARD
     IC_BLOCK_FORWARD="$IC_BOOL_RESULT"
-    ic_select_bool "Enable temporary INPUT block?" "${IC_BLOCK_INPUT}"
+    ic_select_bool "BLOCK_INPUT: temporary inbound block:" "${IC_BLOCK_INPUT}" BLOCK_INPUT
     IC_BLOCK_INPUT="$IC_BOOL_RESULT"
-    ic_select_enum "VPN lockdown handling:" "off preserve restore" "${IC_VPN_LOCKDOWN_MODE}"
+    ic_select_enum "VPN_LOCKDOWN_MODE: Android always-on VPN lockdown handling:" "off preserve restore" "${IC_VPN_LOCKDOWN_MODE}" VPN_LOCKDOWN_MODE
     IC_VPN_LOCKDOWN_MODE="$IC_ENUM_RESULT"
-    ic_select_bool "Enable debug logging?" "${IC_DEBUG}"
+    ic_select_bool "DEBUG: logging detail:" "${IC_DEBUG}" DEBUG
     IC_DEBUG="$IC_BOOL_RESULT"
 }
 
