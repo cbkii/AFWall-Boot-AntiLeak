@@ -7,3 +7,6 @@ __pycache__/
 *.py[cod]
 .patch-backups/
 .patch-backups/*
+/.patch-backups
+/.patch-backups/*
+
