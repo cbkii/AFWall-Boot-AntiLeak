@@ -1,11 +1,11 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v4.3.1 - Common library
+# AFWall Boot AntiLeak v4.4.4 - Common library
 # POSIX/ash compatible. No bashisms. Sourced by all module scripts; do not
 # execute directly.
 
 # ── Module identity ────────────────────────────────────────────────────────────
 MODULE_ID="AFWall-Boot-AntiLeak"
-MODULE_VERSION="v4.3.1"
+MODULE_VERSION="v4.4.4"
 MODULE_DATA="/data/adb/${MODULE_ID}"
 LOG_DIR="${MODULE_DATA}/logs"
 LOG_FILE="${LOG_DIR}/boot.log"
@@ -195,7 +195,7 @@ _ipt_out() {
 
 
 # ── Config loading ─────────────────────────────────────────────────────────────
-# v4.3.1 breaking-change config model: only module-local config is read.
+# v4.4.4 breaking-change config model: only module-local config is read.
 # Sources, in order:
 #   1. $MODDIR/config.sh        (packaged defaults)
 #   2. $MODDIR/config.local.sh  (optional user overrides)
@@ -232,7 +232,7 @@ _warn_and_unset_legacy_config_vars() {
     WIFI_AFWALL_GATE MOBILE_AFWALL_GATE ENABLE_FORWARD_BLOCK ENABLE_INPUT_BLOCK; do
     eval "set=\${${v}+set}"
     if [ "$set" = "set" ]; then
-      _config_warn "config: unsupported legacy variable ignored in v4.3.1: $v"
+      _config_warn "config: unsupported legacy variable ignored in v4.4.4: $v"
       unset "$v"
     fi
   done
@@ -287,7 +287,7 @@ derive_internal_config() {
   DEBUG="$(_config_bool "${DEBUG:-0}")"
 
   # Internal knobs consumed by the existing lower-layer/firewall implementation.
-  # They are derived only from v4.3.1 user-facing settings and are not user config.
+  # They are derived only from v4.4.4 user-facing settings and are not user config.
   ENABLE_FORWARD_BLOCK="$BLOCK_FORWARD_EFFECTIVE"
   ENABLE_INPUT_BLOCK="$BLOCK_INPUT_EFFECTIVE"
   TRANSPORT_RESTORE_GATING_EFFECTIVE=1
@@ -353,7 +353,7 @@ load_config() {
   for legacy in "${MODULE_DATA}/config.sh" "${MODULE_DATA}/installer.cfg"; do
     if [ -f "$legacy" ]; then
       CONFIG_IGNORED_FILES="${CONFIG_IGNORED_FILES}${CONFIG_IGNORED_FILES:+ }$legacy"
-      _config_warn "config: legacy external config path ignored in v4.3.1 breaking-change release: $legacy"
+      _config_warn "config: legacy external config path ignored in v4.4.4 breaking-change release: $legacy"
     fi
   done
 
