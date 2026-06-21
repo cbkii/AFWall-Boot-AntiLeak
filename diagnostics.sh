@@ -24,6 +24,7 @@ for f in block_installed blackout_active service_complete aba_service.pid aba_se
 done
 printf '\n[module-owned rules]\n'
 for spec in "iptables raw" "iptables filter" "ip6tables raw" "ip6tables filter"; do
+  # shellcheck disable=SC2086 # intentional split of trusted internal spec fields
   set -- $spec
   cmd="$(_find_cmd "$1" 2>/dev/null)" || { printf '%s -t %s unavailable\n' "$1" "$2"; continue; }
   printf -- '-- %s -t %s --\n' "$1" "$2"

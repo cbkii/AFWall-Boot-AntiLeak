@@ -1299,7 +1299,7 @@ reachable_chains_from_snapshot() {
 $snap
 EOF
   done
-  printf '%s\n' $reachable
+  printf '%s\n' "$reachable"
 }
 
 _chain_in_list() {

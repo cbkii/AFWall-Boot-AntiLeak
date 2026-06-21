@@ -173,6 +173,7 @@ pass "rooted graph and transport reachability"
 # Config single-source and PID lifecycle invariants.
 grep -q "legacy external config path ignored in ${expected_version}" "$ROOT/bin/common.sh" || fail "legacy external config ignore warning missing"
 grep -q 'config.local.sh' "$ROOT/bin/common.sh" || fail "module-local config override missing"
+# shellcheck disable=SC2016 # intentional literal pattern for source-code assertion
 grep -q 'pid_file written pid=${_svc_pid}' "$ROOT/service.sh" || fail "parent does not record actual background pid"
 grep -q 'action: service pid validated' "$ROOT/bin/common.sh" || fail "action pid validation log missing"
 
@@ -182,6 +183,7 @@ _orig_service_lock_file="$SERVICE_LOCK_FILE"
 STATE_DIR="${TMPDIR:-/tmp}/aba-lock-test-$$"
 SERVICE_LOCK_FILE="$STATE_DIR/aba_service.lock"
 mkdir -p "$STATE_DIR"
+# shellcheck disable=SC2016 # intentional literal malicious lockfile payload for test fixture
 printf 'pid=$$\nboot_id=$(echo unsafe)\nmodule_version=%s\n' "$MODULE_VERSION" > "$SERVICE_LOCK_FILE"
 service_lock_active && fail "corrupt service lock treated as active"
 printf 'pid=not-a-pid\nboot_id=%s\nmodule_version=%s\n' "$(kernel_boot_id)" "$MODULE_VERSION" > "$SERVICE_LOCK_FILE"
