@@ -175,6 +175,20 @@ grep -q "legacy external config path ignored in ${expected_version}" "$ROOT/bin/
 grep -q 'config.local.sh' "$ROOT/bin/common.sh" || fail "module-local config override missing"
 grep -q 'pid_file written pid=${_svc_pid}' "$ROOT/service.sh" || fail "parent does not record actual background pid"
 grep -q 'action: service pid validated' "$ROOT/bin/common.sh" || fail "action pid validation log missing"
+
+# Corrupt lock files must be parsed safely, not sourced/executed.
+_orig_state_dir="$STATE_DIR"
+_orig_service_lock_file="$SERVICE_LOCK_FILE"
+STATE_DIR="${TMPDIR:-/tmp}/aba-lock-test-$$"
+SERVICE_LOCK_FILE="$STATE_DIR/aba_service.lock"
+mkdir -p "$STATE_DIR"
+printf 'pid=$$\nboot_id=$(echo unsafe)\nmodule_version=%s\n' "$MODULE_VERSION" > "$SERVICE_LOCK_FILE"
+service_lock_active && fail "corrupt service lock treated as active"
+printf 'pid=not-a-pid\nboot_id=%s\nmodule_version=%s\n' "$(kernel_boot_id)" "$MODULE_VERSION" > "$SERVICE_LOCK_FILE"
+service_lock_active && fail "non-numeric lock pid treated as active"
+rm -rf "$STATE_DIR"
+STATE_DIR="$_orig_state_dir"
+SERVICE_LOCK_FILE="$_orig_service_lock_file"
 pass "config and PID invariants"
 
 # Active release config surface checks.
@@ -229,6 +243,15 @@ load_config
 [ -z "${TIMEOUT_POLICY+x}" ] || fail "legacy TIMEOUT_POLICY still set after load"
 grep -q "unsupported legacy variable ignored in ${expected_version}: TIMEOUT_POLICY" "$LOG_FILE" || fail "legacy TIMEOUT_POLICY warning missing"
 grep -q "unsupported legacy variable ignored in ${expected_version}: AFWALL_READY_REQUIRE_UNLOCK" "$LOG_FILE" || fail "legacy readiness warning missing"
+
+# Strict firewall proof alone must not force disruptive radio suppression.
+cat > "$TMP/mod/config.local.sh" <<'SH'
+LEAK_PROTECTION_MODE=strict
+RADIO_SUPPRESSION=off
+SH
+_MODULE_CFG_LOADED=0
+load_config
+[ "$LOWLEVEL_MODE" = off ] || fail "LEAK_PROTECTION_MODE=strict forced radio suppression"
 pass "config derivation and legacy ignore"
 
 # AFWall package detection must include donate, current free, and legacy IDs.

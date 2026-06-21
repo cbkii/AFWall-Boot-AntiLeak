@@ -88,6 +88,7 @@ bin/common.sh
 bin/installer_config.sh
 action.sh
 config.sh
+diagnostics.sh
 post-fs-data.sh
 reconfigure.sh
 service.sh
@@ -118,6 +119,7 @@ echo "All required source files present."
 # ── Ensure executable permissions on installer/runtime entrypoints ───────────
 # Magisk executes these directly; package them with executable mode bits.
 chmod 755   "$REPO_ROOT/action.sh"   "$REPO_ROOT/customize.sh"   "$REPO_ROOT/post-fs-data.sh"   "$REPO_ROOT/reconfigure.sh"   "$REPO_ROOT/service.sh"   "$REPO_ROOT/uninstall.sh"
+chmod 755 "$REPO_ROOT/diagnostics.sh"
 
 # Ensure all bundled keycheck binaries keep execute permissions.
 for kc_bin in "$REPO_ROOT/bin/keycheck"/keycheck*; do
@@ -140,6 +142,7 @@ zip -r9 "$ZIP_PATH" \
   bin/ \
   action.sh \
   config.sh \
+  diagnostics.sh \
   customize.sh \
   module.prop \
   post-fs-data.sh \

@@ -1,6 +1,6 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v4.1.0 - User Configuration
-# Breaking-change note: v4.1.0 reads only this module-local file and optional
+# AFWall Boot AntiLeak v4.2.0 - User Configuration
+# Breaking-change note: v4.2.0 reads only this module-local file and optional
 # config.local.sh in the same directory. Old /data/adb/AFWall-Boot-AntiLeak
 # config files are ignored; clean uninstall, reboot, reinstall, and reconfigure
 # is recommended when upgrading from older releases.
@@ -45,7 +45,7 @@ AFWALL_PACKAGE=auto
 # Android always-on VPN lockdown handling: off leaves it alone; preserve records/respects existing state; restore may enforce during protection then restore the pre-boot state. Accepted: off, preserve, restore. Default: off.
 VPN_LOCKDOWN_MODE=off
 
-# VPN provider discovery: use auto for Android/package detection or list packages manually when detection fails.
+# VPN provider for explicit restore mode. auto means use the already-selected always-on provider; list one package to override.
 # Common examples: ch.protonvpn.android com.wireguard.android com.mullvad.mullvadvpn com.nordvpn.android
 VPN_PROVIDER_PACKAGES=auto
 

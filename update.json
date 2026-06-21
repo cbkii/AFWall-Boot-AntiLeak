@@ -1,6 +1,6 @@
 {
-  "version": "v4.1.0",
-  "versionCode": 40100,
+  "version": "v4.2.0",
+  "versionCode": 40200,
   "zipUrl": "https://github.com/cbkii/AFWall-Boot-AntiLeak/releases/latest/download/AFWall-Boot-AntiLeak.zip",
-  "changelog": "https://raw.githubusercontent.com/cbkii/AFWall-Boot-AntiLeak/master/ADVANCED.md"
+  "changelog": "https://raw.githubusercontent.com/cbkii/AFWall-Boot-AntiLeak/main/ADVANCED.md"
 }

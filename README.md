@@ -270,3 +270,24 @@ Use [ADVANCED.md](ADVANCED.md) for deeper detail:
 - [Installer, profiles, and reconfiguration](ADVANCED.md#installer-profiles-and-reconfiguration)
 
 If you are developing or auditing the module, start with [ADVANCED.md → Boot flow](ADVANCED.md#boot-flow), [ADVANCED.md → AFWall readiness and handoff](ADVANCED.md#afwall-readiness-and-handoff), and the scripts under `bin/`, `post-fs-data.sh`, and `service.sh`.
+
+## Android 16 Proton VPN handoff notes
+
+On Android always-on VPN with lockdown, Proton/WireGuard protects its gateway socket from VPN routing so packets do not loop back into the TUN. That socket still traverses netfilter. During boot this module may therefore deny early WireGuard sends with `EPERM` until the rooted live AFWall `OUTPUT -> afwall` graph is present and stable. A brief pre-handoff denial is expected; a long delay after graph stability is not expected and should be diagnosed.
+
+Recommended Proton/AFWall setup:
+
+- Keep Android always-on VPN and lockdown configured in Android settings if you use them.
+- Keep Proton selected as the active always-on provider; the default/preserve module behaviour is read-only and does not replace it.
+- Keep AFWall enabled on boot, apply rules at least once before rebooting, and keep AFWall's own `Fix Startup Data Leak` disabled while this module is installed.
+- Use the standard profile unless you explicitly need strict radio suppression. Strict radio suppression can slow reconnection because it toggles Wi-Fi/mobile state beneath the firewall; strict firewall proof alone no longer forces that mode.
+
+Expected handoff with defaults is one poll plus the configured stability window: typically about 2–6 seconds after the final rooted AFWall graph appears. IPv4 and IPv6 release independently and do not wait for boot completion, unlock, transport restoration, VPN provider detection, or the other family.
+
+For a bounded read-only real-device report, run:
+
+```sh
+su -c sh /data/adb/modules/AFWall-Boot-AntiLeak/diagnostics.sh > /sdcard/afwall-boot-antileak-diagnostics.txt
+```
+
+Upgrading from v4.1.x to v4.2.0 is a normal Magisk module update. Reconfigure only if you want to change profile/options. Clean uninstall/reboot/reinstall is only needed when migrating from much older releases that used external `/data/adb/AFWall-Boot-AntiLeak/config.sh` runtime configuration and you want to discard stale state completely.
