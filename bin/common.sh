@@ -74,7 +74,9 @@ debug_log() {
 #   - OR boot phase changed (early -> boot_complete -> unlocked);
 #   - OR MIN_INTERVAL_SECS elapsed since last normal log for this GROUP.
 # Otherwise logs at debug level.
-# Expects _boot_complete_now and device_unlocked to be available in caller scope.
+# Expects _boot_complete_now, device_unlocked, and optional NOW in caller scope.
+# GROUP must be a small static key; put interface names, package names, and
+# other dynamic details in STATE or MESSAGE so tracking variables stay bounded.
 log_on_transition() {
   local group="$1" state="$2" msg="$3" min_int="${4:-}"
   local pfx cur_phase cur_ts last_state last_phase last_ts do_log

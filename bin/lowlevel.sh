@@ -161,7 +161,7 @@ lowlevel_restore_interfaces() {
 
   local ip_cmd
   ip_cmd="$(_find_cmd ip 2>/dev/null)" || {
-    debug_log "lowlevel_restore_interfaces: ip command not found; cannot restore interfaces"
+    log_on_transition "iface_restore_error" "no_ip" "lowlevel_restore_interfaces: WARN: ip command not found; cannot restore interfaces"
     return 0
   }
 
@@ -173,7 +173,7 @@ lowlevel_restore_interfaces() {
       debug_log "lowlevel: interface $iface brought UP (restored)"
       count=$((count + 1))
     else
-      debug_log "lowlevel: WARN: could not restore interface $iface"
+      log_on_transition "iface_restore_error" "fail:$iface" "lowlevel: WARN: could not restore interface $iface"
     fi
   done < "${LL_STATE_DIR}/ifaces_down"
 
@@ -697,6 +697,7 @@ lowlevel_vpn_lockdown_enforce() {
       after_lock="$(_ll_vpn_get_lockdown_state)"
       if [ "$after_pkg" = "$pkg" ] && [ "$after_lock" = "1" ]; then
             log_on_transition "vpn_lockdown_enforce" "$pkg" "vpn_lockdown: restore mode verified always-on+lockdown for provider $pkg"
+        _ll_state_set "vpn_lockdown_enabled_pkgs" "$pkg"
         ok=1
       else
             log_on_transition "vpn_lockdown_enforce" "fail:$pkg" "vpn_lockdown: WARN: restore write for $pkg not verified (active=${after_pkg:-none} lockdown=${after_lock:-unknown})"
@@ -721,12 +722,13 @@ lowlevel_vpn_lockdown_release_if_needed() {
     return 0
   fi
 
-  local active pre_pkg pre_lock current_lock
+  local active pre_pkg pre_lock current_lock module_pkg
   active="$(_ll_vpn_get_active_pkg)"
   pre_pkg="$(_ll_state_get vpn_pre_active_pkg)"
   pre_lock="$(_ll_state_get vpn_pre_lockdown)"
   current_lock="$(_ll_vpn_get_lockdown_state)"
-  debug_log "vpn_lockdown: restore check pre_active=${pre_pkg:-none} pre_lockdown=${pre_lock:-unknown} current_active=${active:-none} current_lockdown=${current_lock:-unknown}"
+  module_pkg="$(_ll_state_get vpn_lockdown_enabled_pkgs)"
+  debug_log "vpn_lockdown: restore check pre_active=${pre_pkg:-none} pre_lockdown=${pre_lock:-unknown} current_active=${active:-none} current_lockdown=${current_lock:-unknown} module_set=${module_pkg:-none}"
 
   # Restore pre-boot always-on baseline where available. Do not temporarily
   # disable lockdown for the current provider; make one transactional write back
@@ -744,14 +746,28 @@ lowlevel_vpn_lockdown_release_if_needed() {
         fi
         ;;
     esac
-  else
-    if cmd connectivity set-always-on-vpn "" false >/dev/null 2>&1; then
-      active="$(_ll_vpn_get_active_pkg)"
-      if [ -z "$active" ]; then
-        log_on_transition "vpn_lockdown_restore" "success_clear" "vpn_lockdown: cleared always-on VPN to restore pre-boot baseline (none)"
+  elif [ -n "$module_pkg" ]; then
+    if [ -z "$active" ]; then
+      debug_log "vpn_lockdown: module-set always-on VPN already absent; no clear needed"
+    elif [ "$active" = "$module_pkg" ]; then
+      if cmd connectivity set-always-on-vpn "" false >/dev/null 2>&1; then
+        active="$(_ll_vpn_get_active_pkg)"
+        if [ -z "$active" ]; then
+          log_on_transition "vpn_lockdown_restore" "success_clear" "vpn_lockdown: cleared module-set always-on VPN to restore pre-boot baseline (none)"
+        else
+          log_on_transition "vpn_lockdown_restore" "fail_clear" "vpn_lockdown: WARN: could not clear module-set always-on VPN (current active=${active})"
+        fi
       else
-        log_on_transition "vpn_lockdown_restore" "fail_clear" "vpn_lockdown: WARN: could not clear always-on VPN (current active=${active})"
+        log_on_transition "vpn_lockdown_restore" "fail_clear_cmd" "vpn_lockdown: WARN: command failed while clearing module-set always-on VPN $module_pkg"
       fi
+    else
+      log_on_transition "vpn_lockdown_restore" "skip_changed:$active" "vpn_lockdown: WARN: active always-on VPN (${active}) differs from module-set provider (${module_pkg}); leaving it untouched"
+    fi
+  else
+    if [ -n "$active" ]; then
+      log_on_transition "vpn_lockdown_restore" "skip_unowned:$active" "vpn_lockdown: WARN: no pre-boot VPN baseline or module-set marker; leaving active always-on VPN $active untouched"
+    else
+      debug_log "vpn_lockdown: no pre-boot VPN baseline and no active provider; nothing to clear"
     fi
   fi
 
@@ -1175,10 +1191,10 @@ lowlevel_emergency_restore() {
       while IFS= read -r iface; do
         [ -n "$iface" ] || continue
         if "$ip_cmd" link set "$iface" up 2>/dev/null; then
-          log_on_transition "emergency_iface_${iface}" "up" "lowlevel: emergency: interface $iface brought UP"
+          log_on_transition "emergency_iface" "up:$iface" "lowlevel: emergency: interface $iface brought UP"
           iface_ok=$((iface_ok + 1))
         else
-          log_on_transition "emergency_iface_${iface}" "fail" "lowlevel: emergency: WARN: could not restore interface $iface"
+          log_on_transition "emergency_iface" "fail:$iface" "lowlevel: emergency: WARN: could not restore interface $iface"
         fi
       done < "${LL_STATE_DIR}/ifaces_down"
     else
