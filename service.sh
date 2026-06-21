@@ -487,16 +487,12 @@ fi
         local _wifi_settle="$TRANSPORT_SETTLE_SECS_EFFECTIVE"
         [ "$_boot_complete_now" = "1" ] && _wifi_settle="$TRANSPORT_SETTLE_SECS_POST_BOOT_EFFECTIVE"
         if [ "$_wifi_stable" -ge "$_wifi_settle" ]; then
-          if [ "$_boot_complete_now" != "1" ]; then
-            debug_log "service: wifi transport stable but restore deferred until boot_complete"
+          log "service: wifi transport: subtree stable=${_wifi_stable}s fp=$wifi_last_fp — Wi-Fi ready; attempting restore"
+          if lowlevel_restore_wifi_if_allowed; then
+            wifi_done=1
+            wifi_pending_since=0
           else
-            log "service: wifi transport: subtree stable=${_wifi_stable}s fp=$wifi_last_fp — Wi-Fi ready; attempting restore"
-            if lowlevel_restore_wifi_if_allowed; then
-              wifi_done=1
-              wifi_pending_since=0
-            else
-              debug_log "service: wifi transport: restore not yet confirmed; will retry"
-            fi
+            debug_log "service: wifi transport: restore not yet confirmed; will retry"
           fi
         fi
 
@@ -517,29 +513,25 @@ fi
           _w_absent_elapsed=$((now_ts - wifi_absent_since))
           if [ "$_wifi_in_snap" = "1" ]; then
             _w_absent_threshold="${TRANSPORT_ORPHAN_STABLE_SECS:-$TRANSPORT_ABSENCE_STABLE_SECS}"
-          elif [ "$_boot_complete_now" = "1" ]; then
+          elif [ "$_boot_complete_now" = "1" ] || { [ "$v4_released" = "1" ] && [ "$v6_released" = "1" ]; }; then
             _w_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT"
           else
             _w_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS"
           fi
           if [ "$_w_absent_elapsed" -ge "$_w_absent_threshold" ]; then
-            if [ "$_boot_complete_now" != "1" ]; then
-              debug_log "service: wifi fallback ready but restore deferred until boot_complete"
+            # AFWall family handoff is the authoritative safety condition.
+            # Unlock confidence and boot-complete diagnostics must not deadlock
+            # restoration.
+            if [ "$_wifi_in_snap" = "1" ]; then
+              log "service: wifi transport accepted via unreachable-stable fallback after ${_w_absent_elapsed}s (subtree present but unreachable from AFWall graph); attempting restore"
             else
-              # AFWall family handoff and boot-complete are the authoritative safety
-              # conditions. Unlock confidence is diagnostic-only and must not deadlock
-              # restoration (it has produced false positives/negatives on Android 16).
-              if [ "$_wifi_in_snap" = "1" ]; then
-                log "service: wifi transport accepted via unreachable-stable fallback after ${_w_absent_elapsed}s (subtree present but unreachable from AFWall graph); attempting restore"
-              else
-                log "service: wifi transport accepted via absence-stable fallback after ${_w_absent_elapsed}s (no wifi-prefixed subtree detected in snapshot); attempting restore"
-              fi
-              if lowlevel_restore_wifi_if_allowed; then
-                wifi_done=1
-                wifi_pending_since=0
-              else
-                debug_log "service: wifi transport fallback path: restore not yet confirmed; will retry"
-              fi
+              log "service: wifi transport accepted via absence-stable fallback after ${_w_absent_elapsed}s (no wifi-prefixed subtree detected in snapshot); attempting restore"
+            fi
+            if lowlevel_restore_wifi_if_allowed; then
+              wifi_done=1
+              wifi_pending_since=0
+            else
+              debug_log "service: wifi transport fallback path: restore not yet confirmed; will retry"
             fi
           fi
         fi
@@ -555,18 +547,14 @@ fi
         _w_pending_threshold="$TRANSPORT_INCONCLUSIVE_SECS"
         [ "$_boot_complete_now" = "1" ] && _w_pending_threshold="$TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT"
         if [ "$_w_pending_elapsed" -ge "$_w_pending_threshold" ]; then
-          if [ "$_boot_complete_now" != "1" ]; then
-            debug_log "service: wifi inconclusive-time fallback deferred until boot_complete"
+          # Do not let unreliable unlock diagnostics hold a verified restore forever.
+          log "service: wifi transport inconclusive for ${_w_pending_elapsed}s (in_snap=${_wifi_in_snap} reachable=${_wifi_reachable}); forcing verified restore attempt"
+          if lowlevel_restore_wifi_if_allowed; then
+            wifi_done=1
+            wifi_pending_since=0
+            log "service: wifi transport resolved via inconclusive-time fallback"
           else
-            # Do not let unreliable unlock diagnostics hold a verified restore forever.
-            log "service: wifi transport inconclusive for ${_w_pending_elapsed}s (in_snap=${_wifi_in_snap} reachable=${_wifi_reachable}); forcing verified restore attempt"
-            if lowlevel_restore_wifi_if_allowed; then
-              wifi_done=1
-              wifi_pending_since=0
-              log "service: wifi transport resolved via inconclusive-time fallback"
-            else
-              debug_log "service: wifi inconclusive-time fallback restore not yet confirmed; continuing retries"
-            fi
+            debug_log "service: wifi inconclusive-time fallback restore not yet confirmed; continuing retries"
           fi
         fi
       fi
@@ -609,16 +597,12 @@ fi
         local _mobile_settle="$TRANSPORT_SETTLE_SECS_EFFECTIVE"
         [ "$_boot_complete_now" = "1" ] && _mobile_settle="$TRANSPORT_SETTLE_SECS_POST_BOOT_EFFECTIVE"
         if [ "$_mobile_stable" -ge "$_mobile_settle" ]; then
-          if [ "$_boot_complete_now" != "1" ]; then
-            debug_log "service: mobile transport stable but restore deferred until boot_complete"
+          log "service: mobile transport: subtree stable=${_mobile_stable}s fp=$mobile_last_fp — mobile ready; attempting restore"
+          if lowlevel_restore_mobile_data_if_allowed; then
+            mobile_done=1
+            mobile_pending_since=0
           else
-            log "service: mobile transport: subtree stable=${_mobile_stable}s fp=$mobile_last_fp — mobile ready; attempting restore"
-            if lowlevel_restore_mobile_data_if_allowed; then
-              mobile_done=1
-              mobile_pending_since=0
-            else
-              debug_log "service: mobile transport: restore not yet confirmed; will retry"
-            fi
+            debug_log "service: mobile transport: restore not yet confirmed; will retry"
           fi
         fi
 
@@ -637,29 +621,25 @@ fi
           _m_absent_elapsed=$((now_ts - mobile_absent_since))
           if [ "$_mobile_in_snap" = "1" ]; then
             _m_absent_threshold="${TRANSPORT_ORPHAN_STABLE_SECS:-$TRANSPORT_ABSENCE_STABLE_SECS}"
-          elif [ "$_boot_complete_now" = "1" ]; then
+          elif [ "$_boot_complete_now" = "1" ] || { [ "$v4_released" = "1" ] && [ "$v6_released" = "1" ]; }; then
             _m_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT"
           else
             _m_absent_threshold="$TRANSPORT_ABSENCE_STABLE_SECS"
           fi
           if [ "$_m_absent_elapsed" -ge "$_m_absent_threshold" ]; then
-            if [ "$_boot_complete_now" != "1" ]; then
-              debug_log "service: mobile fallback ready but restore deferred until boot_complete"
+            # AFWall family handoff is the authoritative safety condition.
+            # Unlock confidence and boot-complete diagnostics must not deadlock
+            # restoration.
+            if [ "$_mobile_in_snap" = "1" ]; then
+              log "service: mobile transport accepted via unreachable-stable fallback after ${_m_absent_elapsed}s (subtree present but unreachable from AFWall graph); attempting restore"
             else
-              # AFWall family handoff and boot-complete are the authoritative safety
-              # conditions. Unlock confidence is diagnostic-only and must not deadlock
-              # restoration (it has produced false positives/negatives on Android 16).
-              if [ "$_mobile_in_snap" = "1" ]; then
-                log "service: mobile transport accepted via unreachable-stable fallback after ${_m_absent_elapsed}s (subtree present but unreachable from AFWall graph); attempting restore"
-              else
-                log "service: mobile transport accepted via absence-stable fallback after ${_m_absent_elapsed}s (no mobile-prefixed subtree detected in snapshot); attempting restore"
-              fi
-              if lowlevel_restore_mobile_data_if_allowed; then
-                mobile_done=1
-                mobile_pending_since=0
-              else
-                debug_log "service: mobile transport fallback path: restore not yet confirmed; will retry"
-              fi
+              log "service: mobile transport accepted via absence-stable fallback after ${_m_absent_elapsed}s (no mobile-prefixed subtree detected in snapshot); attempting restore"
+            fi
+            if lowlevel_restore_mobile_data_if_allowed; then
+              mobile_done=1
+              mobile_pending_since=0
+            else
+              debug_log "service: mobile transport fallback path: restore not yet confirmed; will retry"
             fi
           fi
         fi
@@ -671,18 +651,14 @@ fi
         _m_pending_threshold="$TRANSPORT_INCONCLUSIVE_SECS"
         [ "$_boot_complete_now" = "1" ] && _m_pending_threshold="$TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT"
         if [ "$_m_pending_elapsed" -ge "$_m_pending_threshold" ]; then
-          if [ "$_boot_complete_now" != "1" ]; then
-            debug_log "service: mobile inconclusive-time fallback deferred until boot_complete"
+          # Do not let unreliable unlock diagnostics hold a verified restore forever.
+          log "service: mobile transport inconclusive for ${_m_pending_elapsed}s (in_snap=${_mobile_in_snap} reachable=${_mobile_reachable}); forcing verified restore attempt"
+          if lowlevel_restore_mobile_data_if_allowed; then
+            mobile_done=1
+            mobile_pending_since=0
+            log "service: mobile transport resolved via inconclusive-time fallback"
           else
-            # Do not let unreliable unlock diagnostics hold a verified restore forever.
-            log "service: mobile transport inconclusive for ${_m_pending_elapsed}s (in_snap=${_mobile_in_snap} reachable=${_mobile_reachable}); forcing verified restore attempt"
-            if lowlevel_restore_mobile_data_if_allowed; then
-              mobile_done=1
-              mobile_pending_since=0
-              log "service: mobile transport resolved via inconclusive-time fallback"
-            else
-              debug_log "service: mobile inconclusive-time fallback restore not yet confirmed; continuing retries"
-            fi
+            debug_log "service: mobile inconclusive-time fallback restore not yet confirmed; continuing retries"
           fi
         fi
       fi
@@ -1049,7 +1025,8 @@ fi
     # If a transport gate was skipped but the module still has a restore marker
     # (e.g. state carried across conservative boot order), retry restoration
     # until verified instead of exiting and requiring manual action.
-    if [ "$_boot_complete_now" = "1" ] && [ "$wifi_done" = "1" ] && _ll_state_exists "wifi_was_enabled"; then
+    # Retry even before boot_complete if the transport is already marked done.
+    if [ "$wifi_done" = "1" ] && _ll_state_exists "wifi_was_enabled"; then
       if [ "$_wifi_restore_logged" = "0" ]; then
         log "service: wifi marker still present after done=1 — retrying Wi-Fi restore"
         _wifi_restore_logged=1
@@ -1058,7 +1035,7 @@ fi
     else
       _wifi_restore_logged=0
     fi
-    if [ "$_boot_complete_now" = "1" ] && [ "$mobile_done" = "1" ] && _ll_state_exists "data_was_enabled"; then
+    if [ "$mobile_done" = "1" ] && _ll_state_exists "data_was_enabled"; then
       if [ "$_mobile_restore_logged" = "0" ]; then
         log "service: mobile marker still present after done=1 — retrying mobile restore"
         _mobile_restore_logged=1
@@ -1140,6 +1117,7 @@ fi
         clear_blackout_active
         rm -f "${STATE_DIR}/block_installed" "${STATE_DIR}/radio_off_pending" 2>/dev/null || true
         remove_block
+        lowlevel_vpn_lockdown_release_if_needed
         cleanup_legacy "service-finalize"
         _finalize_cleanup_done=1
       fi
