@@ -1,7 +1,7 @@
 id=AFWall-Boot-AntiLeak
 name=AFWall Boot AntiLeak Fork
-version=v4.3.0
-versionCode=40300
+version=v4.3.1
+versionCode=40301
 author=cbkii, (GrayJackFixxxer fork)
 description=Strict total-connectivity-blackout until AFWall ready. Android 16 / Magisk 30.6+. Press 'ACTION' to force unblock.
 updateJson=https://raw.githubusercontent.com/cbkii/AFWall-Boot-AntiLeak/main/update.json

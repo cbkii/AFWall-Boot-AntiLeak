@@ -486,7 +486,7 @@ IC_PROFILE=standard
 WATCHDOG_POLICY=block
 ```
 
-## v4.3.0 handoff diagnostics and Proton investigation notes
+## v4.3.1 handoff diagnostics and Proton investigation notes
 
 The Android 16 Proton/WireGuard evidence is consistent with early module-owned netfilter blackout denying Proton's protected gateway socket before AFWall takeover. The protected socket bypasses VPN routing, not netfilter, so `sendto: operation not permitted` is legitimate while `MOD_PRE_AFW*` OUTPUT layers are installed.
 
