@@ -91,7 +91,7 @@ log_on_transition() {
   [ "$cur_ts" = "0" ] && cur_ts="$(monotonic_seconds)"
 
   eval "last_state=\${${pfx}_S:-}"
-  eval "last_phase=\${${pfx}_P:- -1}"
+  eval "last_phase=\${${pfx}_P:--1}"
   eval "last_ts=\${${pfx}_T:-0}"
 
   do_log=0

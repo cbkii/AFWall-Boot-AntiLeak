@@ -744,6 +744,15 @@ lowlevel_vpn_lockdown_release_if_needed() {
         fi
         ;;
     esac
+  else
+    if cmd connectivity set-always-on-vpn "" false >/dev/null 2>&1; then
+      active="$(_ll_vpn_get_active_pkg)"
+      if [ -z "$active" ]; then
+        log_on_transition "vpn_lockdown_restore" "success_clear" "vpn_lockdown: cleared always-on VPN to restore pre-boot baseline (none)"
+      else
+        log_on_transition "vpn_lockdown_restore" "fail_clear" "vpn_lockdown: WARN: could not clear always-on VPN (current active=${active})"
+      fi
+    fi
   fi
 
   _ll_state_rm "vpn_lockdown_enabled_pkgs"
