@@ -339,12 +339,19 @@ write_service_lock() {
 
 service_lock_active() {
   [ -f "$SERVICE_LOCK_FILE" ] || return 1
-  local pid="" boot_id="" module_version="" current_boot
-  . "$SERVICE_LOCK_FILE" 2>/dev/null || return 1
+  local pid="" boot_id="" module_version="" current_boot key val
+  while IFS='=' read -r key val; do
+    case "$key" in
+      pid) pid="$val" ;;
+      boot_id) boot_id="$val" ;;
+      module_version) module_version="$val" ;;
+    esac
+  done < "$SERVICE_LOCK_FILE" 2>/dev/null || return 1
   current_boot="$(kernel_boot_id)"
   [ "$boot_id" = "$current_boot" ] || return 1
   [ "$module_version" = "$MODULE_VERSION" ] || return 1
-  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null
 }
 
 clear_service_lock() {

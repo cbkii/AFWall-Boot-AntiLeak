@@ -35,6 +35,6 @@ if afwall_prefix_reachable_from_snapshot "$stale" afwall-wifi; then fail "stale 
 # Static invariants for VPN/boot/unlock/watchdog behavior.
 grep -q 'post-fs-data observes only; no VPN setting writes' "$ROOT/bin/lowlevel.sh" || fail "post-fs-data VPN write guard missing"
 grep -q 'DEBUG.*dumpsys' "$ROOT/bin/lowlevel.sh" || fail "dumpsys unlock probes are not debug-gated"
-grep -q 'watchdog degraded monitor sleeping' "$ROOT/service.sh" || fail "watchdog degraded low-frequency mode missing"
+grep -q 'watchdog degraded monitor active' "$ROOT/service.sh" || fail "watchdog degraded low-frequency mode missing"
 grep -q 'release verified absent' "$ROOT/service.sh" || fail "release absence verification missing"
 echo "All timeline simulation tests passed."

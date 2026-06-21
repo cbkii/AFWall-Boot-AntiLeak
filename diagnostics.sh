@@ -1,6 +1,7 @@
 #!/system/bin/sh
 # Read-only AFWall Boot AntiLeak diagnostics. Does not change VPN, radios, or rules.
 MODDIR="${0%/*}"
+[ "$MODDIR" = "$0" ] && MODDIR="."
 . "$MODDIR/bin/common.sh"
 load_config >/dev/null 2>&1 || true
 printf 'AFWall Boot AntiLeak diagnostics\n'
@@ -36,7 +37,17 @@ for fam in v4 v6; do
   printf '%s_fingerprint=%s\n' "$fam" "$(afwall_rooted_graph_fingerprint_from_snapshot "$snap" 2>/dev/null)"
 done
 printf '\n[workers]\n'
-if [ -f "$SERVICE_PID_FILE" ]; then pid="$(cat "$SERVICE_PID_FILE" 2>/dev/null)"; printf 'pid_file=%s alive=%s\n' "$pid" "$(kill -0 "$pid" 2>/dev/null && printf 1 || printf 0)"; else printf 'pid_file=absent\n'; fi
+if [ -f "$SERVICE_PID_FILE" ]; then
+  pid="$(cat "$SERVICE_PID_FILE" 2>/dev/null)"
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    alive=1
+  else
+    alive=0
+  fi
+  printf 'pid_file=%s alive=%s\n' "${pid:-empty}" "$alive"
+else
+  printf 'pid_file=absent\n'
+fi
 printf '\n[Proton timing hints]\n'
 if has_cmd logcat; then
   logcat -d -t 2000 2>/dev/null | grep -iE 'proton|wireguard|sendto|operation not permitted|handshake' | tail -50

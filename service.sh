@@ -692,6 +692,7 @@ fi
 
   # ── Main polling loop ───────────────────────────────────────────────────────
   while :; do
+    _loop_sleep="$POLL_INTERVAL_SECS"
     NOW="$(monotonic_seconds 2>/dev/null)" || NOW=0
 
     # ── Override / stop check ────────────────────────────────────────────────
@@ -843,9 +844,8 @@ fi
         log_transition_snapshot "v4" "watchdog_${_watchdog_reason}"
         log_transition_snapshot "v6" "watchdog_${_watchdog_reason}"
       fi
-      log "service: watchdog degraded monitor sleeping ${WATCHDOG_DEGRADED_INTERVAL_SECS:-30}s; Action recovery remains available"
-      sleep "${WATCHDOG_DEGRADED_INTERVAL_SECS:-30}"
-      continue
+      _loop_sleep="${WATCHDOG_DEGRADED_INTERVAL_SECS:-30}"
+      log "service: watchdog degraded monitor active; next poll sleep=${_loop_sleep}s; late AFWall handoff and Action recovery remain available"
     fi
 
     # Readiness/unlock gate is diagnostic-only; never skip AFWall graph checks.
@@ -1090,10 +1090,10 @@ fi
       else
         v4_released=1
         log "service: v4 release verified absent — family block removed (OUTPUT/FORWARD/INPUT)"
+        log "service: v4 block removed (intentional handoff)"
+        [ "$wifi_done" = "0" ] && log "service: block removed; wifi restore deferred"
+        [ "$mobile_done" = "0" ] && log "service: block removed; mobile restore deferred"
       fi
-      log "service: v4 block removed (intentional handoff)"
-      [ "$wifi_done" = "0" ] && log "service: block removed; wifi restore deferred"
-      [ "$mobile_done" = "0" ] && log "service: block removed; mobile restore deferred"
     fi
 
     if [ "$v6_done" = "1" ] && [ "$v6_released" = "0" ]; then
@@ -1112,10 +1112,10 @@ fi
       else
         v6_released=1
         log "service: v6 release verified absent — family block removed (OUTPUT/FORWARD/INPUT)"
+        log "service: v6 block removed (intentional handoff)"
+        [ "$wifi_done" = "0" ] && log "service: block removed; wifi restore deferred"
+        [ "$mobile_done" = "0" ] && log "service: block removed; mobile restore deferred"
       fi
-      log "service: v6 block removed (intentional handoff)"
-      [ "$wifi_done" = "0" ] && log "service: block removed; wifi restore deferred"
-      [ "$mobile_done" = "0" ] && log "service: block removed; mobile restore deferred"
     fi
 
     # ── All done? ──────────────────────────────────────────────────────────
@@ -1158,7 +1158,7 @@ fi
         else
           debug_log "service: finalization still deferred (wifi=${_wifi_marker} mobile=${_mobile_marker})"
         fi
-        sleep "$POLL_INTERVAL_SECS"
+        sleep "$_loop_sleep"
         continue
       fi
       _finalize_defer_logged=0
@@ -1176,7 +1176,7 @@ fi
       exit 0
     fi
 
-    sleep "$POLL_INTERVAL_SECS"
+    sleep "$_loop_sleep"
   done
 ) &
 _svc_pid="$!"

@@ -495,7 +495,7 @@ Source and host-side timeline simulations support these conclusions:
 - Family OUTPUT release is driven by the rooted AFWall graph fingerprint and per-family stability timer.
 - IPv4 and IPv6 release independently.
 - Transport subtree absence, stale unreachable transport chains, Android boot completion, unlock, always-on VPN provider reads, and lockdown state do not gate family release.
-- All installed module-owned OUTPUT layers are removed from both raw and filter tables, and release is only accounted after module-owned OUTPUT/FORWARD/INPUT layers verify absent.
+- All installed module-owned OUTPUT layers are removed from both raw and filter tables, and release is only accounted after module-owned OUTPUT/FORWARD/INPUT layers are verified absent.
 - If the watchdog fires with `WATCHDOG_POLICY=block`, the service keeps protection, emits actionable diagnostics, and drops to low-frequency degraded monitoring instead of continuing the full boot polling loop.
 
 A 57-second delay after AFWall's application log is not reproduced by the module state machine when the rooted graph is stable. Remaining real-device hypotheses are therefore AFWall graph churn after the application message, repeated AFWall application caused by Android network changes, AFWall final rules still blocking Proton's UID, or non-netfilter Proton/radio timing. The new timestamped boot log and `diagnostics.sh` output are intended to distinguish those on the next boot without a full trace.
