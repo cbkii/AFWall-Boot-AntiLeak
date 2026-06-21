@@ -740,6 +740,8 @@ lowlevel_vpn_lockdown_release_if_needed() {
           active="$(_ll_vpn_get_active_pkg)"; current_lock="$(_ll_vpn_get_lockdown_state)"
           if [ "$active" = "$pre_pkg" ] && [ "$current_lock" = "$pre_lock" ]; then
             log_on_transition "vpn_lockdown_restore" "success" "vpn_lockdown: restored and verified pre-boot always-on baseline for $pre_pkg (lockdown=$pre_lock)"
+            _ll_state_rm "vpn_lockdown_enabled_pkgs"
+            _ll_state_set "vpn_lockdown_released" "1"
           else
             log_on_transition "vpn_lockdown_restore" "fail" "vpn_lockdown: WARN: pre-boot restore not verified (want=$pre_pkg/$pre_lock got=${active:-none}/${current_lock:-unknown})"
           fi
@@ -754,6 +756,8 @@ lowlevel_vpn_lockdown_release_if_needed() {
         active="$(_ll_vpn_get_active_pkg)"
         if [ -z "$active" ]; then
           log_on_transition "vpn_lockdown_restore" "success_clear" "vpn_lockdown: cleared module-set always-on VPN to restore pre-boot baseline (none)"
+          _ll_state_rm "vpn_lockdown_enabled_pkgs"
+          _ll_state_set "vpn_lockdown_released" "1"
         else
           log_on_transition "vpn_lockdown_restore" "fail_clear" "vpn_lockdown: WARN: could not clear module-set always-on VPN (current active=${active})"
         fi
@@ -771,8 +775,6 @@ lowlevel_vpn_lockdown_release_if_needed() {
     fi
   fi
 
-  _ll_state_rm "vpn_lockdown_enabled_pkgs"
-  _ll_state_set "vpn_lockdown_released" "1"
 }
 # ── Tethering control ──────────────────────────────────────────────────────────
 # Stops active tethering sessions.  Does NOT auto-restart tethering on restore

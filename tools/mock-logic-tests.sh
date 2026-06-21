@@ -106,7 +106,7 @@ pass "IPv6 loopback integrity"
 grep -q 'lowlevel_clear_stale_vpn_state' "$ROOT/bin/lowlevel.sh" || fail "stale VPN clear helper missing"
 grep -q 'vpn_pre_active_pkg' "$ROOT/bin/lowlevel.sh" || fail "VPN pre-state cleanup missing"
 grep -q '_ll_state_set "vpn_lockdown_enabled_pkgs" "$pkg"' "$ROOT/bin/lowlevel.sh" || fail "VPN module-set marker not recorded"
-grep -q 'no pre-boot VPN baseline or module-set marker' "$ROOT/bin/lowlevel.sh" || fail "VPN release can clear always-on without ownership proof"
+grep -q 'no pre-boot VPN baseline or module-set marker' "$ROOT/bin/lowlevel.sh" || fail "VPN ownership-proof guard missing from release path"
 pass "per-boot VPN cleanup"
 
 # Transition logging must keep visible recovery failures without unbounded
