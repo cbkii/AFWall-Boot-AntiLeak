@@ -290,4 +290,4 @@ For a bounded read-only real-device report, run:
 su -c sh /data/adb/modules/AFWall-Boot-AntiLeak/diagnostics.sh > /sdcard/afwall-boot-antileak-diagnostics.txt
 ```
 
-Upgrading from v4.1.x to v4.2.0 is a normal Magisk module update. Reconfigure only if you want to change profile/options. Clean uninstall/reboot/reinstall is only needed when migrating from much older releases that used external `/data/adb/AFWall-Boot-AntiLeak/config.sh` runtime configuration and you want to discard stale state completely.
+Upgrading from v4.1.x to v4.3.0 is a normal Magisk module update. Reconfigure only if you want to change profile/options. Clean uninstall/reboot/reinstall is only needed when migrating from much older releases that used external `/data/adb/AFWall-Boot-AntiLeak/config.sh` runtime configuration and you want to discard stale state completely.
