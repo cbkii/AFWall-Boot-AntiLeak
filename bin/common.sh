@@ -68,6 +68,33 @@ debug_log() {
   log "[DEBUG] $*"
 }
 
+# Helper to log a message only once per boot phase (early, boot_complete, unlock).
+# Expects _boot_complete_now and device_unlocked to be available in caller scope.
+log_once_per_phase() {
+  local key="$1" msg="$2" pfx v v_bc v_unl do_log
+  pfx="_L1P_${key}"
+  eval "v=\${${pfx}:-0}"
+  eval "v_bc=\${${pfx}_bc:-0}"
+  eval "v_unl=\${${pfx}_unl:-0}"
+
+  do_log=0
+  if [ "$v" = "0" ]; then
+    do_log=1; eval "${pfx}=1"
+  fi
+  if [ "${_boot_complete_now:-0}" = "1" ] && [ "$v_bc" = "0" ]; then
+    do_log=1; eval "${pfx}_bc=1"
+  fi
+  if [ "${device_unlocked:-0}" = "1" ] && [ "$v_unl" = "0" ]; then
+    do_log=1; eval "${pfx}_unl=1"
+  fi
+
+  if [ "$do_log" = "1" ]; then
+    log "$msg"
+  else
+    debug_log "$msg"
+  fi
+}
+
 # ── Command discovery ──────────────────────────────────────────────────────────
 # Returns the full path of a command, checking PATH first then known locations.
 _find_cmd() {
