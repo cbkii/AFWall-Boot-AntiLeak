@@ -105,7 +105,16 @@ pass "IPv6 loopback integrity"
 # VPN stale-state clear must exist and run before enforcement.
 grep -q 'lowlevel_clear_stale_vpn_state' "$ROOT/bin/lowlevel.sh" || fail "stale VPN clear helper missing"
 grep -q 'vpn_pre_active_pkg' "$ROOT/bin/lowlevel.sh" || fail "VPN pre-state cleanup missing"
+grep -q '_ll_state_set "vpn_lockdown_enabled_pkgs" "$pkg"' "$ROOT/bin/lowlevel.sh" || fail "VPN module-set marker not recorded"
+grep -q 'no pre-boot VPN baseline or module-set marker' "$ROOT/bin/lowlevel.sh" || fail "VPN ownership-proof guard missing from release path"
 pass "per-boot VPN cleanup"
+
+# Transition logging must keep visible recovery failures without unbounded
+# dynamic group keys.
+grep -q 'GROUP must be a small static key' "$ROOT/bin/common.sh" || fail "log_on_transition group contract missing"
+grep -q 'iface_restore_error' "$ROOT/bin/lowlevel.sh" || fail "interface restore failures are not transition-logged"
+if grep -q 'emergency_iface_${iface}' "$ROOT/bin/lowlevel.sh"; then fail "dynamic interface transition group remains"; fi
+pass "transition logging invariants"
 
 
 # Rooted graph logic: reachable orphan churn must not alter release fingerprint.

@@ -68,6 +68,55 @@ debug_log() {
   log "[DEBUG] $*"
 }
 
+# log_on_transition GROUP STATE MESSAGE [MIN_INTERVAL_SECS]
+# Logs MESSAGE at normal level if:
+#   - STATE for GROUP changed since last call;
+#   - OR boot phase changed (early -> boot_complete -> unlocked);
+#   - OR MIN_INTERVAL_SECS elapsed since last normal log for this GROUP.
+# Otherwise logs at debug level.
+# Expects _boot_complete_now, device_unlocked, and optional NOW in caller scope.
+# GROUP must be a small static key; put interface names, package names, and
+# other dynamic details in STATE or MESSAGE so tracking variables stay bounded.
+log_on_transition() {
+  local group="$1" state="$2" msg="$3" min_int="${4:-}"
+  local pfx cur_phase cur_ts last_state last_phase last_ts do_log
+
+  # Sanitize group name for shell variable compatibility (replace non-alphanumeric with _)
+  pfx="_LT_$(printf '%s' "$group" | tr -c 'A-Za-z0-9' '_')"
+
+  # Phase: 0=early, 1=boot_complete, 2=unlocked
+  cur_phase=0
+  [ "${_boot_complete_now:-0}" = "1" ] && cur_phase=1
+  [ "${device_unlocked:-0}" = "1" ] && cur_phase=2
+
+  cur_ts="${NOW:-0}"
+  [ "$cur_ts" = "0" ] && cur_ts="$(monotonic_seconds)"
+
+  eval "last_state=\${${pfx}_S:-}"
+  eval "last_phase=\${${pfx}_P:--1}"
+  eval "last_ts=\${${pfx}_T:-0}"
+
+  do_log=0
+  if [ "$state" != "$last_state" ]; then
+    do_log=1
+  elif [ "$cur_phase" -gt "$last_phase" ]; then
+    do_log=1
+  elif [ -n "$min_int" ] && [ "$min_int" -gt 0 ]; then
+    if [ $((cur_ts - last_ts)) -ge "$min_int" ]; then
+      do_log=1
+    fi
+  fi
+
+  if [ "$do_log" = "1" ]; then
+    log "$msg"
+    eval "${pfx}_S=\"\$state\""
+    eval "${pfx}_P=\$cur_phase"
+    eval "${pfx}_T=\$cur_ts"
+  else
+    debug_log "$msg"
+  fi
+}
+
 # ── Command discovery ──────────────────────────────────────────────────────────
 # Returns the full path of a command, checking PATH first then known locations.
 _find_cmd() {
