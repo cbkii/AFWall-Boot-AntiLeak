@@ -257,9 +257,9 @@ _ic_print_option() {
     local scope="$1" idx="$2" value="$3" desc
     desc="$(_ic_option_desc "$scope" "$value")"
     if [ -n "$desc" ]; then
-        _ic_print "$idx) \`$value\`  ($desc)"
+        _ic_print "$idx) $value  ($desc)"
     else
-        _ic_print "$idx) \`$value\`"
+        _ic_print "$idx) $value"
     fi
 }
 
@@ -272,7 +272,7 @@ ic_select_bool() {
     _ic_scope_synopsis "$scope"
     _ic_print_option "$scope" 1 1
     _ic_print_option "$scope" 2 0
-    _ic_print "VOL+: choose `1`   VOL-: choose `0`   (${_IC_KEY_TIMEOUT}s keeps `${IC_BOOL_RESULT}`)"
+    _ic_print "VOL+: choose 1   VOL-: choose 0   (${_IC_KEY_TIMEOUT}s keeps ${IC_BOOL_RESULT})"
     ic_volkey; case $? in 0) IC_BOOL_RESULT=1 ;; 1) IC_BOOL_RESULT=0 ;; esac
 }
 
@@ -293,7 +293,7 @@ ic_select_enum() {
     done
     while :; do
         i=0; for opt in $options; do i=$((i+1)); [ "$i" = "$idx" ] && { current="$opt"; break; }; done
-        _ic_print "Current: [$idx/$total] \`$current\`"
+        _ic_print "Current: [$idx/$total] $current"
         ic_volkey; case $? in
           0) IC_ENUM_RESULT="$current"; return 0 ;;
           1) idx=$((idx+1)); [ "$idx" -gt "$total" ] && idx=1 ;;
