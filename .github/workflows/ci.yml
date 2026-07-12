@@ -94,3 +94,4 @@ jobs:
         with:
           name: build-info
           path: dist/build-info.txt
+          retention-days: 14
