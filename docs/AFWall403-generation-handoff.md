@@ -57,8 +57,11 @@ If the AFWall process is never observed, preferences remain unreadable, the dela
 - moving the AFWall hook within OUTPUT alters the fingerprint;
 - undefined reachable chains are rejected;
 - startup-delay preferences are selected and parsed correctly;
+- the resolved AFWall package remains available to diagnostics;
 - delayed generation remains gated through delay plus grace;
-- `prefer_afwall` still installs the authoritative module blackout;
+- NUL-delimited `/proc/<pid>/cmdline` parsing works without per-PID external processes under BusyBox ash;
+- normal `pidof`/`ps` process detection does not fall through to a full `/proc` scan;
+- `auto`, `prefer_module`, and `prefer_afwall` install the authoritative module blackout;
 - `off` remains the only skip mode.
 
 These are shell-level deterministic tests. Exact-device validation must still confirm packet-level behaviour on the target Android build across locked boot, delayed startup, root denial, IPv4, IPv6, Wi-Fi, mobile data, VPN and tethering.
