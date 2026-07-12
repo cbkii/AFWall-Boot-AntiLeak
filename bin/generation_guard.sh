@@ -65,26 +65,41 @@ _aba_resolve_pkg() {
   printf '%s' "$pkg"
 }
 
+_aba_cmdline_matches_pkg() {
+  local file="$1" pkg="$2" first=""
+
+  [ -f "$file" ] || return 1
+  # Magisk runs module scripts under BusyBox ash. Its read -d support lets the
+  # fallback consume the first NUL-delimited cmdline token without spawning
+  # tr/head for every PID.
+  IFS= read -r -d '' first < "$file" 2>/dev/null || [ -n "$first" ] || return 1
+  case "$first" in
+    "$pkg"|"${pkg}:"*) return 0 ;;
+  esac
+  return 1
+}
+
 _aba_process_present_raw() {
-  local pkg="$1" esc f first
+  local pkg="$1" esc f
   [ -n "$pkg" ] || return 1
 
-  if has_cmd pidof && pidof "$pkg" >/dev/null 2>&1; then
-    return 0
+  if has_cmd pidof; then
+    pidof "$pkg" >/dev/null 2>&1 && return 0
   fi
 
-  esc="$(printf '%s' "$pkg" | sed 's/\./\\./g')"
   if has_cmd ps; then
+    esc="$(printf '%s' "$pkg" | sed 's/\./\\./g')"
     ps -A 2>/dev/null | grep -qE "[[:space:]]${esc}(:[[:alnum:]_]+)?$" && return 0
     ps 2>/dev/null | grep -qE "[[:space:]]${esc}(:[[:alnum:]_]+)?$" && return 0
+    # A usable ps result is authoritative. Do not scan every /proc entry on each
+    # poll merely because the target process is absent.
+    return 1
   fi
 
+  # Last-resort fallback for restricted/minimal environments with neither pidof
+  # nor ps. No external process is spawned per PID.
   for f in /proc/[0-9]*/cmdline; do
-    [ -f "$f" ] || continue
-    first="$(tr '\0' '\n' < "$f" 2>/dev/null | head -1)"
-    case "$first" in
-      "$pkg"|"${pkg}:"*) return 0 ;;
-    esac
+    _aba_cmdline_matches_pkg "$f" "$pkg" && return 0
   done
   return 1
 }
@@ -93,6 +108,7 @@ _aba_note_process_epoch() {
   local now pkg
   [ "$ABA_GEN_PROCESS_FIRST_TS" != "0" ] && return 0
   pkg="$(_aba_resolve_pkg 2>/dev/null)" || return 1
+  ABA_GEN_PACKAGE="$pkg"
   _aba_process_present_raw "$pkg" || return 1
   now="$(_aba_now)"
   [ "$now" != "0" ] || return 1
@@ -157,6 +173,7 @@ _aba_load_startup_prefs() {
   ABA_GEN_PREFS_LAST_CHECK_TS="$now"
 
   pkg="$(_aba_resolve_pkg 2>/dev/null)" || return 1
+  ABA_GEN_PACKAGE="$pkg"
   file="$(_aba_find_global_prefs_file "$pkg" 2>/dev/null)" || return 1
 
   raw="$(_aba_xml_attr_value "$file" addDelayStart 2>/dev/null)" || raw="false"
