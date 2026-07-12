@@ -120,6 +120,21 @@ assert_true 'startup preferences are readable' _aba_load_startup_prefs
 assert_eq 'delay-enabled preference parsed' "$ABA_GEN_DELAY_ENABLED" '1'
 assert_eq 'custom delay preference parsed' "$ABA_GEN_DELAY_SECS" '15'
 assert_eq 'startup-delay file is preferred over fixLeak-only file' "$ABA_GEN_PREFS_FILE" "$PREF_DIR/z_startup.xml"
+assert_eq 'resolved package is retained for diagnostics' "$ABA_GEN_PACKAGE" "$AFW_PKG"
+
+CMDLINE_FILE="$TMP/cmdline"
+READ_NUL_PROBE="$TMP/read-nul-probe"
+printf '\0' > "$READ_NUL_PROBE"
+if (IFS= read -r -d '' _probe < "$READ_NUL_PROBE") 2>/dev/null; then
+  printf '%s\0%s\0' "$AFW_PKG" '--worker' > "$CMDLINE_FILE"
+  assert_true 'NUL cmdline fallback matches the base AFWall process' _aba_cmdline_matches_pkg "$CMDLINE_FILE" "$AFW_PKG"
+  printf '%s\0%s\0' "${AFW_PKG}:root" '--worker' > "$CMDLINE_FILE"
+  assert_true 'NUL cmdline fallback matches an AFWall subprocess' _aba_cmdline_matches_pkg "$CMDLINE_FILE" "$AFW_PKG"
+  printf '%s\0' 'com.example.other' > "$CMDLINE_FILE"
+  assert_false 'NUL cmdline fallback rejects another package' _aba_cmdline_matches_pkg "$CMDLINE_FILE" "$AFW_PKG"
+else
+  pass 'NUL cmdline fallback is BusyBox-ash-specific and skipped by this shell'
+fi
 
 _aba_note_process_epoch() { [ "$ABA_GEN_PROCESS_FIRST_TS" != 0 ] || ABA_GEN_PROCESS_FIRST_TS="$NOW_FAKE"; return 0; }
 _aba_load_startup_prefs() { ABA_GEN_PREFS_READY=1; return 0; }
@@ -144,8 +159,28 @@ assert_true 'non-delayed generation opens after process and preference proof' af
 INTEGRATION_MODE=prefer_afwall
 assert_true 'prefer_afwall still installs authoritative module blackout' should_install_block
 assert_eq 'prefer_afwall records guarded integration mode' "$(cat "$STATE_DIR/integration_mode")" 'prefer_afwall_guarded'
+
+INTEGRATION_MODE=auto
+assert_true 'auto installs authoritative module blackout' should_install_block
+assert_eq 'auto records authoritative integration mode' "$(cat "$STATE_DIR/integration_mode")" 'auto'
+
+INTEGRATION_MODE=prefer_module
+assert_true 'prefer_module installs authoritative module blackout' should_install_block
+assert_eq 'prefer_module records authoritative integration mode' "$(cat "$STATE_DIR/integration_mode")" 'prefer_module'
+
 INTEGRATION_MODE=off
 assert_false 'off remains the only mode that skips module blackout' should_install_block
+
+# When normal Android process tools exist, a miss must not fall through to an
+# expensive scan of every /proc entry.
+has_cmd() {
+  case "$1" in pidof|ps) return 0 ;; *) return 1 ;; esac
+}
+pidof() { return 1; }
+ps() { printf '%s\n' 'u0_a123 123 1 0 0 S dev.ukanth.ufirewall.donate:root'; }
+assert_true 'ps fallback recognises an AFWall subprocess after pidof misses' _aba_process_present_raw "$AFW_PKG"
+ps() { printf '%s\n' 'u0_a123 123 1 0 0 S com.example.other'; }
+assert_false 'authoritative ps miss reports AFWall absent without proc fallback' _aba_process_present_raw "$AFW_PKG"
 
 if [ "$FAIL" -ne 0 ]; then
   printf '%s test(s) failed\n' "$FAIL" >&2
