@@ -100,6 +100,7 @@ update.json
 echo "Validating required source files..."
 ERRORS=0
 for f in $REQUIRED_FILES; do
+  # Skip blank lines
   [ -z "$f" ] && continue
   if [ ! -f "$REPO_ROOT/$f" ]; then
     echo "  [MISSING] $f" >&2
@@ -117,17 +118,23 @@ fi
 echo "All required source files present."
 
 # ── Ensure executable permissions on installer/runtime entrypoints ───────────
+# Magisk executes these directly; package them with executable mode bits.
 chmod 755   "$REPO_ROOT/action.sh"   "$REPO_ROOT/customize.sh"   "$REPO_ROOT/post-fs-data.sh"   "$REPO_ROOT/reconfigure.sh"   "$REPO_ROOT/service.sh"   "$REPO_ROOT/uninstall.sh"
 chmod 755 "$REPO_ROOT/diagnostics.sh"
 
+# Ensure all bundled keycheck binaries keep execute permissions.
 for kc_bin in "$REPO_ROOT/bin/keycheck"/keycheck*; do
   [ -f "$kc_bin" ] && chmod 755 "$kc_bin"
 done
 
+# ── Create output directory (already exists — created during path resolution) ─
+# Remove any existing output for this ZIP name (idempotent rebuild)
 rm -f "$ZIP_PATH" "$CHECKSUM_PATH" "$BUILD_INFO_PATH"
 [ -n "$STABLE_ZIP_PATH" ] && rm -f "$STABLE_ZIP_PATH"
 
 # ── Build ZIP ─────────────────────────────────────────────────────────────────
+# All files are added from REPO_ROOT so they appear at the ZIP root (no nesting).
+# Only module-relevant files are included; development/CI artefacts are excluded.
 echo "Building ZIP..."
 cd "$REPO_ROOT"
 zip -r9 "$ZIP_PATH" \
@@ -150,12 +157,16 @@ zip -r9 "$ZIP_PATH" \
 
 echo "Built: $ZIP_PATH"
 
+# ── Optional stable ZIP alias ────────────────────────────────────────────────
 if [ -n "$STABLE_ZIP_PATH" ]; then
   cp -f "$ZIP_PATH" "$STABLE_ZIP_PATH"
   echo "Stable alias: $STABLE_ZIP_PATH"
 fi
 
 # ── Generate checksum ─────────────────────────────────────────────────────────
+# Run sha256sum from OUTPUT_DIR (which is absolute) so the checksum line records
+# just the bare filename — this is what `sha256sum -c` expects on the device.
+# Use a subshell so the `cd` does not affect the rest of the script.
 echo "Generating checksum..."
 (
   cd "$OUTPUT_DIR"
@@ -173,7 +184,7 @@ GIT_REF="$(git -C "$REPO_ROOT" rev-parse --short HEAD 2>/dev/null || echo unknow
 GIT_BRANCH="$(git -C "$REPO_ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
 BUILD_DATE="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo unknown)"
 
-cat > "$BUILD_INFO_PATH" <<EOF_BUILD_INFO
+cat > "$BUILD_INFO_PATH" <<EOF
 module_id=$MODULE_ID
 version=$VERSION
 versionCode=$VERSION_CODE
@@ -182,7 +193,7 @@ stable_zip_name=${STABLE_ZIP_NAME_OVERRIDE:-}
 git_ref=$GIT_REF
 git_branch=$GIT_BRANCH
 build_date=$BUILD_DATE
-EOF_BUILD_INFO
+EOF
 
 echo "Build info:"
 cat "$BUILD_INFO_PATH"
