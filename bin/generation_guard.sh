@@ -72,6 +72,7 @@ _aba_cmdline_matches_pkg() {
   # Magisk runs module scripts under BusyBox ash. Its read -d support lets the
   # fallback consume the first NUL-delimited cmdline token without spawning
   # tr/head for every PID.
+  # shellcheck disable=SC3045 # Magisk executes this under BusyBox ash, which supports read -d.
   IFS= read -r -d '' first < "$file" 2>/dev/null || [ -n "$first" ] || return 1
   case "$first" in
     "$pkg"|"${pkg}:"*) return 0 ;;
