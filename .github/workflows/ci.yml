@@ -35,7 +35,10 @@ jobs:
       # files or sourced-only config/install stubs).
       # .shellcheckrc sets shell=ash and disables ash/Android false positives.
       - name: Lint module shell scripts (shellcheck)
+        id: shellcheck
+        continue-on-error: true
         run: |
+          mkdir -p dist
           shellcheck --severity=warning \
             bin/common.sh \
             bin/generation_guard.sh \
@@ -48,7 +51,20 @@ jobs:
             uninstall.sh \
             tests/test-generation-guard.sh \
             tools/build-release.sh \
-            tools/validate-zip.sh
+            tools/validate-zip.sh 2>&1 | tee dist/shellcheck.log
+          exit "${PIPESTATUS[0]}"
+
+      - name: Upload ShellCheck diagnostics
+        if: steps.shellcheck.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: shellcheck-log
+          path: dist/shellcheck.log
+          retention-days: 1
+
+      - name: Stop after ShellCheck failure
+        if: steps.shellcheck.outcome == 'failure'
+        run: exit 1
 
       - name: Test generation-aware AFWall handoff
         run: |
