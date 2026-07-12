@@ -6,7 +6,7 @@ TMP="${TMPDIR:-/tmp}/aba-generation-test.$$"
 mkdir -p "$TMP"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
-REPO_ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(unset CDPATH; cd -- "$(dirname "$0")/.." && pwd)"
 GUARD_PATH="${ABA_GENERATION_GUARD_PATH:-$REPO_ROOT/bin/generation_guard.sh}"
 
 AFWALL_CHAIN_MAIN=afwall
