@@ -28,8 +28,10 @@ echo "============================================================"
 
 ERRORS=0
 
+# ── Helper: check that a path exists inside the ZIP ──────────────────────────
 check_file() {
   local path="$1"
+  # `unzip -Z -1` lists only internal paths, one per line — no header/footer noise.
   if unzip -Z -1 "$ZIP" 2>/dev/null | grep -qxF "$path"; then
     echo "  [OK] $path"
   else
@@ -38,6 +40,7 @@ check_file() {
   fi
 }
 
+# ── Check required files ──────────────────────────────────────────────────────
 echo "Checking required files..."
 check_file "META-INF/com/google/android/update-binary"
 check_file "META-INF/com/google/android/updater-script"
@@ -57,6 +60,7 @@ check_file "service.sh"
 check_file "uninstall.sh"
 check_file "update.json"
 
+# ── Check module.prop is parseable and complete ───────────────────────────────
 echo "Checking module.prop contents..."
 MODULE_PROP_CONTENT="$(unzip -p "$ZIP" "module.prop" 2>/dev/null)" || {
   echo "  [ERROR] Could not extract module.prop from ZIP" >&2
@@ -82,6 +86,7 @@ check_prop "version"
 check_prop "versionCode"
 check_prop "updateJson"
 
+# ── Check update-binary is not the old stub ───────────────────────────────────
 echo "Checking update-binary is not a stub..."
 UPD_BIN="$(unzip -p "$ZIP" "META-INF/com/google/android/update-binary" 2>/dev/null)" || UPD_BIN=""
 if printf '%s' "$UPD_BIN" | grep -q "install_module"; then
@@ -91,6 +96,7 @@ else
   ERRORS=$((ERRORS + 1))
 fi
 
+# ── Check files are at ZIP root (no nesting parent directory) ─────────────────
 echo "Checking ZIP root structure (no parent directory nesting)..."
 if unzip -Z -1 "$ZIP" 2>/dev/null | grep -qxF "module.prop"; then
   echo "  [OK] module.prop is at ZIP root"
@@ -99,6 +105,9 @@ else
   ERRORS=$((ERRORS + 1))
 fi
 
+# ── Check no development artefacts are present ───────────────────────────────
+# Use `unzip -Z -1` which lists only the internal paths (no header/footer lines),
+# avoiding false positives when the ZIP file itself is stored in a matching path.
 echo "Checking for development artefacts..."
 JUNK_FOUND=0
 ZIP_CONTENTS="$(unzip -Z -1 "$ZIP" 2>/dev/null)"
@@ -112,6 +121,7 @@ if [ "$JUNK_FOUND" -eq 0 ]; then
   echo "  [OK] No development artefacts found"
 fi
 
+# ── Summary ───────────────────────────────────────────────────────────────────
 echo ""
 if [ "$ERRORS" -gt 0 ]; then
   echo "VALIDATION FAILED: $ERRORS error(s) found." >&2
