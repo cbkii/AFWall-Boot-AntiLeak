@@ -20,9 +20,9 @@ printf 'config mode=%s poll=%s fast=%s slow=%s watchdog=%s/%s policy=%s radio=%s
   "${LEAK_PROTECTION_MODE:-}" "${POLL_INTERVAL_SECS:-}" "${FAST_STABLE_SECS:-}" "${SLOW_STABLE_SECS:-}" \
   "${WATCHDOG_SERVICE_SECS:-}" "${WATCHDOG_BOOT_COMPLETED_SECS:-}" "${WATCHDOG_POLICY:-}" \
   "${RADIO_SUPPRESSION:-}" "${VPN_LOCKDOWN_MODE:-}" "${VPN_PROVIDER_PACKAGES:-auto}"
-printf 'generation_guard version=%s process_epoch=%s prefs_ready=%s prefs_file=%s delayed=%s delay_secs=%s delay_grace=%s gate_open=%s fixLeak=%s initPath=%s\n' \
-  "${ABA_GENERATION_GUARD_VERSION:-absent}" "${ABA_GEN_PROCESS_FIRST_TS:-0}" "${ABA_GEN_PREFS_READY:-0}" \
-  "${ABA_GEN_PREFS_FILE:-none}" "${ABA_GEN_DELAY_ENABLED:-unknown}" "${ABA_GEN_DELAY_SECS:-unknown}" \
+printf 'generation_guard version=%s package=%s process_epoch=%s prefs_ready=%s prefs_file=%s prefs_retry=%s delayed=%s delay_secs=%s delay_grace=%s gate_open=%s fixLeak=%s initPath=%s\n' \
+  "${ABA_GENERATION_GUARD_VERSION:-absent}" "${ABA_GEN_PACKAGE:-unknown}" "${ABA_GEN_PROCESS_FIRST_TS:-0}" "${ABA_GEN_PREFS_READY:-0}" \
+  "${ABA_GEN_PREFS_FILE:-none}" "${AFWALL_PREFS_RETRY_SECS:-unknown}" "${ABA_GEN_DELAY_ENABLED:-unknown}" "${ABA_GEN_DELAY_SECS:-unknown}" \
   "${AFWALL_DELAY_GRACE_SECS:-unknown}" "${ABA_GEN_GATE_OPEN_TS:-0}" "${ABA_GEN_FIX_LEAK:-unknown}" "${ABA_GEN_INIT_PATH:-unknown}"
 
 printf '\n[vpn]\n'
