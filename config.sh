@@ -8,17 +8,23 @@
 # Recommended default for most users; balanced keeps the kernel firewall as the main protection while avoiding disruptive radio toggles. Accepted: balanced, strict, recovery_friendly.
 LEAK_PROTECTION_MODE=balanced
 
-# Controls how this module coexists with AFWall's own startup-leak option; leave auto unless you intentionally want to force or disable module blocking. Accepted: auto, prefer_module, prefer_afwall, off.
+# Controls whether module blocking is enabled. auto, prefer_module, and prefer_afwall all keep the module blackout authoritative; off is the only mode that skips it. Accepted: auto, prefer_module, prefer_afwall, off.
 INTEGRATION_MODE=auto
 
 # Seconds between AFWall rule-graph checks; lower values react faster but call iptables more often during the short boot handoff. Default: 2.
 POLL_INTERVAL_SECS=2
 
-# Stable seconds needed for a quick release when the rooted graph also has a strong/dense corroborating signal. Default: 2; raise on very slow devices.
-FAST_STABLE_SECS=2
+# Compatibility fast-path threshold. The generation guard disables process/file/density acceleration, so this is kept equal to the conservative threshold. Default: 6.
+FAST_STABLE_SECS=6
 
-# Stable seconds needed when the rooted graph alone proves handoff; this prevents releasing during AFWall rule churn without making unlock mandatory. Default: 6.
+# Stable seconds required after AFWall's final eligible generation is visible. Fingerprint drift resets this window. Default: 6.
 SLOW_STABLE_SECS=6
+
+# Additional seconds after AFWall's configured delayed-start deadline before the final-generation observation window may open. This absorbs Handler scheduling and root-shell startup jitter. Default: 4.
+AFWALL_DELAY_GRACE_SECS=4
+
+# Seconds between attempts to discover and parse AFWall's startup preferences while credential-encrypted storage is unavailable. Default: 2.
+AFWALL_PREFS_RETRY_SECS=2
 
 # Maximum seconds from service start before watchdog action; block is safest, unblock is easier to recover. Default: 300.
 WATCHDOG_SERVICE_SECS=300
@@ -39,7 +45,7 @@ BLOCK_INPUT=0
 # Optional radio/service suppression beneath the firewall: off is fastest and recommended for modern Pixel-style devices; safe is moderate; strict is strongest but may slow Wi-Fi/mobile/VPN recovery. Accepted: off, safe, strict. Default: off.
 RADIO_SUPPRESSION=off
 
-# AFWall package to watch for optional corroboration only; auto checks free/donate packages, or set a package explicitly. Accepted: auto, dev.ukanth.ufirewall, dev.ukanth.ufirewall.donate, com.ukanth.ufirewall.
+# AFWall package used to locate the boot process and startup preferences; auto checks free/donate packages, or set a package explicitly. Accepted: auto, dev.ukanth.ufirewall, dev.ukanth.ufirewall.donate, com.ukanth.ufirewall.
 AFWALL_PACKAGE=auto
 
 # Android always-on VPN lockdown handling: off leaves it alone; preserve records/respects existing state; restore may enforce during protection then restore the pre-boot state. Accepted: off, preserve, restore. Default: off.
@@ -77,5 +83,13 @@ RADIO_REASSERT_INTERVAL=15
 # Advanced: seconds between unlock-confidence diagnostic probes; unlock never gates family release. Default: 10.
 UNLOCK_POLL_INTERVAL=10
 
-# Advanced: minimum rule count in AFWall's main chain used as a dense-graph accelerator, not a mandatory gate. Default: 3.
+# Advanced: retained for compatibility with older service diagnostics. The generation guard does not use density to shorten readiness. Default: 3.
 AFWALL_RULE_DENSITY_MIN=3
+
+# Internal readiness overrides. This is sourced after common.sh has loaded, so it
+# can replace only the proof primitives while leaving the service state machine,
+# blackout ownership, watchdog, transport restoration and Action recovery intact.
+if [ -n "${MODDIR:-}" ] && [ -f "$MODDIR/bin/generation_guard.sh" ]; then
+  # shellcheck source=bin/generation_guard.sh
+  . "$MODDIR/bin/generation_guard.sh"
+fi
