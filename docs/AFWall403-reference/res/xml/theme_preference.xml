@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen
+    xmlns:android="http://schemas.android.com/apk/res/android">
+    <ListPreference
+        android:entries="@array/themeOptions"
+        android:title="@string/theme"
+        android:key="theme"
+        android:summary="%s"
+        android:defaultValue="G"
+        android:entryValues="@array/themeValues" />
+    <net.margaritov.preference.colorpicker.ColorPickerPreference
+        android:title="@string/syscolor_pref_title"
+        android:key="sysColor"
+        android:defaultValue="@color/accent_dark"
+        alphaSlider="true" />
+</PreferenceScreen>

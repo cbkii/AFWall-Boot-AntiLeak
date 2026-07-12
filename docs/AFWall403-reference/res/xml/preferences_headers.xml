@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<preference-headers
+    android:background="?itemBackground"
+    xmlns:android="http://schemas.android.com/apk/res/android">
+    <header
+        android:icon="@drawable/ic_menu_pref"
+        android:title="@string/ui_prefs_title"
+        android:fragment="dev.ukanth.ufirewall.preferences.UIPreferenceFragment" />
+    <header
+        android:icon="@drawable/ic_theme"
+        android:title="@string/ui_themes_header"
+        android:fragment="dev.ukanth.ufirewall.preferences.ThemePreferenceFragment" />
+    <header
+        android:icon="@drawable/ic_rules"
+        android:title="@string/rules_prefs_title"
+        android:fragment="dev.ukanth.ufirewall.preferences.RulesPreferenceFragment" />
+    <header
+        android:icon="@drawable/ic_log"
+        android:title="@string/log_prefs_title"
+        android:fragment="dev.ukanth.ufirewall.preferences.LogPreferenceFragment" />
+    <header
+        android:icon="@drawable/ic_menu_secure"
+        android:title="@string/sec_prefs_title"
+        android:fragment="dev.ukanth.ufirewall.preferences.SecPreferenceFragment" />
+    <header
+        android:icon="@drawable/ic_menu_exp"
+        android:title="@string/exp_prefs_title"
+        android:fragment="dev.ukanth.ufirewall.preferences.ExpPreferenceFragment" />
+    <header
+        android:icon="@drawable/ic_menu_profile"
+        android:title="@string/mp_prefs_title"
+        android:fragment="dev.ukanth.ufirewall.preferences.MultiProfilePreferenceFragment" />
+    <header
+        android:icon="@drawable/ic_menu_binary"
+        android:title="@string/binaries"
+        android:fragment="dev.ukanth.ufirewall.preferences.CustomBinaryPreferenceFragment" />
+    <header
+        android:icon="@drawable/ic_menu_widget"
+        android:title="@string/widgets"
+        android:fragment="dev.ukanth.ufirewall.preferences.WidgetPreferenceFragment" />
+    <header
+        android:icon="@drawable/ic_menu_translate"
+        android:title="@string/misc_header"
+        android:fragment="dev.ukanth.ufirewall.preferences.LanguagePreferenceFragment" />
+</preference-headers>

@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen
+    xmlns:android="http://schemas.android.com/apk/res/android">
+    <PreferenceCategory
+        android:title="@string/binaries">
+        <ListPreference
+            android:entries="@array/iptables_binary"
+            android:title="@string/iptables_pref"
+            android:key="ipt_path"
+            android:summary="%s"
+            android:defaultValue="system"
+            android:entryValues="@array/iptables_binary_path" />
+        <ListPreference
+            android:entries="@array/busybox_binary"
+            android:title="@string/busybox_pref"
+            android:key="bb_path"
+            android:summary="%s"
+            android:defaultValue="builtin"
+            android:entryValues="@array/busybox_binary_path" />
+    </PreferenceCategory>
+</PreferenceScreen>

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <PreferenceCategory
+        android:title="@string/exp_prefs_title">
+        <CheckBoxPreference
+            android:title="@string/addStartupDelayTitle"
+            android:key="addStartupDelay"
+            android:summary="@string/addStartupDelaySummary" />
+        <dev.ukanth.ufirewall.preferences.SeekBarPreference
+            android:max="30"
+            android:title="@string/delayTitle"
+            android:key="customDelay"
+            android:summary="@string/delaySummary"
+            android:dependency="addStartupDelay"
+            android:defaultValue="5"
+            app:min="1"
+            app:suffix=" s" />
+        <ListPreference
+            android:entries="@array/initDir"
+            android:title="@string/init_d"
+            android:key="initPath"
+            android:summary="%s"
+            android:entryValues="@array/initValue" />
+        <CheckBoxPreference
+            android:title="@string/fixleakTitle"
+            android:key="fixLeak"
+            android:summary="@string/fixleakSummary" />
+        <CheckBoxPreference
+            android:title="@string/enableInboundTitle"
+            android:key="enableInbound"
+            android:summary="@string/enableInboundSummary" />
+        <CheckBoxPreference
+            android:title="@string/multi_user_title"
+            android:key="multiUser"
+            android:summary="@string/multi_user_summary" />
+        <CheckBoxPreference
+            android:title="@string/dualAppsTitle"
+            android:key="supportDualApps"
+            android:summary="@string/dualAppsDesc" />
+    </PreferenceCategory>
+</PreferenceScreen>

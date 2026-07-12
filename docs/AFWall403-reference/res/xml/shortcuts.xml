@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts
+    xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:icon="@drawable/ic_menu_pref"
+        android:enabled="true">
+        <intent
+            android:targetPackage="dev.ukanth.ufirewall"
+            android:action="android.intent.action.VIEW"
+            android:targetClass="dev.ukanth.ufirewall.preferences.PreferencesActivity">
+            <extra
+                android:name="validate"
+                android:value="yes" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:icon="@drawable/ic_log"
+        android:enabled="true">
+        <intent
+            android:targetPackage="dev.ukanth.ufirewall"
+            android:action="android.intent.action.VIEW"
+            android:targetClass="dev.ukanth.ufirewall.activity.LogActivity">
+            <extra
+                android:name="validate"
+                android:value="yes" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:icon="@drawable/ic_rules"
+        android:enabled="true">
+        <intent
+            android:targetPackage="dev.ukanth.ufirewall"
+            android:action="android.intent.action.VIEW"
+            android:targetClass="dev.ukanth.ufirewall.activity.RulesActivity">
+            <extra
+                android:name="validate"
+                android:value="yes" />
+        </intent>
+    </shortcut>
+</shortcuts>

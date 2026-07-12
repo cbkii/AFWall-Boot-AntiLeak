@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout
+    android:orientation="vertical"
+    android:background="?itemBackground"
+    android:duplicateParentState="false"
+    android:layout_width="fill_parent"
+    android:layout_height="fill_parent"
+    xmlns:android="http://schemas.android.com/apk/res/android">
+    <androidx.appcompat.widget.Toolbar
+        android:id="@id/profile_toolbar"
+        android:background="?colorPrimary"
+        android:layout_width="fill_parent"
+        android:layout_height="?actionBarSize"
+        android:minHeight="?actionBarSize" />
+    <ListView
+        android:id="@id/listProfileView"
+        android:layout_width="fill_parent"
+        android:layout_height="wrap_content"
+        android:divider="#ff212121"
+        android:dividerHeight="2.0px"
+        android:minHeight="?android:listPreferredItemHeight"
+        android:fastScrollEnabled="true" />
+</LinearLayout>

@@ -1,0 +1,16 @@
+.class public interface abstract Lcom/raizlabs/android/dbflow/structure/listener/ContentValuesListener;
+.super Ljava/lang/Object;
+.source "ContentValuesListener.java"
+
+
+# annotations
+.annotation runtime Ljava/lang/Deprecated;
+.end annotation
+
+
+# virtual methods
+.method public abstract onBindToContentValues(Landroid/content/ContentValues;)V
+.end method
+
+.method public abstract onBindToInsertValues(Landroid/content/ContentValues;)V
+.end method

@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <PreferenceCategory
+        android:title="@string/exp_prefs_title"
+        android:key="logExperimental">
+        <ListPreference
+            android:title="@string/log_target"
+            android:key="logTarget"
+            android:summary="%s"
+            android:defaultValue="LOG" />
+        <CheckBoxPreference
+            android:title="@string/enable_firewall_log_service"
+            android:key="enableLogService" />
+        <CheckBoxPreference
+            android:enabled="false"
+            android:title="@string/show_host"
+            android:key="showHostName"
+            android:summary="@string/showhost_desc"
+            android:dependency="enableLogService"
+            android:defaultValue="false" />
+        <dev.ukanth.ufirewall.preferences.SeekBarPreference
+            android:max="60"
+            android:title="@string/pingDelayTitle"
+            android:key="logPingTime"
+            android:dependency="enableLogService"
+            android:defaultValue="10"
+            app:min="5"
+            app:suffix=" s" />
+    </PreferenceCategory>
+</PreferenceScreen>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <item
+        android:icon="@drawable/twofortyfouram_locale_ic_menu_dontsave"
+        android:id="@id/twofortyfouram_locale_menu_dontsave"
+        android:title="@string/Cancel"
+        app:showAsAction="ifRoom|withText" />
+    <item
+        android:icon="@drawable/twofortyfouram_locale_ic_menu_save"
+        android:id="@id/twofortyfouram_locale_menu_save"
+        android:title="@string/saverules"
+        app:showAsAction="ifRoom|withText" />
+</menu>

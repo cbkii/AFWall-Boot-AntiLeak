@@ -1,0 +1,116 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen
+    android:key="uiPrefsScreen"
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <PreferenceCategory
+        android:title="@string/rule_prefs_title">
+        <CheckBoxPreference
+            android:title="@string/active_rules"
+            android:key="activeRules"
+            android:summary="@string/active_rules_summary"
+            android:defaultValue="true" />
+        <CheckBoxPreference
+            android:title="@string/add_delay"
+            android:key="addDelay"
+            android:summary="@string/add_delay_rules"
+            android:defaultValue="false" />
+        <dev.ukanth.ufirewall.preferences.SeekBarPreference
+            android:max="10"
+            android:title="@string/network_debounce_title"
+            android:key="networkDebounceDelay"
+            android:summary="@string/network_debounce_summary"
+            android:defaultValue="2"
+            app:min="0"
+            app:suffix=" s" />
+        <CheckBoxPreference
+            android:icon="@drawable/ic_roam"
+            android:title="@string/roaming"
+            android:key="enableRoam"
+            android:summary="@string/roamingSummary"
+            android:dependency="activeRules"
+            android:defaultValue="false" />
+        <CheckBoxPreference
+            android:icon="@drawable/ic_lan"
+            android:title="@string/lan_title"
+            android:key="enableLAN"
+            android:summary="@string/lan_summary"
+            android:dependency="activeRules"
+            android:defaultValue="true" />
+        <CheckBoxPreference
+            android:icon="@drawable/ic_vpn"
+            android:title="@string/vpn_profile"
+            android:key="enableVPN"
+            android:summary="@string/vpnSummary"
+            android:dependency="activeRules"
+            android:defaultValue="false" />
+        <CheckBoxPreference
+            android:icon="@drawable/ic_tether"
+            android:title="@string/tether_profile"
+            android:key="enableTether"
+            android:summary="@string/tetherSummary"
+            android:dependency="activeRules"
+            android:defaultValue="false" />
+        <CheckBoxPreference
+            android:icon="@drawable/ic_tor"
+            android:title="@string/tor_profile"
+            android:key="enableTor"
+            android:summary="@string/torSummary"
+            android:dependency="activeRules"
+            android:defaultValue="false" />
+    </PreferenceCategory>
+    <PreferenceCategory
+        android:title="@string/ui_chains_title">
+        <SwitchPreference
+            android:title="@string/input_chain"
+            android:key="input_chain"
+            android:defaultValue="true"
+            android:summaryOn="@string/input_chain_summary_on"
+            android:summaryOff="@string/input_chain_summary_off" />
+        <SwitchPreference
+            android:title="@string/output_chain"
+            android:key="output_chain"
+            android:defaultValue="true"
+            android:summaryOn="@string/output_chain_summary_on"
+            android:summaryOff="@string/output_chain_summary_off" />
+        <SwitchPreference
+            android:title="@string/forward_chain"
+            android:key="forward_chain"
+            android:defaultValue="true"
+            android:summaryOn="@string/forward_chain_summary_on"
+            android:summaryOff="@string/forward_chain_summary_off" />
+    </PreferenceCategory>
+    <PreferenceCategory
+        android:title="@string/ui_chains6_title">
+        <CheckBoxPreference
+            android:title="@string/ipv6_title"
+            android:key="enableIPv6"
+            android:summary="@string/ipv6_summary"
+            android:defaultValue="true" />
+        <CheckBoxPreference
+            android:key="controlIPv6"
+            android:summary="@string/control_ipv6_title"
+            android:defaultValue="false" />
+        <SwitchPreference
+            android:title="@string/input_chain_v6"
+            android:key="input_chain_v6"
+            android:dependency="controlIPv6"
+            android:defaultValue="true"
+            android:summaryOn="@string/input_chain_summary_on"
+            android:summaryOff="@string/input_chain_summary_off" />
+        <SwitchPreference
+            android:title="@string/output_chain_v6"
+            android:key="output_chain_v6"
+            android:dependency="controlIPv6"
+            android:defaultValue="true"
+            android:summaryOn="@string/output_chain_summary_on"
+            android:summaryOff="@string/output_chain_summary_off" />
+        <SwitchPreference
+            android:title="@string/forward_chain_v6"
+            android:key="forward_chain_v6"
+            android:dependency="controlIPv6"
+            android:defaultValue="true"
+            android:summaryOn="@string/forward_chain_summary_on"
+            android:summaryOff="@string/forward_chain_summary_off" />
+    </PreferenceCategory>
+</PreferenceScreen>

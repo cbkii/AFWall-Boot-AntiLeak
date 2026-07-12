@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen
+    xmlns:android="http://schemas.android.com/apk/res/android">
+    <PreferenceCategory
+        android:title="@string/widget_prefs_title">
+        <EditTextPreference
+            android:title="@string/xTitle"
+            android:key="widgetX"
+            android:summary="@string/xTitleSummary"
+            android:dialogTitle="@string/xTitleDialog"
+            android:dialogMessage=""
+            android:inputType="text" />
+        <EditTextPreference
+            android:title="@string/yTitle"
+            android:key="widgetY"
+            android:summary="@string/yTitleSummary"
+            android:dialogTitle="@string/yTitleDialog"
+            android:dialogMessage=""
+            android:inputType="text" />
+    </PreferenceCategory>
+</PreferenceScreen>

@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen
+    xmlns:android="http://schemas.android.com/apk/res/android">
+    <PreferenceCategory
+        android:title="@string/mp_prefs_title"
+        android:key="oldprofile_pref">
+        <CheckBoxPreference
+            android:title="@string/multipleProfiles"
+            android:key="enableMultiProfile" />
+        <CheckBoxPreference
+            android:title="@string/multi_apply_rules"
+            android:key="applyOnSwitchProfiles"
+            android:summary="@string/multi_apply_rules_info"
+            android:dependency="enableMultiProfile" />
+        <Preference
+            android:title="@string/manage_profiles"
+            android:key="manage_profiles"
+            android:summary="@string/manage_profiles_summary" />
+        <EditTextPreference
+            android:title="@string/defaultProfile"
+            android:key="default"
+            android:summary="@string/custom_title1"
+            android:dependency="enableMultiProfile" />
+        <EditTextPreference
+            android:title="@string/profile1"
+            android:key="profile1"
+            android:summary="@string/custom_title2"
+            android:dependency="enableMultiProfile" />
+        <EditTextPreference
+            android:title="@string/profile2"
+            android:key="profile2"
+            android:summary="@string/custom_title3"
+            android:dependency="enableMultiProfile" />
+        <EditTextPreference
+            android:title="@string/profile3"
+            android:key="profile3"
+            android:summary="@string/custom_title4"
+            android:dependency="enableMultiProfile" />
+    </PreferenceCategory>
+    <PreferenceCategory
+        android:title="@string/exp_prefs_title"
+        android:key="promigrate">
+        <Preference
+            android:title="@string/migrate_profiles"
+            android:key="migrate_profile"
+            android:summary="@string/migrate_summary" />
+    </PreferenceCategory>
+</PreferenceScreen>

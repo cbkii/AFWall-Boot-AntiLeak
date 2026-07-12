@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen
+    android:key="uiPrefsScreen"
+    xmlns:android="http://schemas.android.com/apk/res/android">
+    <PreferenceCategory
+        android:title="@string/ui_prefs_title"
+        android:key="uiscreen">
+        <CheckBoxPreference
+            android:title="@string/notify_pref_title"
+            android:key="notifyAppInstall"
+            android:defaultValue="true"
+            android:summaryOn="@string/notify_pref_summary_on"
+            android:summaryOff="@string/notify_pref_summary_off" />
+        <Preference
+            android:layout_width="wrap_content"
+            android:title="@string/default_connection_setting_allow"
+            android:key="default_behavior_allow_mode" />
+        <Preference
+            android:title="@string/default_connection_setting_block"
+            android:key="default_behavior_block_mode" />
+        <CheckBoxPreference
+            android:title="@string/hideicons_pref_title"
+            android:key="disableIcons"
+            android:defaultValue="false"
+            android:summaryOn="@string/hideicons_pref_summary_on"
+            android:summaryOff="@string/hideicons_pref_summary_off" />
+        <CheckBoxPreference
+            android:title="@string/runNotification"
+            android:key="runNotification"
+            android:summary="@string/runNotification_summary"
+            android:defaultValue="true" />
+        <ListPreference
+            android:entries="@array/notification_type"
+            android:title="@string/notification_priority"
+            android:key="notification_priority"
+            android:summary="%s"
+            android:defaultValue="0"
+            android:entryValues="@array/notification_type_val" />
+        <CheckBoxPreference
+            android:title="@string/showAllApps"
+            android:key="showAllApps"
+            android:defaultValue="false"
+            android:summaryOn="@string/showallapps_summary_on"
+            android:summaryOff="@string/showallapps_summary_off" />
+        <CheckBoxPreference
+            android:title="@string/showFilter"
+            android:key="showFilter"
+            android:defaultValue="false"
+            android:summaryOn="@string/showfilter_summary_on"
+            android:summaryOff="@string/showfilter_summary_off" />
+        <CheckBoxPreference
+            android:title="@string/showUid"
+            android:key="showUid"
+            android:summaryOn="@string/showuid_summary_on"
+            android:summaryOff="@string/showuid_summary_off" />
+        <CheckBoxPreference
+            android:title="@string/enableConfirmTitle"
+            android:key="enableConfirm"
+            android:summary="@string/enableConfirm_summary_on" />
+    </PreferenceCategory>
+</PreferenceScreen>

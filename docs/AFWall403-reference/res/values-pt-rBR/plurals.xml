@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <plurals name="alp_42447968_pmsg_connect_x_dots">
+        <item quantity="other">"Conecte pelo menos %1$d pontos.
+Tente novamente…"</item>
+        <item quantity="one">"Conecte pelo menos %1$d ponto.
+Tente novamente…"</item>
+    </plurals>
+    <plurals name="mtrl_badge_content_description">
+        <item quantity="other">%d novas notificações</item>
+        <item quantity="one">%d nova notificação</item>
+    </plurals>
+</resources>

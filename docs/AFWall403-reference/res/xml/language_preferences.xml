@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen
+    xmlns:android="http://schemas.android.com/apk/res/android">
+    <PreferenceCategory
+        android:title="@string/languages">
+        <ListPreference
+            android:entries="@array/supported_languages"
+            android:title="@string/change_languages"
+            android:key="locale"
+            android:summary="%s"
+            android:defaultValue="en"
+            android:entryValues="@array/supported_languages_code" />
+    </PreferenceCategory>
+    <PreferenceCategory
+        android:title="@string/tasker_prefs_title">
+        <CheckBoxPreference
+            android:title="@string/disable_toaster"
+            android:key="disableTaskerToast"
+            android:summary="@string/disableTasterSummary"
+            android:defaultValue="false" />
+    </PreferenceCategory>
+</PreferenceScreen>

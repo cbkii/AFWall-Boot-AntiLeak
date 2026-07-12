@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <plurals name="alp_42447968_pmsg_connect_x_dots">
+        <item quantity="other">"Verbinde mind. %1$d Punkte.
+Versuche es bitte erneut…"</item>
+        <item quantity="one">"Verbinde mind. %1$d Punkt.
+Versuche es bitte erneut…"</item>
+    </plurals>
+    <plurals name="mtrl_badge_content_description">
+        <item quantity="other">%d neue Benachrichtigungen</item>
+        <item quantity="one">%d neue Benachrichtigung</item>
+    </plurals>
+</resources>

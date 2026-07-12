@@ -1,0 +1,82 @@
+.class public Ldev/ukanth/ufirewall/admin/AdminDeviceReceiver;
+.super Landroid/app/admin/DeviceAdminReceiver;
+.source "AdminDeviceReceiver.java"
+
+
+# static fields
+.field static final TAG:Ljava/lang/String; = "AdminDeviceReceiver"
+
+
+# direct methods
+.method public constructor <init>()V
+    .locals 0
+
+    .line 19
+    invoke-direct {p0}, Landroid/app/admin/DeviceAdminReceiver;-><init>()V
+
+    return-void
+.end method
+
+
+# virtual methods
+.method public onDisabled(Landroid/content/Context;Landroid/content/Intent;)V
+    .locals 1
+
+    .line 32
+    invoke-super {p0, p1, p2}, Landroid/app/admin/DeviceAdminReceiver;->onDisabled(Landroid/content/Context;Landroid/content/Intent;)V
+
+    const/4 p2, 0x0
+
+    .line 33
+    invoke-static {p2}, Ldev/ukanth/ufirewall/util/G;->enableAdmin(Z)Z
+
+    .line 34
+    sget p2, Ldev/ukanth/ufirewall/R$string;->device_admin_disabled:I
+
+    const/4 v0, 0x1
+
+    invoke-static {p1, p2, v0}, Landroid/widget/Toast;->makeText(Landroid/content/Context;II)Landroid/widget/Toast;
+
+    move-result-object p1
+
+    invoke-virtual {p1}, Landroid/widget/Toast;->show()V
+
+    const-string p1, "AdminDeviceReceiver"
+
+    const-string p2, "onDisabled"
+
+    .line 35
+    invoke-static {p1, p2}, Ldev/ukanth/ufirewall/log/Log;->d(Ljava/lang/String;Ljava/lang/String;)I
+
+    return-void
+.end method
+
+.method public onEnabled(Landroid/content/Context;Landroid/content/Intent;)V
+    .locals 1
+
+    .line 24
+    invoke-super {p0, p1, p2}, Landroid/app/admin/DeviceAdminReceiver;->onEnabled(Landroid/content/Context;Landroid/content/Intent;)V
+
+    const/4 p2, 0x1
+
+    .line 25
+    invoke-static {p2}, Ldev/ukanth/ufirewall/util/G;->enableAdmin(Z)Z
+
+    .line 26
+    sget v0, Ldev/ukanth/ufirewall/R$string;->device_admin_enabled:I
+
+    invoke-static {p1, v0, p2}, Landroid/widget/Toast;->makeText(Landroid/content/Context;II)Landroid/widget/Toast;
+
+    move-result-object p1
+
+    invoke-virtual {p1}, Landroid/widget/Toast;->show()V
+
+    const-string p1, "AdminDeviceReceiver"
+
+    const-string p2, "onEnabled"
+
+    .line 27
+    invoke-static {p1, p2}, Ldev/ukanth/ufirewall/log/Log;->d(Ljava/lang/String;Ljava/lang/String;)I
+
+    return-void
+.end method
