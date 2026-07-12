@@ -15,12 +15,12 @@ stable_release_time(){ # args: threshold sequence of fp or -
   done
   return 1
 }
-[ "$(stable_release_time 2 A A)" = 2 ] || fail "one stable AFWall apply did not release at fast window"
+[ "$(stable_release_time 6 A A A A)" = 6 ] || fail "stable AFWall apply did not release at correct window"
 [ "$(stable_release_time 6 A B C C C C)" = 10 ] || fail "changing fingerprints did not reset stability"
 [ "$(stable_release_time 6 - - A A A A)" = 10 ] || fail "pre-final application state mishandled"
 # Independent families: v4 stable immediately, v6 later; v4 must not wait for v6.
-v4="$(stable_release_time 2 V4 V4)"; v6="$(stable_release_time 2 - - V6 V6)"
-[ "$v4" = 2 ] && [ "$v6" = 6 ] || fail "families are not independently releasable"
+v4="$(stable_release_time 6 V4 V4 V4 V4)"; v6="$(stable_release_time 6 - - V6 V6 V6 V6)"
+[ "$v4" = 6 ] && [ "$v6" = 10 ] || fail "families are not independently releasable"
 # Snapshot graph helpers cover absent/stale transport without gating family fingerprint.
 base='-P OUTPUT ACCEPT
 -N afwall

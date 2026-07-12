@@ -295,6 +295,11 @@ fi
   #   first observed to be non-trivially present.
   v4_last_fp=""; v4_fp_stable_since=0; v4_graph_seen_ts=0; v4_path=""
   v6_last_fp=""; v6_fp_stable_since=0; v6_graph_seen_ts=0; v6_path=""
+  first_AFWall_process_seen=0
+  afwall_prefs_read=0
+  afwall_delay_start="false"
+  afwall_custom_delay=5
+  afwall_enable_ipv6="true"
 
   # ── Transport readiness tracking ────────────────────────────────────────────
   # wifi_done/mobile_done: 1 when the corresponding transport's AFWall readiness
@@ -709,6 +714,26 @@ fi
     _poll_unlock_state || true
     _update_readiness_gate || true
 
+    # ── Record AFWall Process First Seen & Read Prefs ───────────────────────
+    if [ "$first_AFWall_process_seen" = "0" ] && [ -n "$AFW_PKG" ]; then
+      if afwall_process_present "$AFW_PKG"; then
+        first_AFWall_process_seen="$NOW"
+        debug_log "service: AFWall process first seen at $NOW"
+      fi
+    fi
+
+    if [ "$device_unlocked" = "1" ] && [ "$afwall_prefs_read" = "0" ] && [ -n "$AFW_PKG" ]; then
+      afwall_delay_start="$(afwall_get_pref "$AFW_PKG" "addDelayStart" "boolean" || echo "false")"
+      afwall_custom_delay="$(afwall_get_pref "$AFW_PKG" "customDelay" "string" || echo "5")"
+      afwall_enable_ipv6="$(afwall_get_pref "$AFW_PKG" "enableIPv6" "boolean" || echo "true")"
+      # If customDelay is empty or invalid, default to 5
+      [ -z "$afwall_custom_delay" ] && afwall_custom_delay=5
+      # Check if numeric
+      if ! [ "$afwall_custom_delay" -eq "$afwall_custom_delay" ] 2>/dev/null; then afwall_custom_delay=5; fi
+      afwall_prefs_read=1
+      debug_log "service: AFWall prefs read: addDelayStart=$afwall_delay_start customDelay=$afwall_custom_delay enableIPv6=$afwall_enable_ipv6"
+    fi
+
     # ── Capture coherent per-poll filter-table snapshots ────────────────────
     # Capture each family once per poll, independent of unlock/boot diagnostics.
     # Family handoff keys only on the rooted live OUTPUT -> afwall graph.
@@ -857,6 +882,12 @@ fi
           log_on_transition "v4_graph" "drift" "service: v4 graph drift old=$v4_last_fp new=$_new_v4_fp reset"
           v4_last_fp="$_new_v4_fp"
           v4_fp_stable_since="$NOW"
+          # Trigger immediate self-repair since AFWall rules are churning
+          if [ "$v4_blocked" = "1" ] && [ "$v4_released" = "0" ] && ! output_block_intact_v4; then
+            log_on_transition "v4_repair" "out_drift" "service: INTEGRITY REPAIR v4: OUTPUT block degraded during graph drift — repairing immediately"
+            repair_output_block_v4 || log_on_transition "v4_repair" "out_failed" "service: v4 immediate repair FAILED"
+            mark_blackout_active
+          fi
         fi
 
         # Compute how long the fingerprint has been continuously stable.
@@ -875,48 +906,31 @@ fi
           [ "$_v4_corroborator" = "none" ] && \
           _v4_corroborator="$([ "$_boot_complete_now" = "1" ] && printf 'boot_complete_dense' || printf 'dense_graph')"
 
-        # Select effective stability thresholds.
-        _v4_fast_secs="$FAST_STABLE_SECS"
-        _v4_slow_secs="$SLOW_STABLE_SECS"
-        if [ "$_boot_complete_now" = "1" ]; then
-          _v4_fast_secs="$FAMILY_FAST_SECS_POST_BOOT_EFFECTIVE"
-          _v4_slow_secs="$FAMILY_SLOW_SECS_POST_BOOT_EFFECTIVE"
+        _v4_deadline=0
+        if [ "$afwall_delay_start" = "true" ] && [ "$first_AFWall_process_seen" != "0" ]; then
+          _v4_deadline=$((first_AFWall_process_seen + afwall_custom_delay))
         fi
 
-        _v4_strong_corroboration=0
-        case "$_v4_corroborator" in
-          process|file_mtime|boot_complete_dense) _v4_strong_corroboration=1 ;;
-        esac
+        # ── Stability path ───────────
+        _v4_seen_elapsed=0
+        [ "$NOW" != "0" ] && [ "$v4_graph_seen_ts" != "0" ] && \
+          _v4_seen_elapsed=$((NOW - v4_graph_seen_ts))
 
-        # ── Fast path: corroboration + shorter stable window ──────────────
-        if [ "$_v4_corroborator" != "none" ] && \
-           [ "$_v4_stable" -ge "$_v4_fast_secs" ]; then
-          v4_done=1; v4_path="fast"
-          _v4_seen_elapsed=0
-          [ "$NOW" != "0" ] && [ "$v4_graph_seen_ts" != "0" ] && \
-            _v4_seen_elapsed=$((NOW - v4_graph_seen_ts))
-          log "service: v4 fast-path confirmed stable=${_v4_stable}s seen_elapsed=${_v4_seen_elapsed}s corroboration=${_v4_corroborator} fp=$v4_last_fp"
-          log_transition_snapshot "v4" "pre_remove"
-
-        # ── Conservative path: longer stable window, no corroboration needed ──
-        elif [ "$_v4_stable" -ge "$_v4_slow_secs" ]; then
-          _v4_seen_elapsed=0
-          [ "$NOW" != "0" ] && [ "$v4_graph_seen_ts" != "0" ] && \
-            _v4_seen_elapsed=$((NOW - v4_graph_seen_ts))
-          if [ "$_v4_corroborator" = "none" ]; then
-            log "service: v4 conservative-path confirmed stable=${_v4_stable}s seen_elapsed=${_v4_seen_elapsed}s fp=$v4_last_fp (corroboration absent)"
+        if [ "$afwall_delay_start" = "true" ]; then
+          if [ "$NOW" -ge "$((_v4_deadline + SLOW_STABLE_SECS))" ] && [ "$_v4_stable" -ge "$SLOW_STABLE_SECS" ]; then
+            log "service: v4 deadline-path confirmed stable=${_v4_stable}s deadline=${_v4_deadline} now=${NOW} fp=$v4_last_fp corroboration=${_v4_corroborator}"
+            v4_done=1; v4_path="deadline"
+            log_transition_snapshot "v4" "pre_remove"
           else
-            log "service: v4 conservative-path confirmed stable=${_v4_stable}s seen_elapsed=${_v4_seen_elapsed}s corroboration=${_v4_corroborator} fp=$v4_last_fp"
+             debug_log "service: v4 waiting for deadline/stability (stable=${_v4_stable}s, since=${v4_fp_stable_since}, deadline=${_v4_deadline}, now=${NOW})"
           fi
-          v4_done=1; v4_path="conservative"
-          log_transition_snapshot "v4" "pre_remove"
-
         else
-          # Not yet stable enough — log diagnostic and stay blocked.
-          if [ "$_v4_corroborator" = "none" ]; then
-            debug_log "service: v4 graph stable=${_v4_stable}s (need fast=${_v4_fast_secs}s/slow=${_v4_slow_secs}s) corroboration=none — conservative path active"
+          if [ "$_v4_stable" -ge "$SLOW_STABLE_SECS" ]; then
+            log "service: v4 conservative-path confirmed stable=${_v4_stable}s seen_elapsed=${_v4_seen_elapsed}s corroboration=${_v4_corroborator} fp=$v4_last_fp"
+            v4_done=1; v4_path="conservative"
+            log_transition_snapshot "v4" "pre_remove"
           else
-            debug_log "service: v4 graph stable=${_v4_stable}s (need ${_v4_fast_secs}s) corroborator=${_v4_corroborator}"
+            debug_log "service: v4 waiting for stability (stable=${_v4_stable}s, need=${SLOW_STABLE_SECS}s)"
           fi
         fi
 
@@ -949,6 +963,11 @@ fi
           log_on_transition "v6_graph" "drift" "service: v6 graph drift old=$v6_last_fp new=$_new_v6_fp reset"
           v6_last_fp="$_new_v6_fp"
           v6_fp_stable_since="$NOW"
+          if [ "$v6_blocked" = "1" ] && [ "$v6_released" = "0" ] && ! output_block_intact_v6; then
+            log_on_transition "v6_repair" "out_drift" "service: INTEGRITY REPAIR v6: OUTPUT block degraded during graph drift — repairing immediately"
+            repair_output_block_v6 || log_on_transition "v6_repair" "out_failed" "service: v6 immediate repair FAILED"
+            mark_blackout_active
+          fi
         fi
 
         _v6_stable=0
@@ -965,45 +984,34 @@ fi
           [ "$_v6_corroborator" = "none" ] && \
           _v6_corroborator="$([ "$_boot_complete_now" = "1" ] && printf 'boot_complete_dense' || printf 'dense_graph')"
 
-        _v6_fast_secs="$FAST_STABLE_SECS"
-        _v6_slow_secs="$SLOW_STABLE_SECS"
-        if [ "$_boot_complete_now" = "1" ]; then
-          _v6_fast_secs="$FAMILY_FAST_SECS_POST_BOOT_EFFECTIVE"
-          _v6_slow_secs="$FAMILY_SLOW_SECS_POST_BOOT_EFFECTIVE"
+        _v6_deadline=0
+        if [ "$afwall_delay_start" = "true" ] && [ "$first_AFWall_process_seen" != "0" ]; then
+          _v6_deadline=$((first_AFWall_process_seen + afwall_custom_delay))
         fi
 
-        _v6_strong_corroboration=0
-        case "$_v6_corroborator" in
-          process|file_mtime|boot_complete_dense) _v6_strong_corroboration=1 ;;
-        esac
+        _v6_seen_elapsed=0
+        [ "$NOW" != "0" ] && [ "$v6_graph_seen_ts" != "0" ] && \
+          _v6_seen_elapsed=$((NOW - v6_graph_seen_ts))
 
-        if [ "$_v6_corroborator" != "none" ] && \
-           [ "$_v6_stable" -ge "$_v6_fast_secs" ]; then
-          v6_done=1; v6_path="fast"
-          _v6_seen_elapsed=0
-          [ "$NOW" != "0" ] && [ "$v6_graph_seen_ts" != "0" ] && \
-            _v6_seen_elapsed=$((NOW - v6_graph_seen_ts))
-          log "service: v6 fast-path confirmed stable=${_v6_stable}s seen_elapsed=${_v6_seen_elapsed}s corroboration=${_v6_corroborator} fp=$v6_last_fp"
-          log_transition_snapshot "v6" "pre_remove"
-
-        # ── Conservative path: longer stable window, no corroboration needed ──
-        elif [ "$_v6_stable" -ge "$_v6_slow_secs" ]; then
-          _v6_seen_elapsed=0
-          [ "$NOW" != "0" ] && [ "$v6_graph_seen_ts" != "0" ] && \
-            _v6_seen_elapsed=$((NOW - v6_graph_seen_ts))
-          if [ "$_v6_corroborator" = "none" ]; then
-            log "service: v6 conservative-path confirmed stable=${_v6_stable}s seen_elapsed=${_v6_seen_elapsed}s fp=$v6_last_fp (corroboration absent)"
+        if [ "$afwall_enable_ipv6" = "false" ]; then
+           log_on_transition "v6_disabled" "afwall_config" "service: AFWall IPv6 control is disabled; v6 block remains active"
+           # We intentionally leave v6_done=0 so block remains
+           debug_log "service: v6 handoff ignored due to AFWall config enableIPv6=false"
+        elif [ "$afwall_delay_start" = "true" ]; then
+          if [ "$NOW" -ge "$((_v6_deadline + SLOW_STABLE_SECS))" ] && [ "$_v6_stable" -ge "$SLOW_STABLE_SECS" ]; then
+            log "service: v6 deadline-path confirmed stable=${_v6_stable}s deadline=${_v6_deadline} now=${NOW} fp=$v6_last_fp corroboration=${_v6_corroborator}"
+            v6_done=1; v6_path="deadline"
+            log_transition_snapshot "v6" "pre_remove"
           else
-            log "service: v6 conservative-path confirmed stable=${_v6_stable}s seen_elapsed=${_v6_seen_elapsed}s corroboration=${_v6_corroborator} fp=$v6_last_fp"
+             debug_log "service: v6 waiting for deadline/stability (stable=${_v6_stable}s, since=${v6_fp_stable_since}, deadline=${_v6_deadline}, now=${NOW})"
           fi
-          v6_done=1; v6_path="conservative"
-          log_transition_snapshot "v6" "pre_remove"
-
         else
-          if [ "$_v6_corroborator" = "none" ]; then
-            debug_log "service: v6 graph stable=${_v6_stable}s (need fast=${_v6_fast_secs}s/slow=${_v6_slow_secs}s) corroboration=none — conservative path active"
+          if [ "$_v6_stable" -ge "$SLOW_STABLE_SECS" ]; then
+            log "service: v6 conservative-path confirmed stable=${_v6_stable}s seen_elapsed=${_v6_seen_elapsed}s corroboration=${_v6_corroborator} fp=$v6_last_fp"
+            v6_done=1; v6_path="conservative"
+            log_transition_snapshot "v6" "pre_remove"
           else
-            debug_log "service: v6 graph stable=${_v6_stable}s (need ${_v6_fast_secs}s) corroborator=${_v6_corroborator}"
+            debug_log "service: v6 waiting for stability (stable=${_v6_stable}s, need=${SLOW_STABLE_SECS}s)"
           fi
         fi
 
@@ -1059,13 +1067,14 @@ fi
       log_on_transition "v4_release" "start" "service: v4 release preconditions satisfied: afwall_takeover=1 path=${v4_path:-confirmed}"
       _log_pre_remove_integrity_v4 "handoff"
       log_transition_snapshot "v4" "pre_remove"
-      remove_output_block_v4
       if [ -f "${STATE_DIR}/ipv4_fwd_active" ] || forward_block_present_v4; then
         remove_forward_block_v4
       fi
       if [ -f "${STATE_DIR}/ipv4_in_active" ] || input_block_present_v4; then
         remove_input_block_v4
       fi
+      # Remove RAW layer last
+      remove_output_block_v4
       if output_block_present_v4 || forward_block_present_v4 || input_block_present_v4; then
         log_on_transition "v4_release" "fail" "service: ERROR: v4 release verification failed — module-owned layer still present; retrying"
       else
@@ -1080,13 +1089,14 @@ fi
       log_on_transition "v6_release" "start" "service: v6 release preconditions satisfied: afwall_takeover=1 path=${v6_path:-confirmed}"
       _log_pre_remove_integrity_v6 "handoff"
       log_transition_snapshot "v6" "pre_remove"
-      remove_output_block_v6
       if [ -f "${STATE_DIR}/ipv6_fwd_active" ] || forward_block_present_v6; then
         remove_forward_block_v6
       fi
       if [ -f "${STATE_DIR}/ipv6_in_active" ] || input_block_present_v6; then
         remove_input_block_v6
       fi
+      # Remove RAW layer last
+      remove_output_block_v6
       if output_block_present_v6 || forward_block_present_v6 || input_block_present_v6; then
         log_on_transition "v6_release" "fail" "service: ERROR: v6 release verification failed — module-owned layer still present; retrying"
       else

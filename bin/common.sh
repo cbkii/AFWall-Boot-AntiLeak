@@ -1373,7 +1373,7 @@ _rule_afwall_targets_reachable() {
 }
 
 rooted_afwall_graph_from_snapshot() {
-  local snap="$1" defs reachable out line chain rc
+  local snap="$1" defs reachable out line chain rc ord=0
   [ -n "$snap" ] || return 1
   afwall_graph_present_from_snapshot "$snap" || return 1
   defs="$(_snapshot_defined_chains "$snap")"
@@ -1384,8 +1384,9 @@ rooted_afwall_graph_from_snapshot() {
   while IFS= read -r line; do
     case "$line" in
       '-A OUTPUT '*)
+        ord=$((ord+1))
         if _rule_afwall_targets_reachable "$line" "$AFWALL_CHAIN_MAIN"; then
-          out="${out}${line}
+          out="${out}[$ord] ${line}
 "
         fi
         ;;
@@ -1403,6 +1404,8 @@ rooted_afwall_graph_from_snapshot() {
 "
           else
             rc=$?
+            # Require structural closure: if target is undefined (rc=1), fail the whole extraction
+            [ "$rc" = "1" ] && return 1
             [ "$rc" = "2" ] && out="${out}${line}
 "
           fi
@@ -1413,7 +1416,7 @@ rooted_afwall_graph_from_snapshot() {
 $snap
 EOF
   [ -n "$out" ] || return 1
-  printf '%s' "$out" | sort
+  printf '%s' "$out"
 }
 
 _checksum_lines() {
@@ -1447,7 +1450,7 @@ afwall_prefix_reachable_rooted_from_snapshot() {
 afwall_transport_fingerprint_rooted_from_snapshot() {
   local snap="$1" prefix="$2" graph
   graph="$(rooted_afwall_graph_from_snapshot "$snap")" || { printf 'na'; return 1; }
-  graph="$(printf '%s\n' "$graph" | grep -E "(^-N ${prefix}|^-A ${prefix}|-j ${prefix})" 2>/dev/null | sort)"
+  graph="$(printf '%s\n' "$graph" | grep -E "(^-N ${prefix}|^-A ${prefix}|-j ${prefix})" 2>/dev/null)"
   [ -n "$graph" ] || { printf 'na'; return 1; }
   _checksum_lines "$graph"
 }
@@ -1475,8 +1478,7 @@ afwall_graph_fingerprint_from_snapshot() {
   #   ^-A afwall  — rules inside any afwall-prefixed chain
   #   -j afwall   — any rule in any chain that jumps to an afwall chain
   relevant="$(printf '%s\n' "$snap" \
-    | grep -E '(^-N afwall|^-A afwall|-j afwall)' 2>/dev/null \
-    | sort)"
+    | grep -E '(^-N afwall|^-A afwall|-j afwall)' 2>/dev/null)"
   [ -n "$relevant" ] || { printf 'na'; return 1; }
   _checksum_lines "$relevant"
 }
@@ -1497,8 +1499,7 @@ afwall_transport_fingerprint_from_snapshot() {
   [ -n "$snap" ] || { printf 'na'; return 1; }
   [ -n "$prefix" ] || { printf 'na'; return 1; }
   relevant="$(printf '%s\n' "$snap" \
-    | grep -E "(^-N ${prefix}|^-A ${prefix}|-j ${prefix})" 2>/dev/null \
-    | sort)"
+    | grep -E "(^-N ${prefix}|^-A ${prefix}|-j ${prefix})" 2>/dev/null)"
   [ -n "$relevant" ] || { printf 'na'; return 1; }
   _checksum_lines "$relevant"
 }
