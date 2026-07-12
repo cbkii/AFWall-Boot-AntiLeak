@@ -68,9 +68,12 @@ The main poll loop waits for AFWall readiness per IP family.
 
 Important properties of the implementation:
 
-- snapshots are captured once per family per poll using `iptables -t filter -S` / `ip6tables -t filter -S`,
-- all readiness checks for that poll use the same snapshot,
-- the module fingerprints the rooted AFWall graph, not just the root chain count,
+- AFWall process visibility establishes a conservative startup epoch but never proves readiness,
+- AFWall private startup preferences are parsed before the generation gate can open,
+- delayed startup holds the blackout through `customDelay + AFWALL_DELAY_GRACE_SECS`,
+- each family capture performs two complete locked `iptables -t filter -S` / `ip6tables -t filter -S` reads and exposes a snapshot only when they are byte-identical,
+- all readiness checks for that poll use the accepted barrier snapshot,
+- the module fingerprints the rooted AFWall graph with exact rule order and OUTPUT-hook ordinal preserved,
 - stability is tracked with timestamps, not blocking settle sleeps.
 
 Details are in [AFWall readiness and handoff](#afwall-readiness-and-handoff).
@@ -94,24 +97,24 @@ Transport decisions are based on AFWall transport subtrees such as `afwall-wifi`
 
 ## AFWall readiness and handoff
 
-### Rooted graph checks are independent of unlock
+### Generation gate and unlock semantics
 
-AFWall process presence is insufficient. The module does not release because a package exists or because an AFWall process is visible; final handoff is based on the AFWall iptables graph rooted at the live `OUTPUT -> afwall` hook.
+AFWall process presence is insufficient. The first observed process timestamp is used only as a conservative epoch for AFWall's possible delayed second rule generation. The module also waits until AFWall's startup preferences can be read and parsed; on file-based-encryption devices that may require credential-encrypted storage to become available.
 
-Family release does **not** wait for:
+After those prerequisites are satisfied, family release still depends solely on the live AFWall iptables graph rooted at `OUTPUT -> afwall`. It does **not** depend on:
 
-- keyguard/unlock detection,
-- CE-storage access,
-- AFWall process visibility,
+- keyguard state as a direct readiness signal,
 - file mtime evidence,
+- AFWall rule density,
+- boot-complete corroboration,
 - Wi-Fi/mobile transport subtree readiness, or
 - VPN route readiness.
 
-Unlock and boot-complete signals are logged as diagnostics and may strengthen optional corroboration, but unknown unlock state is not treated as locked and does not block handoff.
+Unknown unlock state is not treated as a positive readiness signal. If preference storage is still inaccessible, the generation gate remains closed and the configured watchdog policy governs recovery.
 
-### Coherent per-poll snapshots
+### Coherent barrier snapshots
 
-Each poll captures one filter-table snapshot per family and derives all checks from that exact snapshot.
+Each family capture performs two complete filter-table reads under xtables locking. The service receives a snapshot only when both reads are byte-identical; differing reads mean AFWall is still mutating the table and that poll is rejected.
 
 The module intentionally uses `iptables -t filter -S`, not `iptables-save`, because downstream parsing expects `-N` / `-A` rule-spec lines rather than restore-file syntax.
 
@@ -133,34 +136,18 @@ Readiness is based on AFWall chains reachable from the current live `OUTPUT -> a
 
 Unreachable/orphan `afwall*` chains are excluded, so stale or orphan chain churn cannot reset family readiness timers. A separate full-graph view may appear in diagnostics, but it is not the release gate.
 
-### Confirmation paths
+### Confirmation path
 
-A family can hand off in two ways.
+Generation-aware handoff deliberately disables the old process/file/density accelerators. A family can hand off only when all of the following are true:
 
-#### Fast path
+1. The AFWall process epoch has been observed.
+2. AFWall startup preferences have been parsed.
+3. Any configured delayed-generation deadline plus grace has elapsed.
+4. The two-read barrier snapshot is byte-identical.
+5. The rooted graph is present, structurally closed, and non-trivial.
+6. Its order-sensitive fingerprint remains unchanged for `SLOW_STABLE_SECS`.
 
-All of the following must be true:
-
-1. AFWall main chain is present and non-trivial.
-2. The rooted graph fingerprint is stable for `FAST_STABLE_SECS`.
-3. There is corroboration, such as:
-   - AFWall process visible,
-   - current-boot file evidence,
-   - or `sys.boot_completed=1` plus sufficient AFWall rule density.
-
-Typical log line:
-
-```text
-service: v4 fast-path confirmed stable=2s corroboration=process fp=...
-```
-
-#### Conservative path
-
-All of the following must be true:
-
-1. AFWall main chain is present and non-trivial.
-2. The rooted graph fingerprint is stable for `SLOW_STABLE_SECS`.
-3. No corroboration is required.
+`FAST_STABLE_SECS` remains as a compatibility setting and is kept equal to `SLOW_STABLE_SECS`; the guard returns false for process, file-mtime, and density corroborators so they cannot select a shorter path.
 
 Typical log line:
 
@@ -230,7 +217,7 @@ The service has two absolute watchdogs that do not depend on readiness-gate or u
 
 `WATCHDOG_POLICY=unblock` sets the stop latch, removes all module-owned OUTPUT/FORWARD/INPUT blocks, restores lower-layer/radio/VPN state as configured, clears state coherently, removes `service.pid`, and exits the service loop.
 
-Unlock detection is a multi-signal heuristic using `cmd user is-user-unlocked`, `dumpsys user`, current-user CE readability, keyguard/window hints, and `dumpsys trust` when available. The final confidence is logged. Unknown unlock state means “unknown”, not “locked”, and family handoff continues on the graph-only path.
+Unlock detection is a multi-signal heuristic using `cmd user is-user-unlocked`, `dumpsys user`, current-user CE readability, keyguard/window hints, and `dumpsys trust` when available. The final confidence is logged. Unknown unlock state means “unknown”, not “locked”; it cannot substitute for preference availability or graph proof.
 
 ## Configuration reference
 
@@ -243,7 +230,7 @@ Runtime config is module-local only:
 
 Legacy `/data/adb/AFWall-Boot-AntiLeak/config.sh` and `/data/adb/AFWall-Boot-AntiLeak/installer.cfg` are never sourced. A successful install/reconfiguration and first-boot cleanup remove them; recreate needed settings in module-local `config.local.sh`.
 
-Beginner options are grouped in `config.sh`: safety mode, release timing/watchdogs, boot suppression, AFWall package, VPN handling, and advanced/debug. Old timeout/readiness variables are unsupported in v4.1.0 and are ignored if present in `config.local.sh`.
+Beginner options are grouped in `config.sh`: safety mode, release timing/watchdogs, boot suppression, AFWall package, VPN handling, and advanced/debug. Old timeout/readiness variables are unsupported in v4.4.4 and are ignored if present in `config.local.sh`.
 
 ### VPN always-on install/update detection
 
@@ -260,7 +247,7 @@ If VPN handling is enabled and providers are set to `auto`, runtime tries to dis
 
 FORWARD protection is active only when the module chain exists, the DROP rule exists, the parent `FORWARD` jump exists, and loopback exemption is present. Orphaned FORWARD chains are degraded and repaired while configured active. IPv6 raw OUTPUT is also required to have loopback exemption before being considered healthy.
 
-### User-facing v4.1.0 keys
+### User-facing v4.4.4 keys
 
 | Key | Default | Meaning |
 |---|---:|---|
@@ -273,8 +260,10 @@ FORWARD protection is active only when the module chain exists, the DROP rule ex
 | `WATCHDOG_BOOT_COMPLETED_SECS` | `240` | Absolute watchdog from first `sys.boot_completed=1`. |
 | `WATCHDOG_POLICY` | `block` | `block` keeps unresolved protection and logs diagnostics; `unblock` removes module suppression for recovery. |
 | `POLL_INTERVAL_SECS` | `2` | Main snapshot poll interval. |
-| `FAST_STABLE_SECS` | `2` | Fast-path rooted graph stability window when corroboration exists. |
-| `SLOW_STABLE_SECS` | `6` | Conservative rooted graph stability window without mandatory corroboration. |
+| `FAST_STABLE_SECS` | `6` | Compatibility threshold kept equal to the conservative window; no shorter corroborated release path is used. |
+| `SLOW_STABLE_SECS` | `6` | Final order-sensitive rooted-graph stability window after generation eligibility opens. |
+| `AFWALL_DELAY_GRACE_SECS` | `4` | Extra seconds after AFWall's configured delayed-start deadline before observation may begin. |
+| `AFWALL_PREFS_RETRY_SECS` | `2` | Retry interval while AFWall startup preferences are unavailable. |
 | `AFWALL_PACKAGE` | `auto` | AFWall package hint: `auto`, free, donate, or legacy package. |
 | `VPN_LOCKDOWN_MODE` | `off` | VPN lockdown handling: `off`, `preserve`, or `restore`. |
 | `VPN_PROVIDER_PACKAGES` | `auto` | Auto-discover providers or provide a space/comma-separated package list. |
@@ -287,7 +276,7 @@ FORWARD protection is active only when the module chain exists, the DROP rule ex
 | `RADIO_REASSERT_INTERVAL` | `15` | Seconds between lower-layer suppression reassertions. |
 | `BLACKOUT_REASSERT_INTERVAL` | `10` | Seconds between blackout integrity repair checks. |
 | `UNLOCK_POLL_INTERVAL` | `10` | Seconds between unlock-confidence diagnostic probes. |
-| `AFWALL_RULE_DENSITY_MIN` | `3` | Dense graph accelerator threshold; not a mandatory release gate. |
+| `AFWALL_RULE_DENSITY_MIN` | `3` | Compatibility/diagnostic threshold; generation-aware handoff does not use density to shorten release. |
 
 ### Diagnostics and behaviour flags
 
@@ -307,11 +296,11 @@ FORWARD protection is active only when the module chain exists, the DROP rule ex
 
 | Pattern | Meaning |
 |---|---|
-| `snapshot backend` | snapshot source selected for the current boot |
-| `graph first seen fp=` | AFWall graph detected for the first time |
-| `fast-path confirmed` | early release with corroboration |
-| `conservative-path confirmed` | release without corroboration after longer stability |
-| `graph drift` | AFWall rules still changing |
+| `final-generation observation window opened` | process, preferences, and any delayed-generation deadline have passed |
+| `barrier snapshots differed` | AFWall changed the filter table between the two locked reads |
+| `graph first seen fp=` | an eligible AFWall graph was detected for the first time |
+| `conservative-path confirmed` | final order-sensitive graph proof remained stable for the required window |
+| `graph drift` | AFWall rules are still changing |
 | `graph gone/trivial` | AFWall root graph disappeared or is too small to trust |
 | `transport accepted via absence-stable fallback` | no usable transport subtree, but stable fallback allowed restore |
 | `manual_override detected` | manual recovery latched and service loop stopped |
@@ -423,14 +412,14 @@ ip6tables -t filter -S | grep 'afwall.*afwall-3g'
 
 ### Release is slower than expected
 
-Look for repeated drift or lack of corroboration.
+Look for a generation gate that has not opened or for repeated graph drift.
 
 Typical checks:
 
-- repeated `graph drift` lines mean AFWall is still mutating rules,
-- missing `fast-path confirmed` with eventual `conservative-path confirmed` means the module had to wait for the longer path,
-- enabling `DEBUG=1` gives finer-grained progress information,
-- absence of `boot_marker` or other evidence signals can remove fast-path corroboration.
+- `startup prefs unavailable` means the module cannot yet read AFWall's startup-delay state,
+- `waiting for delayed AFWall generation` means `customDelay + AFWALL_DELAY_GRACE_SECS` has not elapsed,
+- `barrier snapshots differed` or repeated `graph drift` means AFWall is still mutating rules,
+- enabling `DEBUG=1` gives finer-grained progress information.
 
 ### Watchdog fires but device stays offline
 
@@ -449,13 +438,14 @@ Be explicit about the trade-off: connectivity can return even if AFWall is still
 
 ### Profiles
 
-The installer offers four entry points:
+The installer offers five entry points:
 
 | Profile | Meaning |
 |---|---|
 | `standard` | recommended default; full protection with balanced defaults |
 | `minimal` | firewall-only mode; lower-layer suppression off |
 | `strict` | maximum protection; more features enabled by default |
+| `recovery` | recovery-oriented watchdog behaviour with lower-layer suppression off |
 | `custom` | individual option selection |
 
 ### Input method priority
@@ -482,7 +472,7 @@ Changes are written under the module directory and take effect on the next reboo
 
 ```sh
 IC_PROFILE=standard
-# or minimal / strict / custom
+# or minimal / strict / recovery / custom
 WATCHDOG_POLICY=block
 ```
 
