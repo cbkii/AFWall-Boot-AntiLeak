@@ -11,27 +11,23 @@ echo "║   AFWall Boot AntiLeak - Manual Recovery  ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
 
-echo "[1/5] Latching manual override and stopping background service..."
+echo "[1/4] Latching manual override and stopping background service..."
 write_manual_override
 write_stop_requested
 recover_stop_service_loop
 echo "      Done."
 echo ""
 
-echo "[2/5] Running shared connectivity recovery pipeline..."
+echo "[2/4] Running shared connectivity recovery pipeline..."
 recover_connectivity "action" "0"
 echo "      Done."
 echo ""
 
-echo "[3/5] Restoring lower-layer service/interface state..."
+echo "[3/4] Restoring lower-layer service/interface state..."
 echo "      Done (handled by shared recovery pipeline)."
 echo ""
 
-echo "[4/5] Cleaning up legacy artifacts..."
-echo "      Done (handled by shared recovery pipeline)."
-echo ""
-
-echo "[5/5] Diagnostics"
+echo "[4/4] Diagnostics"
 echo "      State directory: $STATE_DIR"
 if [ -d "$STATE_DIR" ]; then
   ls -la "$STATE_DIR" 2>/dev/null || echo "      (empty or unreadable)"

@@ -242,8 +242,6 @@ Runtime config is module-local only:
 /data/adb/modules/AFWall-Boot-AntiLeak/config.local.sh
 ```
 
-Legacy `/data/adb/AFWall-Boot-AntiLeak/config.sh` and `/data/adb/AFWall-Boot-AntiLeak/installer.cfg` are never sourced. A successful install/reconfiguration and first-boot cleanup remove them; recreate needed settings in module-local `config.local.sh`.
-
 Beginner options are grouped in `config.sh`: safety mode, release timing/watchdogs, boot suppression, AFWall package, VPN handling, and advanced/debug. Old timeout/readiness variables are unsupported in v4.4.4 and are ignored if present in `config.local.sh`.
 
 ### VPN always-on install/update detection
@@ -471,7 +469,7 @@ The installer tries, in order:
 2. bundled `keycheck`,
 3. non-interactive fallback.
 
-Non-interactive fallback uses installer defaults and module-local config only. Legacy external runtime config is ignored by service/post-fs-data and does not affect boot behaviour.
+Non-interactive fallback uses installer defaults and writes module-local configuration only.
 
 ### Reconfiguration after install
 

@@ -141,13 +141,6 @@ Runtime load order:
 1. `$MODDIR/config.sh`
 2. `$MODDIR/config.local.sh` if present
 
-Ignored legacy paths:
-
-```text
-/data/adb/AFWall-Boot-AntiLeak/config.sh
-/data/adb/AFWall-Boot-AntiLeak/installer.cfg
-```
-
 When changing defaults, update every source together:
 
 - `config.sh`

@@ -109,11 +109,6 @@ fi
   }
   _refresh_afwall_pkg "service_start" || true
 
-  # ── A) Legacy cleanup (scripts only) ────────────────────────────────────────
-  # Only remove legacy afwallstart scripts; never touch current active
-  # MOD_PRE_AFW* chains which were installed by post-fs-data this boot.
-  cleanup_legacy_scripts_only "service"
-
   # ── Stage B: Late lower-layer suppression ──────────────────────────────────
   # Re-assert and verify Wi-Fi/data off-state now that framework is available.
   # This re-asserts any early-phase quiesce and adds service-level suppression.
@@ -887,7 +882,7 @@ fi
         eval "${_last_var}=\$NOW"
         log "service: WATCHDOG ${_watchdog_reason} elapsed=${_watchdog_elapsed}s policy=block — retaining unresolved module blocks"
         log "service: watchdog state: released v4=${v4_released}/done=${v4_done}/fp=${v4_last_fp:-na} v6=${v6_released}/done=${v6_done}/fp=${v6_last_fp:-na} readiness_gate=${readiness_gate_open} unlocked=${device_unlocked} unlock_confidence=${UNLOCK_CONFIDENCE:-unknown}"
-        log "service: watchdog config: sourced=${CONFIG_SOURCED_FILES:-unknown} ignored=${CONFIG_IGNORED_FILES:-none} policy=${WATCHDOG_POLICY} service=${WATCHDOG_SERVICE_SECS}s boot=${WATCHDOG_BOOT_COMPLETED_SECS}s"
+        log "service: watchdog config: sourced=${CONFIG_SOURCED_FILES:-unknown} policy=${WATCHDOG_POLICY} service=${WATCHDOG_SERVICE_SECS}s boot=${WATCHDOG_BOOT_COMPLETED_SECS}s"
         log_blackout_integrity "v4" "watchdog_${_watchdog_reason}"
         log_blackout_integrity "v6" "watchdog_${_watchdog_reason}"
         log_transition_snapshot "v4" "watchdog_${_watchdog_reason}"
@@ -1206,7 +1201,6 @@ fi
           remove_block
         fi
         lowlevel_vpn_lockdown_release_if_needed
-        cleanup_legacy "service-finalize"
         _finalize_cleanup_done=1
       fi
 
