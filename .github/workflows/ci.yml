@@ -28,7 +28,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends shellcheck zip unzip
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends busybox shellcheck zip unzip
 
       # ── Lint: module runtime scripts ────────────────────────────────────────
       # Checks the module's own shell scripts (not third-party MMT-Extended
@@ -38,6 +38,7 @@ jobs:
         run: |
           shellcheck --severity=warning \
             bin/common.sh \
+            bin/generation_guard.sh \
             bin/installer_config.sh \
             bin/lowlevel.sh \
             action.sh \
@@ -45,8 +46,22 @@ jobs:
             reconfigure.sh \
             service.sh \
             uninstall.sh \
+            tests/test-generation-guard.sh \
+            tests/test-reconciliation.sh \
+            tools/mock-logic-tests.sh \
+            tools/timeline-sim-tests.sh \
             tools/build-release.sh \
             tools/validate-zip.sh
+
+      - name: Test generation-aware AFWall handoff
+        run: |
+          chmod +x tests/test-generation-guard.sh tests/test-reconciliation.sh tools/mock-logic-tests.sh tools/timeline-sim-tests.sh
+          busybox ash tests/test-generation-guard.sh
+          dash tests/test-generation-guard.sh
+          busybox ash tests/test-reconciliation.sh
+          dash tests/test-reconciliation.sh
+          sh tools/mock-logic-tests.sh
+          sh tools/timeline-sim-tests.sh
 
       # ── Build: produce the installable ZIP ──────────────────────────────────
       - name: Build module ZIP
@@ -56,7 +71,7 @@ jobs:
           VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           tools/build-release.sh dist/ "${MODULE_ID}-${VERSION}.zip" "${MODULE_ID}.zip"
 
-      # ── Validate: check ZIP internal structure ───────────────────────────────
+      # ── Validate: check ZIP internal structure ──────────────────────────────
       - name: Validate ZIP structure
         run: |
           chmod +x tools/validate-zip.sh
@@ -65,7 +80,7 @@ jobs:
           tools/validate-zip.sh "dist/${MODULE_ID}-${VERSION}.zip"
           tools/validate-zip.sh "dist/${MODULE_ID}.zip"
 
-      # ── Upload: make artifacts available for PR review ───────────────────────
+      # ── Upload: make artifacts available for PR review ──────────────────────
       - name: Upload module ZIP artifact
         uses: actions/upload-artifact@v4
         with:

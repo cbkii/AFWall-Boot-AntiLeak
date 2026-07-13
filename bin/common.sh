@@ -883,12 +883,14 @@ remove_input_block_v6() {
 
 remove_block() {
   log "remove_block: start"
-  remove_output_block_v4
-  remove_output_block_v6
+  # Keep the independent raw OUTPUT safety layer until all filter-table
+  # direction blocks have been removed.
   remove_forward_block_v4
   remove_forward_block_v6
   remove_input_block_v4
   remove_input_block_v6
+  remove_output_block_v4
+  remove_output_block_v6
   rm -f "${STATE_DIR}/block_installed" 2>/dev/null || true
   log "remove_block: done"
 }
@@ -1373,7 +1375,7 @@ _rule_afwall_targets_reachable() {
 }
 
 rooted_afwall_graph_from_snapshot() {
-  local snap="$1" defs reachable out line chain rc
+  local snap="$1" defs reachable out line chain rc ord=0
   [ -n "$snap" ] || return 1
   afwall_graph_present_from_snapshot "$snap" || return 1
   defs="$(_snapshot_defined_chains "$snap")"
@@ -1384,8 +1386,9 @@ rooted_afwall_graph_from_snapshot() {
   while IFS= read -r line; do
     case "$line" in
       '-A OUTPUT '*)
+        ord=$((ord + 1))
         if _rule_afwall_targets_reachable "$line" "$AFWALL_CHAIN_MAIN"; then
-          out="${out}${line}
+          out="${out}OUTPUT[${ord}] ${line}
 "
         fi
         ;;
@@ -1403,6 +1406,9 @@ rooted_afwall_graph_from_snapshot() {
 "
           else
             rc=$?
+            # A reachable rule that targets an undefined afwall* chain is an
+            # incomplete generation, not a graph that may be fingerprinted.
+            [ "$rc" = "1" ] && return 1
             [ "$rc" = "2" ] && out="${out}${line}
 "
           fi
@@ -1413,7 +1419,7 @@ rooted_afwall_graph_from_snapshot() {
 $snap
 EOF
   [ -n "$out" ] || return 1
-  printf '%s' "$out" | sort
+  printf '%s' "$out"
 }
 
 _checksum_lines() {
@@ -1447,7 +1453,7 @@ afwall_prefix_reachable_rooted_from_snapshot() {
 afwall_transport_fingerprint_rooted_from_snapshot() {
   local snap="$1" prefix="$2" graph
   graph="$(rooted_afwall_graph_from_snapshot "$snap")" || { printf 'na'; return 1; }
-  graph="$(printf '%s\n' "$graph" | grep -E "(^-N ${prefix}|^-A ${prefix}|-j ${prefix})" 2>/dev/null | sort)"
+  graph="$(printf '%s\n' "$graph" | grep -E "(^-N ${prefix}|^-A ${prefix}|-j ${prefix})" 2>/dev/null)"
   [ -n "$graph" ] || { printf 'na'; return 1; }
   _checksum_lines "$graph"
 }
@@ -1459,8 +1465,8 @@ afwall_transport_fingerprint_rooted_from_snapshot() {
 # etc.).  Descendant chain churn (afwall-wifi-*, afwall-3g-*, etc.) is fully
 # captured.
 #
-# Because the extraction set is sorted before checksumming, the fingerprint is
-# stable regardless of the order rules appear in the snapshot.
+# Rule order is preserved before checksumming because iptables first-match
+# semantics make ordering part of the effective firewall policy.
 #
 # Uses cksum (available in Android's toybox) as the hash primitive.  Falls back
 # to a "line-count:byte-count" pair when cksum is unavailable — weaker but still
@@ -1475,8 +1481,7 @@ afwall_graph_fingerprint_from_snapshot() {
   #   ^-A afwall  — rules inside any afwall-prefixed chain
   #   -j afwall   — any rule in any chain that jumps to an afwall chain
   relevant="$(printf '%s\n' "$snap" \
-    | grep -E '(^-N afwall|^-A afwall|-j afwall)' 2>/dev/null \
-    | sort)"
+    | grep -E '(^-N afwall|^-A afwall|-j afwall)' 2>/dev/null)"
   [ -n "$relevant" ] || { printf 'na'; return 1; }
   _checksum_lines "$relevant"
 }
@@ -1497,8 +1502,7 @@ afwall_transport_fingerprint_from_snapshot() {
   [ -n "$snap" ] || { printf 'na'; return 1; }
   [ -n "$prefix" ] || { printf 'na'; return 1; }
   relevant="$(printf '%s\n' "$snap" \
-    | grep -E "(^-N ${prefix}|^-A ${prefix}|-j ${prefix})" 2>/dev/null \
-    | sort)"
+    | grep -E "(^-N ${prefix}|^-A ${prefix}|-j ${prefix})" 2>/dev/null)"
   [ -n "$relevant" ] || { printf 'na'; return 1; }
   _checksum_lines "$relevant"
 }

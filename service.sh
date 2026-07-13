@@ -5,9 +5,10 @@
 #   Stage A: Hard block installed in post-fs-data. Framework radio-off deferred.
 #   Stage B: Late lower-layer suppression (Wi-Fi/data off, verified). Reasserted
 #            periodically while waiting.
-#   Stage C: Wait for per-family AFWall takeover (fast / conservative / boot-complete
-#            path). Rooted AFWall graph fingerprints derived from coherent per-poll
-#            snapshots. Non-blocking stability tracking (no blocking sleep).
+#   Stage C: Wait for per-family AFWall takeover after the generation-aware gate.
+#            Rooted AFWall graph fingerprints are derived from coherent per-poll
+#            snapshots. Stability tracking is non-blocking; IPv6 remains held when
+#            AFWall is confirmed not to control it.
 #   Stage D: Remove per-family OUTPUT blackout as soon as AFWall graph takeover is
 #            confirmed for that family — independent of transport readiness.
 #            Transport readiness (afwall-wifi / afwall-3g subtrees) controls only
@@ -295,6 +296,47 @@ fi
   #   first observed to be non-trivially present.
   v4_last_fp=""; v4_fp_stable_since=0; v4_graph_seen_ts=0; v4_path=""
   v6_last_fp=""; v6_fp_stable_since=0; v6_graph_seen_ts=0; v6_path=""
+  v6_held=0; v6_ownership_checked=0
+
+  # Repair only on an observed AFWall fingerprint transition.  This adds no
+  # steady-state polling and closes the brief gap if another ruleset operation
+  # disturbed a module-owned layer during AFWall churn.
+  _repair_family_on_graph_drift() {
+    local family="$1" repaired=0
+    case "$family" in
+      v4)
+        if [ "$v4_blocked" = "1" ] && [ "$v4_released" = "0" ] && ! output_block_intact_v4; then
+          log_on_transition "v4_repair" "out_drift" "service: INTEGRITY REPAIR v4: OUTPUT block degraded during graph drift — repairing immediately"
+          repair_output_block_v4 || log_on_transition "v4_repair" "out_failed" "service: v4 immediate OUTPUT repair FAILED"
+          repaired=1
+        fi
+        if [ "$v4_fwd_blocked" = "1" ] && ! forward_block_intact_v4; then
+          repair_forward_block_v4 || log_on_transition "v4_repair" "fwd_drift_failed" "service: v4 immediate FORWARD repair FAILED"
+          repaired=1
+        fi
+        if [ -f "${STATE_DIR}/ipv4_in_active" ] && ! input_block_intact_v4; then
+          repair_input_block_v4 || log_on_transition "v4_repair" "in_drift_failed" "service: v4 immediate INPUT repair FAILED"
+          repaired=1
+        fi
+        ;;
+      v6)
+        if [ "$v6_blocked" = "1" ] && [ "$v6_released" = "0" ] && ! output_block_intact_v6; then
+          log_on_transition "v6_repair" "out_drift" "service: INTEGRITY REPAIR v6: OUTPUT block degraded during graph drift — repairing immediately"
+          repair_output_block_v6 || log_on_transition "v6_repair" "out_failed" "service: v6 immediate OUTPUT repair FAILED"
+          repaired=1
+        fi
+        if [ "$v6_fwd_blocked" = "1" ] && ! forward_block_intact_v6; then
+          repair_forward_block_v6 || log_on_transition "v6_repair" "fwd_drift_failed" "service: v6 immediate FORWARD repair FAILED"
+          repaired=1
+        fi
+        if [ -f "${STATE_DIR}/ipv6_in_active" ] && ! input_block_intact_v6; then
+          repair_input_block_v6 || log_on_transition "v6_repair" "in_drift_failed" "service: v6 immediate INPUT repair FAILED"
+          repaired=1
+        fi
+        ;;
+    esac
+    [ "$repaired" = "0" ] || mark_blackout_active
+  }
 
   # ── Transport readiness tracking ────────────────────────────────────────────
   # wifi_done/mobile_done: 1 when the corresponding transport's AFWall readiness
@@ -715,6 +757,33 @@ fi
     v4_snap="$(capture_filter_snapshot_v4 2>/dev/null)" || v4_snap=""
     v6_snap="$(capture_filter_snapshot_v6 2>/dev/null)" || v6_snap=""
 
+    # Resolve AFWall IPv6 ownership once through the existing generation guard.
+    # Unknown/unreadable preferences stay fail-closed; no second preference
+    # poller or process timer is introduced in service.sh.
+    if [ "$v6_blocked" = "1" ] && [ "$v6_done" = "0" ] && \
+       [ "$v6_ownership_checked" = "0" ] && \
+       command -v afwall_ipv6_control_state >/dev/null 2>&1; then
+      afwall_ipv6_control_state >/dev/null 2>&1
+      _v6_control_rc=$?
+      case "${ABA_GEN_IPV6_STATE:-unknown}:$_v6_control_rc" in
+        controlled:0)
+          v6_ownership_checked=1
+          debug_log "service: AFWall IPv6 ownership confirmed; normal v6 handoff enabled"
+          ;;
+        held:2)
+          v6_ownership_checked=1
+          v6_held=1
+          v6_done=1
+          v6_path="held"
+          printf '1' > "${STATE_DIR}/ipv6_held" 2>/dev/null || true
+          log "service: AFWall is configured not to control IPv6; retaining module IPv6 block as terminal fail-closed state"
+          ;;
+        *)
+          debug_log "service: AFWall IPv6 ownership unavailable; retaining v6 blackout"
+          ;;
+      esac
+    fi
+
     # ── Radio reassertion ───────────────────────────────────────────────────
     # Periodically re-assert Wi-Fi and mobile data off while blackout is active.
     # Self-heal: if START_TS was 0 (date failure at startup), initialise from NOW.
@@ -857,6 +926,7 @@ fi
           log_on_transition "v4_graph" "drift" "service: v4 graph drift old=$v4_last_fp new=$_new_v4_fp reset"
           v4_last_fp="$_new_v4_fp"
           v4_fp_stable_since="$NOW"
+          _repair_family_on_graph_drift v4
         fi
 
         # Compute how long the fingerprint has been continuously stable.
@@ -949,6 +1019,7 @@ fi
           log_on_transition "v6_graph" "drift" "service: v6 graph drift old=$v6_last_fp new=$_new_v6_fp reset"
           v6_last_fp="$_new_v6_fp"
           v6_fp_stable_since="$NOW"
+          _repair_family_on_graph_drift v6
         fi
 
         _v6_stable=0
@@ -1059,13 +1130,14 @@ fi
       log_on_transition "v4_release" "start" "service: v4 release preconditions satisfied: afwall_takeover=1 path=${v4_path:-confirmed}"
       _log_pre_remove_integrity_v4 "handoff"
       log_transition_snapshot "v4" "pre_remove"
-      remove_output_block_v4
       if [ -f "${STATE_DIR}/ipv4_fwd_active" ] || forward_block_present_v4; then
         remove_forward_block_v4
       fi
       if [ -f "${STATE_DIR}/ipv4_in_active" ] || input_block_present_v4; then
         remove_input_block_v4
       fi
+      # Remove the independent raw OUTPUT layer last.
+      remove_output_block_v4
       if output_block_present_v4 || forward_block_present_v4 || input_block_present_v4; then
         log_on_transition "v4_release" "fail" "service: ERROR: v4 release verification failed — module-owned layer still present; retrying"
       else
@@ -1076,17 +1148,18 @@ fi
       fi
     fi
 
-    if [ "$v6_done" = "1" ] && [ "$v6_released" = "0" ]; then
+    if [ "$v6_done" = "1" ] && [ "$v6_released" = "0" ] && [ "$v6_held" = "0" ]; then
       log_on_transition "v6_release" "start" "service: v6 release preconditions satisfied: afwall_takeover=1 path=${v6_path:-confirmed}"
       _log_pre_remove_integrity_v6 "handoff"
       log_transition_snapshot "v6" "pre_remove"
-      remove_output_block_v6
       if [ -f "${STATE_DIR}/ipv6_fwd_active" ] || forward_block_present_v6; then
         remove_forward_block_v6
       fi
       if [ -f "${STATE_DIR}/ipv6_in_active" ] || input_block_present_v6; then
         remove_input_block_v6
       fi
+      # Remove the independent raw OUTPUT layer last.
+      remove_output_block_v6
       if output_block_present_v6 || forward_block_present_v6 || input_block_present_v6; then
         log_on_transition "v6_release" "fail" "service: ERROR: v6 release verification failed — module-owned layer still present; retrying"
       else
@@ -1103,7 +1176,7 @@ fi
     # lower-layer state (radios) is properly restored.
     _v4_complete=1; _v6_complete=1
     [ "$v4_blocked" = "1" ] && [ "$v4_released" = "0" ] && _v4_complete=0
-    [ "$v6_blocked" = "1" ] && [ "$v6_released" = "0" ] && _v6_complete=0
+    [ "$v6_blocked" = "1" ] && [ "$v6_released" = "0" ] && [ "$v6_held" = "0" ] && _v6_complete=0
 
     if [ "$_v4_complete" = "1" ] && [ "$_v6_complete" = "1" ]; then
       if [ "$wifi_done" = "0" ] || [ "$mobile_done" = "0" ]; then
@@ -1116,9 +1189,22 @@ fi
       # verified lowlevel restore helpers (with retry loop) so we do not clear
       # markers on command-ack alone.
       if [ "$_finalize_cleanup_done" = "0" ]; then
-        clear_blackout_active
-        rm -f "${STATE_DIR}/block_installed" "${STATE_DIR}/radio_off_pending" 2>/dev/null || true
-        remove_block
+        if [ "$v6_held" = "1" ]; then
+          # v4 has already handed off; preserve every v6 ownership marker and
+          # module chain while allowing lower-layer radios to be restored.
+          rm -f "${STATE_DIR}/radio_off_pending" 2>/dev/null || true
+          printf '1' > "${STATE_DIR}/block_installed" 2>/dev/null || true
+          printf '1' > "${STATE_DIR}/blackout_active" 2>/dev/null || true
+          printf '1' > "${STATE_DIR}/ipv6_held" 2>/dev/null || true
+          remove_forward_block_v4
+          remove_input_block_v4
+          remove_output_block_v4
+          log "service: finalization preserving module-owned IPv6 block; AFWall IPv6 ownership is disabled"
+        else
+          clear_blackout_active
+          rm -f "${STATE_DIR}/block_installed" "${STATE_DIR}/radio_off_pending" 2>/dev/null || true
+          remove_block
+        fi
         lowlevel_vpn_lockdown_release_if_needed
         cleanup_legacy "service-finalize"
         _finalize_cleanup_done=1
@@ -1150,9 +1236,14 @@ fi
         printf 'completed_mono=%s\n' "$(monotonic_seconds)"
         printf 'v4_path=%s\n' "${v4_path:-skipped}"
         printf 'v6_path=%s\n' "${v6_path:-skipped}"
+        printf 'v6_held=%s\n' "$v6_held"
       } > "${STATE_DIR}/service_complete" 2>/dev/null || true
       remove_service_pid
-      log "service: handoff complete — AFWall is now sole active protection"
+      if [ "$v6_held" = "1" ]; then
+        log "service: handoff complete — AFWall owns released families; module IPv6 fail-closed hold remains active"
+      else
+        log "service: handoff complete — AFWall is now sole active protection"
+      fi
       exit 0
     fi
 

@@ -20,7 +20,7 @@ This fork is a much stricter and more observable handoff system.
 |---|---|---|
 | Main proof of AFWall readiness | AFWall process exists | Live rooted `OUTPUT -> afwall` iptables graph is present, non-trivial, and stable |
 | Primary protection | Disable Wi-Fi/mobile data with `svc` | Kernel firewall blackout using module-owned iptables chains |
-| IPv4/IPv6 handling | Not family-aware | IPv4 and IPv6 are handled independently |
+| IPv4/IPv6 handling | Not family-aware | IPv4 and IPv6 are handled independently; IPv6 stays module-blocked when AFWall is not configured to control it |
 | OUTPUT protection | No dedicated temporary OUTPUT chain model | Temporary OUTPUT blackout, with raw preferred and filter fallback/shadow coverage |
 | Tethering/forwarded traffic | Not covered | Optional temporary FORWARD blackout |
 | Inbound traffic | Not covered | Optional temporary INPUT blackout |
@@ -86,13 +86,17 @@ A normal boot follows this model:
 2. The module records state showing which blackout layers were installed.
 3. `service.sh` starts later and verifies that the blackout is still intact.
 4. If the expected blackout is damaged or missing, the module attempts to repair it.
-5. The service loop snapshots AFWall's live filter-table graph.
-6. AFWall is accepted only when the rooted `OUTPUT -> afwall` graph is present, non-trivial, and stable.
-7. IPv4 and IPv6 are released independently when each family is ready.
-8. Optional transport/radio/VPN restoration is handled after, and does not block family firewall release.
-9. Once handoff is complete, AFWall+ is the only active firewall layer.
+5. The service loop records the first observed AFWall process time and reads AFWall's startup-delay preferences.
+6. If delayed startup is enabled, the blackout remains in place through the configured delay plus `AFWALL_DELAY_GRACE_SECS`.
+7. Each family snapshot is exposed only after two byte-identical filter-table reads, then the rooted `OUTPUT -> afwall` graph must be structurally closed, non-trivial, order-stable, and unchanged for `SLOW_STABLE_SECS`.
+8. IPv4 and IPv6 are handled independently. A family is released only when AFWall proves ownership of it.
+9. If AFWall preferences show that IPv6 is disabled or not controlled, IPv6 enters a terminal held state: the service stops polling that family but preserves the module-owned IPv6 blackout.
+10. Optional transport/radio/VPN restoration is handled after, and does not block family firewall release.
+11. During a normal full handoff AFWall+ becomes the sole active firewall layer. In a held-IPv6 handoff, AFWall owns IPv4 while the module deliberately retains IPv6 protection.
 
-Unlock state, AFWall process presence, VPN routes, and AFWall file timestamps may be logged as diagnostics or used as corroboration, but they are not enough by themselves to release the blackout.
+AFWall process visibility establishes a conservative generation epoch; it is not readiness proof. Unlock state, file timestamps, rule density, boot completion, VPN routes, and similar signals remain diagnostics only and cannot shorten the final graph-stability window.
+
+When a fingerprint actually changes, the service immediately verifies and repairs the module-owned blackout for that family. This is event-driven on graph drift, so it adds no extra steady-state polling. During release, optional filter-table FORWARD/INPUT layers are removed before the independent raw OUTPUT layer; raw OUTPUT is removed last.
 
 ## Configuration files
 
@@ -123,8 +127,10 @@ If those files exist after upgrading, remove them or perform a clean uninstall/r
 | `LEAK_PROTECTION_MODE` | `balanced` | Main safety profile: `balanced`, `strict`, or `recovery_friendly`. |
 | `INTEGRATION_MODE` | `auto` | How to coexist with AFWall's own startup script handling. |
 | `POLL_INTERVAL_SECS` | `2` | Seconds between AFWall graph checks during handoff. |
-| `FAST_STABLE_SECS` | `2` | Stability window when strong corroboration exists. |
-| `SLOW_STABLE_SECS` | `6` | Conservative graph-only stability window. |
+| `FAST_STABLE_SECS` | `6` | Compatibility threshold kept equal to the conservative window; generation-aware handoff does not use a shorter corroborated path. |
+| `SLOW_STABLE_SECS` | `6` | Final order-sensitive rooted-graph stability window after generation eligibility opens. |
+| `AFWALL_DELAY_GRACE_SECS` | `4` | Extra guard time after AFWall's configured delayed-start deadline. |
+| `AFWALL_PREFS_RETRY_SECS` | `2` | Retry interval while AFWall startup preferences are unavailable. |
 | `WATCHDOG_SERVICE_SECS` | `300` | Absolute watchdog from service start. |
 | `WATCHDOG_BOOT_COMPLETED_SECS` | `240` | Absolute watchdog after Android reports boot complete. |
 | `WATCHDOG_POLICY` | `block` | `block` keeps unresolved protection; `unblock` removes module suppression for recovery. |
@@ -221,6 +227,8 @@ AFWall is starting too slowly or applying rules late. Prefer fixing AFWall start
 ### IPv6 tests fail
 
 That does not automatically mean a leak or module failure. It may mean your network, VPN, AFWall policy, or test target does not support IPv6/ICMPv6. Check the module log and AFWall IPv6 settings.
+
+If AFWall reports IPv6 disabled or not controlled, the module intentionally keeps its IPv6 blackout and records `state/ipv6_held`. This is a terminal safe state, not a polling failure. Use the Magisk Action button only when you deliberately want to remove that held protection.
 
 ### There are three config files
 

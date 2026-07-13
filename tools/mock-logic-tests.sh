@@ -176,7 +176,7 @@ afwall_prefix_reachable_from_snapshot "$multi_jump_snap" afwall-wifi || fail "la
 rooted_afwall_graph_from_snapshot "$multi_jump_snap" | grep -q 'synthetic' || fail "rooted graph omitted rule with later reachable jump target"
 multi_orphan_snap="$multi_jump_snap
 -A afwall -m comment --comment orphan -j RETURN -j afwall-missing"
-if rooted_afwall_graph_from_snapshot "$multi_orphan_snap" | grep -q 'comment orphan'; then fail "rooted graph included rule with undefined later jump target"; fi
+if rooted_afwall_graph_from_snapshot "$multi_orphan_snap"; then fail "rooted graph accepted rule with undefined later jump target"; fi
 pass "rooted graph and transport reachability"
 
 # Config single-source and PID lifecycle invariants.
@@ -203,7 +203,7 @@ SERVICE_LOCK_FILE="$_orig_service_lock_file"
 pass "config and PID invariants"
 
 # Active release config surface checks.
-allowed='LEAK_PROTECTION_MODE INTEGRATION_MODE POLL_INTERVAL_SECS FAST_STABLE_SECS SLOW_STABLE_SECS WATCHDOG_SERVICE_SECS WATCHDOG_BOOT_COMPLETED_SECS WATCHDOG_POLICY BLOCK_FORWARD BLOCK_INPUT RADIO_SUPPRESSION AFWALL_PACKAGE VPN_LOCKDOWN_MODE VPN_PROVIDER_PACKAGES DEBUG TRANSPORT_ABSENCE_STABLE_SECS TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT TRANSPORT_ORPHAN_STABLE_SECS TRANSPORT_INCONCLUSIVE_SECS TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT BLACKOUT_REASSERT_INTERVAL RADIO_REASSERT_INTERVAL UNLOCK_POLL_INTERVAL AFWALL_RULE_DENSITY_MIN'
+allowed='LEAK_PROTECTION_MODE INTEGRATION_MODE POLL_INTERVAL_SECS FAST_STABLE_SECS SLOW_STABLE_SECS AFWALL_DELAY_GRACE_SECS AFWALL_PREFS_RETRY_SECS WATCHDOG_SERVICE_SECS WATCHDOG_BOOT_COMPLETED_SECS WATCHDOG_POLICY BLOCK_FORWARD BLOCK_INPUT RADIO_SUPPRESSION AFWALL_PACKAGE VPN_LOCKDOWN_MODE VPN_PROVIDER_PACKAGES DEBUG TRANSPORT_ABSENCE_STABLE_SECS TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT TRANSPORT_ORPHAN_STABLE_SECS TRANSPORT_INCONCLUSIVE_SECS TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT BLACKOUT_REASSERT_INTERVAL RADIO_REASSERT_INTERVAL UNLOCK_POLL_INTERVAL AFWALL_RULE_DENSITY_MIN'
 vars=$(sed -n 's/^\([A-Z0-9_][A-Z0-9_]*\)=.*/\1/p' "$ROOT/config.sh")
 for v in $vars; do
   case " $allowed " in *" $v "*) ;; *) fail "unexpected user-facing config variable: $v" ;; esac

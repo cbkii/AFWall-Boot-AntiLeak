@@ -49,6 +49,7 @@ check_file "customize.sh"
 check_file "common/functions.sh"
 check_file "common/install.sh"
 check_file "bin/common.sh"
+check_file "bin/generation_guard.sh"
 check_file "bin/installer_config.sh"
 check_file "action.sh"
 check_file "config.sh"
@@ -110,7 +111,7 @@ fi
 echo "Checking for development artefacts..."
 JUNK_FOUND=0
 ZIP_CONTENTS="$(unzip -Z -1 "$ZIP" 2>/dev/null)"
-for junk in ".git/" ".github/" "tools/" "scripts/" "dist/"; do
+for junk in ".git/" ".github/" "tools/" "scripts/" "tests/" "dist/"; do
   if printf '%s\n' "$ZIP_CONTENTS" | grep -qF "$junk"; then
     echo "  [WARN] ZIP contains development artefact path: $junk"
     JUNK_FOUND=$((JUNK_FOUND + 1))

@@ -85,6 +85,7 @@ META-INF/com/google/android/updater-script
 common/functions.sh
 common/install.sh
 bin/common.sh
+bin/generation_guard.sh
 bin/installer_config.sh
 action.sh
 config.sh
