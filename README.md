@@ -1,21 +1,10 @@
-# AFWall Boot AntiLeak v5.0.0
+# AFWall Boot AntiLeak
 
 AFWall Boot AntiLeak is a Magisk module for rooted Android devices that use AFWall+.
 
 It blocks network traffic during boot. It removes the temporary block only after AFWall+ has applied a complete and stable firewall ruleset.
 
-> **Important:** This module is fail-closed. If AFWall+ does not become ready, the device may stay offline. Make sure you know how to use the Magisk **Action** button or disable a module before you install it.
-
-## Who this module is for
-
-Use this module if:
-
-- your device is rooted with Magisk;
-- you already use AFWall+;
-- you want to prevent network traffic before AFWall+ finishes starting;
-- you can recover from a Magisk module that keeps the device offline.
-
-Do not install it if you do not have access to Magisk, root shell, ADB, or another recovery method.
+> **Important:** This module is fail-closed by default. If AFWall+ does not become ready, the device may stay offline. Uses the **Action** button to remove all blockers (failsafe to restore xonnectivity).
 
 ## Compatibility
 
@@ -23,13 +12,13 @@ The main v5 target is:
 
 - Android 16;
 - Magisk 30.6 or newer;
-- modern 64-bit Android devices, especially Pixel devices.
+- modern 64-bit Android devices (tested on Pixel devices)
 
 The installer also allows Android 10 or newer with Magisk 27 or newer. These older combinations are not the main test target.
 
 AFWall+ Free and Donate packages are supported.
 
-## What v5 does
+## What it does
 
 During boot, the module:
 
@@ -68,7 +57,7 @@ Also remove other boot anti-leak scripts from these directories if you installed
 
 Do not remove scripts unless you know they belong to another anti-leak setup.
 
-## Install v5.0.0
+## Installation 
 
 1. Download `AFWall-Boot-AntiLeak.zip` from the latest release.
 2. Install the ZIP in Magisk.
@@ -80,13 +69,14 @@ Do not remove scripts unless you know they belong to another anti-leak setup.
 
 ## Upgrade from an older version
 
-A clean upgrade is recommended because v5 uses only module-local configuration.
+A clean upgrade is recommended for v5+, as it uses only module-local configuration.
 
 1. Remove the old module in Magisk.
 2. Reboot once.
-3. Install v5.0.0.
-4. Select a new profile or run the configuration tool.
-5. Reboot again.
+3. Remove/move any relic module files/configs out of `/data/adb/**`
+4. Install ≥ v5.0.0.
+5. Select a new profile or run the configuration tool.
+6. Reboot again.
 
 Old external configuration files are not used by v5.
 
@@ -241,7 +231,3 @@ See [ADVANCED.md](ADVANCED.md) for:
 - VPN lockdown handling;
 - full configuration options;
 - developer and troubleshooting details.
-
-## Safety summary
-
-The module blocks traffic first. It releases traffic only after AFWall+ proves control of the live firewall rules. If that proof does not arrive, the safe default is to keep traffic blocked and provide a manual recovery path.
