@@ -1,158 +1,104 @@
 name: CI
 
+# Run on every pull request and on pushes to the main branch.
+# Skips documentation-only changes that cannot affect installability.
 on:
   pull_request:
     branches: [master, main]
+  push:
+    branches: [master, main]
+    paths-ignore:
+      - "README.md"
+      - "ADVANCED.md"
+      - ".gitignore"
+      - ".gitattributes"
+      - ".shellcheckrc"
 
+# Minimal permissions: read-only checkout is sufficient for CI.
 permissions:
-  contents: write
-
-concurrency:
-  group: afwall-reconciliation-${{ github.event.pull_request.number }}
-  cancel-in-progress: false
+  contents: read
 
 jobs:
-  reconcile-and-validate:
-    if: github.head_ref == 'agent/generation-aware-afwall-handoff'
+  build-and-validate:
+    name: Build and Validate Module ZIP
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout reconciliation branch
-        uses: actions/checkout@v4
-        with:
-          ref: agent/generation-aware-afwall-handoff
-          fetch-depth: 0
 
-      - name: Install validation dependencies
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends busybox shellcheck zip unzip
 
-      - name: Verify and reconstruct audited payload
-        shell: bash
-        run: |
-          set -euo pipefail
-          cat > /tmp/payload-parts.sha256 <<'EOF'
-          525cd2131044116107d9ed1a5e2d4bfb134b0715ba9764f9330e76ac0c02cd11  .github/reconcile/payload.part.00.00
-          3d4c52c83bec9e339ed720e70eeb5621361abaf8f74edc28ec99fd79647d3587  .github/reconcile/payload.part.00.01
-          04b9e5e50a27b3667e3bb5f99e85f017179454cc02edf8c4ec308867d4dc04d3  .github/reconcile/payload.part.00.02
-          dff8a9770fc475a70561ea1a5f1c78e59f2b5eb602027c4a7fab99f846add5fe  .github/reconcile/payload.part.00.03
-          960a50e820142a496b55dd5bd105b84eb2586df5e3683dafdf34decdf9e60a71  .github/reconcile/payload.part.01
-          c278e1e5c0cc570fcdda21cab767f49e9ecd42cade6cc4f4dd40d755d47d24a7  .github/reconcile/payload.part.02
-          4fb33023dd28f82aa305e7a3594c2a05b82bc14b51bdaa58236362286bac8713  .github/reconcile/payload.part.03
-          ed60307aab5f52b1cfcd26c02cb3c8c7a2769c270356a4db42165188ed5a23ca  .github/reconcile/payload.part.04
-          efa81a3b0f8c5546a64c4b7a0e04ea7852fc4a4d4bbc5063f6784adfd94699b9  .github/reconcile/payload.part.05a
-          60e08715a6b67b1c418cb4ce6632d6986a5d9b1f4a3bda52a0f4aacf70ba2992  .github/reconcile/payload.part.05b
-          b721c5fa5a57b02dfa4cc24c09aefd97748a35571917d16aefc40831cb314c57  .github/reconcile/payload.part.05c
-          9ee8ef657bafe825e173cf55f38452d506a1239a8d48f44ad044d842f390163f  .github/reconcile/payload.part.05d
-          bbf626f89c8ff584aeef2fca328fdc4d1f8259dea0ce4823b646f1060b6cf65a  .github/reconcile/payload.part.06a
-          b5755015cd056797961e1d807c6a313dc4c34c70be4a26ebaa76b1ed5c0fc348  .github/reconcile/payload.part.06b
-          f820455c5cc1c462a7c72e0fdeeaf0c08bebcedaac664ce4a6fce5e725be9548  .github/reconcile/payload.part.06c
-          f619a102d110c92a1d57ae9aa0c321f28cddcedad0c2fec999b1e41f029a4328  .github/reconcile/payload.part.06d
-          8b7e18cd4bd75fcdbfe0a2b11059197899baf5a68f5ef7a031a5981febfd8fbf  .github/reconcile/payload.part.07a
-          4c001551ab15737dbdac84f98cb505ef67add38910da6e2eecd434ddea58bc8a  .github/reconcile/payload.part.07b
-          2c6fe17d9cc587177705bab856ccb3d97f6122fffdb69bf0e342c61351494d1d  .github/reconcile/payload.part.07c
-          EOF
-          sha256sum -c /tmp/payload-parts.sha256
-          cat \
-            .github/reconcile/payload.part.00.00 \
-            .github/reconcile/payload.part.00.01 \
-            .github/reconcile/payload.part.00.02 \
-            .github/reconcile/payload.part.00.03 \
-            .github/reconcile/payload.part.01 \
-            .github/reconcile/payload.part.02 \
-            .github/reconcile/payload.part.03 \
-            .github/reconcile/payload.part.04 \
-            .github/reconcile/payload.part.05a \
-            .github/reconcile/payload.part.05b \
-            .github/reconcile/payload.part.05c \
-            .github/reconcile/payload.part.05d \
-            .github/reconcile/payload.part.06a \
-            .github/reconcile/payload.part.06b \
-            .github/reconcile/payload.part.06c \
-            .github/reconcile/payload.part.06d \
-            .github/reconcile/payload.part.07a \
-            .github/reconcile/payload.part.07b \
-            .github/reconcile/payload.part.07c > /tmp/reconcile.b64
-          base64 -d /tmp/reconcile.b64 > /tmp/afwall-reconcile.tar.gz
-          echo '8a788fcb3e9b7fb555a784c36d27b2aeedf288beb2e6196525df64053d40e48a  /tmp/afwall-reconcile.tar.gz' | sha256sum -c -
-          tar -xzf /tmp/afwall-reconcile.tar.gz -C .
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path('tools/mock-logic-tests.sh')
-          text = path.read_text()
-          replacements = {
-              "if rooted_afwall_graph_from_snapshot \"$multi_orphan_snap\" | grep -q 'comment orphan'; then fail \"rooted graph included rule with undefined later jump target\"; fi":
-                  "if rooted_afwall_graph_from_snapshot \"$multi_orphan_snap\"; then fail \"rooted graph accepted rule with undefined later jump target\"; fi",
-              "SLOW_STABLE_SECS WATCHDOG_SERVICE_SECS":
-                  "SLOW_STABLE_SECS AFWALL_DELAY_GRACE_SECS AFWALL_PREFS_RETRY_SECS WATCHDOG_SERVICE_SECS",
-          }
-          for old, new in replacements.items():
-              if text.count(old) != 1:
-                  raise SystemExit(f'expected one mock invariant to replace: {old}')
-              text = text.replace(old, new)
-          path.write_text(text)
-          PY
-
-      - name: Lint reconciled shell surface
+      # ── Lint: module runtime scripts ────────────────────────────────────────
+      # Checks the module's own shell scripts (not third-party MMT-Extended
+      # files or sourced-only config/install stubs).
+      # .shellcheckrc sets shell=ash and disables ash/Android false positives.
+      - name: Lint module shell scripts (shellcheck)
         run: |
           shellcheck --severity=warning \
-            bin/common.sh bin/generation_guard.sh bin/installer_config.sh bin/lowlevel.sh \
-            action.sh post-fs-data.sh reconfigure.sh service.sh uninstall.sh \
-            tests/test-generation-guard.sh tests/test-reconciliation.sh \
-            tools/mock-logic-tests.sh tools/timeline-sim-tests.sh \
-            tools/build-release.sh tools/validate-zip.sh
+            bin/common.sh \
+            bin/generation_guard.sh \
+            bin/installer_config.sh \
+            bin/lowlevel.sh \
+            action.sh \
+            post-fs-data.sh \
+            reconfigure.sh \
+            service.sh \
+            uninstall.sh \
+            tests/test-generation-guard.sh \
+            tests/test-reconciliation.sh \
+            tools/mock-logic-tests.sh \
+            tools/timeline-sim-tests.sh \
+            tools/build-release.sh \
+            tools/validate-zip.sh
 
-      - name: Test generation guard with BusyBox ash
-        run: busybox ash tests/test-generation-guard.sh
-
-      - name: Test generation guard with dash
-        run: dash tests/test-generation-guard.sh
-
-      - name: Test reconciliation with BusyBox ash
-        run: busybox ash tests/test-reconciliation.sh
-
-      - name: Test reconciliation with dash
-        run: dash tests/test-reconciliation.sh
-
-      - name: Run mock logic suite
-        run: sh tools/mock-logic-tests.sh
-
-      - name: Run timeline simulations
-        run: sh tools/timeline-sim-tests.sh
-
-      - name: Build and validate module ZIPs
+      - name: Test generation-aware AFWall handoff
         run: |
-          chmod +x tools/build-release.sh tools/validate-zip.sh
+          chmod +x tests/test-generation-guard.sh tests/test-reconciliation.sh tools/mock-logic-tests.sh tools/timeline-sim-tests.sh
+          busybox ash tests/test-generation-guard.sh
+          dash tests/test-generation-guard.sh
+          busybox ash tests/test-reconciliation.sh
+          dash tests/test-reconciliation.sh
+          sh tools/mock-logic-tests.sh
+          sh tools/timeline-sim-tests.sh
+
+      # ── Build: produce the installable ZIP ──────────────────────────────────
+      - name: Build module ZIP
+        run: |
+          chmod +x tools/build-release.sh
           MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           tools/build-release.sh dist/ "${MODULE_ID}-${VERSION}.zip" "${MODULE_ID}.zip"
+
+      # ── Validate: check ZIP internal structure ──────────────────────────────
+      - name: Validate ZIP structure
+        run: |
+          chmod +x tools/validate-zip.sh
+          MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
+          VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           tools/validate-zip.sh "dist/${MODULE_ID}-${VERSION}.zip"
           tools/validate-zip.sh "dist/${MODULE_ID}.zip"
 
-      - name: Commit verified reconciliation and remove staging
-        id: commit
-        continue-on-error: true
-        shell: bash
-        run: |
-          exec > >(tee /tmp/reconciliation-commit.log) 2>&1
-          set -euxo pipefail
-          rm -rf dist /tmp/reconcile.b64 /tmp/afwall-reconcile.tar.gz /tmp/payload-parts.sha256
-          rm -rf .github/reconcile
-          git restore --source=HEAD -- .github/workflows/ci.yml .github/workflows/apply-pr-reconciliation.yml
-          chmod +x tools/timeline-sim-tests.sh tests/test-reconciliation.sh
-          git add -A
-          git diff --cached --check
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'reconcile: consolidate generation-aware AFWall handoff'
-          git push origin HEAD:agent/generation-aware-afwall-handoff
-
-      - name: Upload reconciliation commit diagnostics
-        if: steps.commit.outcome == 'failure'
+      # ── Upload: make artifacts available for PR review ──────────────────────
+      - name: Upload module ZIP artifact
         uses: actions/upload-artifact@v4
         with:
-          name: reconciliation-commit-log
-          path: /tmp/reconciliation-commit.log
-          retention-days: 1
+          name: module-zip
+          path: dist/*.zip
+          # Keep for 14 days so reviewers can download and test
+          retention-days: 14
 
-      - name: Stop after reconciliation commit failure
-        if: steps.commit.outcome == 'failure'
-        run: exit 1
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha256sum
+          path: dist/sha256sum.txt
+          retention-days: 14
+
+      - name: Upload build info artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-info
+          path: dist/build-info.txt
+          retention-days: 14
