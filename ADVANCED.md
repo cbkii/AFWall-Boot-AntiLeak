@@ -469,7 +469,7 @@ The installer tries, in order:
 2. bundled `keycheck`,
 3. non-interactive fallback.
 
-Non-interactive fallback uses installer defaults and module-local config only. Legacy external runtime config is ignored by service/post-fs-data and does not affect boot behaviour.
+Non-interactive fallback uses installer defaults and writes module-local configuration only.
 
 ### Reconfiguration after install
 
