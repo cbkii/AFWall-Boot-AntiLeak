@@ -50,8 +50,7 @@ for a `EV_KEY` DOWN event with code `KEY_VOLUMEUP` (115) or `KEY_VOLUMEDOWN`
 
 1. Primary method: raw `getevent -lq` (streams events directly).
 2. Fallback: arch-appropriate `keycheck` binary if getevent is unavailable.
-3. If neither method works: non-interactive fallback
-   (installer.cfg → existing config → safe defaults).
+3. If neither method works: non-interactive fallback using safe module-local defaults.
 
 ---
 
