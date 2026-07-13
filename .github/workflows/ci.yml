@@ -135,7 +135,9 @@ jobs:
           exec > >(tee /tmp/reconciliation-commit.log) 2>&1
           set -euxo pipefail
           rm -rf dist /tmp/reconcile.b64 /tmp/afwall-reconcile.tar.gz /tmp/payload-parts.sha256
-          rm -rf .github/reconcile .github/workflows/apply-pr-reconciliation.yml
+          rm -rf .github/reconcile
+          git restore --source=HEAD -- .github/workflows/ci.yml .github/workflows/apply-pr-reconciliation.yml
+          chmod +x tools/timeline-sim-tests.sh tests/test-reconciliation.sh
           git add -A
           git diff --cached --check
           git config user.name 'github-actions[bot]'
