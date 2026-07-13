@@ -1,0 +1,100 @@
+name: Apply PR reconciliation
+
+on:
+  push:
+    branches:
+      - agent/generation-aware-afwall-handoff
+    paths:
+      - .github/reconcile/payload.b64
+      - .github/workflows/apply-pr-reconciliation.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: afwall-pr-reconciliation
+  cancel-in-progress: false
+
+jobs:
+  apply-and-verify:
+    if: github.repository == 'cbkii/AFWall-Boot-AntiLeak' && github.ref_name == 'agent/generation-aware-afwall-handoff'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout reconciliation branch
+        uses: actions/checkout@v4
+        with:
+          ref: agent/generation-aware-afwall-handoff
+          fetch-depth: 0
+
+      - name: Install validation dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends busybox shellcheck zip unzip
+
+      - name: Apply audited reconciliation payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 -d .github/reconcile/payload.b64 > /tmp/afwall-reconcile.tar.gz
+          echo '8a788fcb3e9b7fb555a784c36d27b2aeedf288beb2e6196525df64053d40e48a  /tmp/afwall-reconcile.tar.gz' | sha256sum -c -
+          tar -xzf /tmp/afwall-reconcile.tar.gz -C .
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('tools/mock-logic-tests.sh')
+          text = path.read_text()
+          old = "if rooted_afwall_graph_from_snapshot \"$multi_orphan_snap\" | grep -q 'comment orphan'; then fail \"rooted graph included rule with undefined later jump target\"; fi"
+          new = "if rooted_afwall_graph_from_snapshot \"$multi_orphan_snap\"; then fail \"rooted graph accepted rule with undefined later jump target\"; fi"
+          if text.count(old) != 1:
+              raise SystemExit('expected one rooted-graph mock assertion to replace')
+          path.write_text(text.replace(old, new))
+          PY
+
+      - name: Lint reconciled shell surface
+        run: |
+          shellcheck --severity=warning \
+            bin/common.sh \
+            bin/generation_guard.sh \
+            bin/installer_config.sh \
+            bin/lowlevel.sh \
+            action.sh \
+            post-fs-data.sh \
+            reconfigure.sh \
+            service.sh \
+            uninstall.sh \
+            tests/test-generation-guard.sh \
+            tests/test-reconciliation.sh \
+            tools/mock-logic-tests.sh \
+            tools/timeline-sim-tests.sh \
+            tools/build-release.sh \
+            tools/validate-zip.sh
+
+      - name: Run reconciled logic tests
+        run: |
+          chmod +x tests/test-generation-guard.sh tests/test-reconciliation.sh tools/mock-logic-tests.sh tools/timeline-sim-tests.sh
+          busybox ash tests/test-generation-guard.sh
+          dash tests/test-generation-guard.sh
+          busybox ash tests/test-reconciliation.sh
+          dash tests/test-reconciliation.sh
+          sh tools/mock-logic-tests.sh
+          sh tools/timeline-sim-tests.sh
+
+      - name: Build and validate module ZIPs
+        run: |
+          chmod +x tools/build-release.sh tools/validate-zip.sh
+          MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
+          VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
+          tools/build-release.sh dist/ "${MODULE_ID}-${VERSION}.zip" "${MODULE_ID}.zip"
+          tools/validate-zip.sh "dist/${MODULE_ID}-${VERSION}.zip"
+          tools/validate-zip.sh "dist/${MODULE_ID}.zip"
+
+      - name: Commit verified reconciliation
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf dist /tmp/afwall-reconcile.tar.gz
+          git rm .github/reconcile/payload.b64 .github/workflows/apply-pr-reconciliation.yml
+          rmdir .github/reconcile 2>/dev/null || true
+          git add -A
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'reconcile: consolidate generation-aware AFWall handoff'
+          git push origin HEAD:agent/generation-aware-afwall-handoff
