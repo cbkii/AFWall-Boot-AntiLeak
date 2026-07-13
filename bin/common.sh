@@ -218,26 +218,6 @@ _config_uint_or_default() {
   esac
 }
 
-_warn_and_unset_legacy_config_vars() {
-  local v set
-  for v in \
-    TIMEOUT_START_AFTER_READY_GATE TIMEOUT_UNLOCK_GATED \
-    AFWALL_READY_REQUIRE_BOOT_COMPLETED AFWALL_READY_REQUIRE_UNLOCK AFWALL_READY_MIN_POST_UNLOCK_SECS \
-    TIMEOUT_POLICY AUTO_TIMEOUT_UNBLOCK TIMEOUT_SECS \
-    TRANSPORT_WAIT_SECS TRANSPORT_WAIT_SECS_POST_BOOT \
-    SETTLE_SECS SETTLE_SECS_POST_BOOT LIVENESS_SECS_POST_BOOT FALLBACK_SECS_POST_BOOT \
-    LOWLEVEL_MODE LOWLEVEL_WIFI_DATA_OFF LOWLEVEL_INTERFACE_QUIESCE \
-    LOWLEVEL_USE_WIFI_SERVICE LOWLEVEL_USE_PHONE_DATA_CMD LOWLEVEL_USE_BLUETOOTH_MANAGER LOWLEVEL_USE_TETHER_STOP \
-    VPN_LOCKDOWN_BOOT_ENFORCE VPN_LOCKDOWN_RELEASE_ON_RESTORE VPN_LOCKDOWN_PROVIDER_PACKAGES \
-    WIFI_AFWALL_GATE MOBILE_AFWALL_GATE ENABLE_FORWARD_BLOCK ENABLE_INPUT_BLOCK; do
-    eval "set=\${${v}+set}"
-    if [ "$set" = "set" ]; then
-      _config_warn "config: unsupported legacy variable ignored in v4.4.4: $v"
-      unset "$v"
-    fi
-  done
-}
-
 derive_internal_config() {
   # Validate simple enums first.  Invalid values fall back to safe defaults.
   case "${LEAK_PROTECTION_MODE:-balanced}" in
@@ -328,9 +308,8 @@ load_config() {
   [ "${_MODULE_CFG_LOADED:-0}" = "1" ] && return 0
   _init_dirs
   CONFIG_SOURCED_FILES=""
-  CONFIG_IGNORED_FILES=""
 
-  local cfg legacy
+  local cfg
   cfg="${MODDIR:-}/config.sh"
   if [ -f "$cfg" ]; then
     if . "$cfg" 2>/dev/null; then
@@ -350,14 +329,6 @@ load_config() {
     fi
   fi
 
-  for legacy in "${MODULE_DATA}/config.sh" "${MODULE_DATA}/installer.cfg"; do
-    if [ -f "$legacy" ]; then
-      CONFIG_IGNORED_FILES="${CONFIG_IGNORED_FILES}${CONFIG_IGNORED_FILES:+ }$legacy"
-      _config_warn "config: legacy external config path ignored in v4.4.4 breaking-change release: $legacy"
-    fi
-  done
-
-  _warn_and_unset_legacy_config_vars
   derive_internal_config
   [ -z "$CONFIG_SOURCED_FILES" ] && CONFIG_SOURCED_FILES="(none; built-in fallbacks)"
   _MODULE_CFG_LOADED=1
@@ -365,7 +336,7 @@ load_config() {
 }
 
 log_effective_config() {
-  log "config: sourced=${CONFIG_SOURCED_FILES:-unknown} ignored_legacy=${CONFIG_IGNORED_FILES:-none}"
+  log "config: sourced=${CONFIG_SOURCED_FILES:-unknown}"
   log "config: effective mode=${LEAK_PROTECTION_MODE:-balanced} poll=${POLL_INTERVAL_SECS}s fast=${FAST_STABLE_SECS}s slow=${SLOW_STABLE_SECS}s watchdog_service=${WATCHDOG_SERVICE_SECS}s watchdog_boot=${WATCHDOG_BOOT_COMPLETED_SECS}s watchdog_policy=${WATCHDOG_POLICY}"
   log "config: effective blocks forward=${BLOCK_FORWARD_EFFECTIVE} input=${BLOCK_INPUT_EFFECTIVE} radio=${RADIO_SUPPRESSION} afwall_package=${AFWALL_PACKAGE:-auto} vpn_mode=${VPN_LOCKDOWN_MODE} vpn_providers=${VPN_PROVIDER_PACKAGES:-auto}"
 }
@@ -1587,13 +1558,11 @@ mark_boot_marker() {
 # Device Encrypted (DE) app-data locations so that evidence is detectable
 # whether or not the user storage is unlocked.
 #
-# Reference timestamp priority:
-#   1. ${STATE_DIR}/boot_marker          — dedicated marker (most reliable)
-#   2. ${STATE_DIR}/ipv4_out_table       — fallback (legacy)
-#   3. ${STATE_DIR}/ipv6_out_table       — final fallback
+# Reference timestamp:
+#   ${STATE_DIR}/boot_marker          — dedicated marker (most reliable)
 #
 # Data locations searched:
-#   /data/data/<pkg>          — legacy / CE primary
+#   /data/data/<pkg>          — CE primary
 #   /data/user/0/<pkg>        — CE explicit path
 #   /data/user_de/0/<pkg>     — DE (always readable; not behind FBE)
 #
@@ -1604,8 +1573,6 @@ afwall_secondary_evidence_present() {
 
   # Choose reference timestamp.
   ref="${STATE_DIR}/boot_marker"
-  [ -f "$ref" ] || ref="${STATE_DIR}/ipv4_out_table"
-  [ -f "$ref" ] || ref="${STATE_DIR}/ipv6_out_table"
   [ -f "$ref" ] || return 1
 
   # Search CE and DE data directories.
@@ -1836,60 +1803,6 @@ should_install_block() {
   esac
 }
 
-# ── Legacy cleanup ─────────────────────────────────────────────────────────────
-# Remove legacy afwallstart scripts installed by v1.x variants, identified by
-# a known module marker.  Current active chain names (MOD_PRE_AFW*) are never
-# touched here — they are managed exclusively by post-fs-data and remove_block.
-# When called during the service phase (cleanup_legacy), iptables chains are
-# left untouched; scripts are the only thing removed.
-cleanup_legacy() {
-  local phase="${1:-unknown}"
-  log "cleanup_legacy: phase=$phase"
-  local f
-
-  # v1.x module-owned afwallstart hooks. Require an AntiLeak marker so an
-  # AFWall-owned startup script is never removed by name alone.
-  for f in \
-    "/data/adb/service.d/afwallstart" \
-    "/data/adb/post-fs-data.d/afwallstart" \
-    "/data/adb/system.d/afwallstart"; do
-    [ -f "$f" ] || continue
-    if grep -qE 'AFW-ANTILEAK|AFWall-?Boot-?AntiLeak|sys\.afw\.policy\.drop' \
-        "$f" 2>/dev/null; then
-      rm -f "$f" 2>/dev/null || true
-      log "cleanup: removed legacy $f"
-    fi
-  done
-
-  # Older MMT packaging copied the Magisk Action hook into service.d/action.sh.
-  # It is not a boot service and cannot resolve the module library from there.
-  for f in \
-    "/data/adb/service.d/action.sh" \
-    "/data/adb/service.d/AFWall-Boot-AntiLeak-action.sh"; do
-    [ -f "$f" ] || continue
-    if grep -qE 'AFWall Boot AntiLeak|write_manual_override|recover_connectivity.*action' \
-        "$f" 2>/dev/null; then
-      rm -f "$f" 2>/dev/null || true
-      log "cleanup: removed obsolete module Action copy $f"
-    fi
-  done
-
-  # v4.2.0 runtime config has only two possible sources, both module-local:
-  # config.sh and optional config.local.sh. These external files are ignored.
-  for f in "${MODULE_DATA}/config.sh" "${MODULE_DATA}/installer.cfg"; do
-    [ -e "$f" ] || continue
-    if rm -f "$f" 2>/dev/null; then
-      log "cleanup: removed ignored legacy config $f"
-    else
-      log "cleanup: WARN: could not remove ignored legacy config $f"
-    fi
-  done
-  return 0
-}
-
-# Alias kept for callers that previously used the scripts-only variant.
-cleanup_legacy_scripts_only() { cleanup_legacy "$1"; }
-
 # ── Transport-specific AFWall chain detection ──────────────────────────────────
 # AFWall+ creates dedicated sub-chains for each transport type:
 #   afwall-wifi   — Wi-Fi rules
@@ -2038,7 +1951,6 @@ recover_connectivity() {
   # Use the proven emergency restore path so recovery behavior is identical
   # between manual action and automatic paths.
   lowlevel_emergency_restore
-  cleanup_legacy "$origin"
 
   log_blackout_integrity "v4" "${origin}_after_recovery"
   log_blackout_integrity "v6" "${origin}_after_recovery"

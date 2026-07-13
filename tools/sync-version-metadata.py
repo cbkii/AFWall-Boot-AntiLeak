@@ -74,8 +74,6 @@ def main() -> int:
         (r"(# AFWall Boot AntiLeak )v\d+\.\d+\.\d+", rf"\g<1>{version}"),
         (r"^MODULE_VERSION=.*$", f'MODULE_VERSION="{version}"'),
         (r"v\d+\.\d+\.\d+ breaking-change config model", f"{version} breaking-change config model"),
-        (r"unsupported legacy variable ignored in v\d+\.\d+\.\d+", f"unsupported legacy variable ignored in {version}"),
-        (r"legacy external config path ignored in v\d+\.\d+\.\d+", f"legacy external config path ignored in {version}"),
         (r"derived only from v\d+\.\d+\.\d+ user-facing settings", f"derived only from {version} user-facing settings"),
     ])
     replace("bin/lowlevel.sh", [

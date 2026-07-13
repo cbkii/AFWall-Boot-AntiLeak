@@ -109,11 +109,6 @@ fi
   }
   _refresh_afwall_pkg "service_start" || true
 
-  # ── A) Legacy cleanup (scripts only) ────────────────────────────────────────
-  # Only remove legacy afwallstart scripts; never touch current active
-  # MOD_PRE_AFW* chains which were installed by post-fs-data this boot.
-  cleanup_legacy_scripts_only "service"
-
   # ── Stage B: Late lower-layer suppression ──────────────────────────────────
   # Re-assert and verify Wi-Fi/data off-state now that framework is available.
   # This re-asserts any early-phase quiesce and adds service-level suppression.
@@ -1206,7 +1201,6 @@ fi
           remove_block
         fi
         lowlevel_vpn_lockdown_release_if_needed
-        cleanup_legacy "service-finalize"
         _finalize_cleanup_done=1
       fi
 

@@ -230,23 +230,6 @@ That does not automatically mean a leak or module failure. It may mean your netw
 
 If AFWall reports IPv6 disabled or not controlled, the module intentionally keeps its IPv6 blackout and records `state/ipv6_held`. This is a terminal safe state, not a polling failure. Use the Magisk Action button only when you deliberately want to remove that held protection.
 
-### There are three config files
-
-Only these two are current runtime config sources:
-
-```sh
-/data/adb/modules/AFWall-Boot-AntiLeak/config.sh
-/data/adb/modules/AFWall-Boot-AntiLeak/config.local.sh
-```
-
-If this exists, it is legacy and ignored:
-
-```sh
-/data/adb/AFWall-Boot-AntiLeak/config.sh
-```
-
-Remove the legacy file after a clean uninstall/reinstall.
-
 ## Clean upgrade from old versions
 
 For upgrades from older v2/v3/v4 development builds:

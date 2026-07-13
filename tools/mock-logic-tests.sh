@@ -180,7 +180,6 @@ if rooted_afwall_graph_from_snapshot "$multi_orphan_snap"; then fail "rooted gra
 pass "rooted graph and transport reachability"
 
 # Config single-source and PID lifecycle invariants.
-grep -q "legacy external config path ignored in ${expected_version}" "$ROOT/bin/common.sh" || fail "legacy external config ignore warning missing"
 grep -q 'config.local.sh' "$ROOT/bin/common.sh" || fail "module-local config override missing"
 # shellcheck disable=SC2016 # intentional literal pattern for source-code assertion
 grep -q 'pid_file written pid=${_svc_pid}' "$ROOT/service.sh" || fail "parent does not record actual background pid"
@@ -224,11 +223,10 @@ done
 grep -q '^WATCHDOG_POLICY=block$' "$ROOT/config.sh" || fail "default watchdog policy is not block"
 grep -q '^VPN_LOCKDOWN_MODE=off$' "$ROOT/config.sh" || fail "default VPN mode is not off"
 grep -q 'Common examples: ch.protonvpn.android com.wireguard.android' "$ROOT/config.sh" || fail "VPN examples missing Proton first"
-if grep -E '^(TIMEOUT_|AFWALL_READY_|LOWLEVEL_|VPN_LOCKDOWN_(BOOT|RELEASE|PROVIDER)|WIFI_AFWALL_GATE|MOBILE_AFWALL_GATE|ENABLE_)' "$ROOT/config.sh"; then fail "legacy/internal variables exposed in config.sh"; fi
 if grep -E 'diagnose_and_fail_closed|auto_unblock|fail_closed|release_on_restore' "$ROOT/config.sh" "$ROOT/README.md" "$ROOT/ADVANCED.md"; then fail "old policy values exposed in config/docs"; fi
 pass "active release config surface"
 
-# Config derivation and unsupported legacy variables.
+# Config derivation.
 TMP="${TMPDIR:-/tmp}/aba-test-$$"
 trap 'rm -rf "$TMP"' EXIT INT TERM
 mkdir -p "$TMP/mod" "$TMP/data/state" "$TMP/data/logs"
@@ -251,9 +249,6 @@ load_config
 [ "$WATCHDOG_POLICY" = unblock ] || fail "WATCHDOG_POLICY=unblock not applied"
 [ "$LOWLEVEL_MODE" = strict ] || fail "RADIO_SUPPRESSION=strict did not derive strict lowlevel"
 [ "$VPN_LOCKDOWN_BOOT_ENFORCE" = 1 ] || fail "VPN restore mode did not enable boot enforcement"
-[ -z "${TIMEOUT_POLICY+x}" ] || fail "legacy TIMEOUT_POLICY still set after load"
-grep -q "unsupported legacy variable ignored in ${expected_version}: TIMEOUT_POLICY" "$LOG_FILE" || fail "legacy TIMEOUT_POLICY warning missing"
-grep -q "unsupported legacy variable ignored in ${expected_version}: AFWALL_READY_REQUIRE_UNLOCK" "$LOG_FILE" || fail "legacy readiness warning missing"
 
 # Strict firewall proof alone must not force disruptive radio suppression.
 cat > "$TMP/mod/config.local.sh" <<'SH'
@@ -263,7 +258,7 @@ SH
 _MODULE_CFG_LOADED=0
 load_config
 [ "$LOWLEVEL_MODE" = off ] || fail "LEAK_PROTECTION_MODE=strict forced radio suppression"
-pass "config derivation and legacy ignore"
+pass "config derivation"
 
 # AFWall package detection must include donate, current free, and legacy IDs.
 mkdir -p "$TMP/bin"
@@ -283,11 +278,8 @@ for pkg in dev.ukanth.ufirewall.donate dev.ukanth.ufirewall com.ukanth.ufirewall
 done
 pass "AFWall package candidates"
 
-# External legacy paths are mentioned as ignored, never sourced by installer/common.
-grep -q "legacy external config path ignored in ${expected_version}" "$ROOT/bin/common.sh" || fail "runtime legacy path ignore missing"
 if grep -q 'ic_parse_external_config\|ic_load_existing_config\|_IC_INSTALLER_CFG\|_IC_PERSISTENT_CFG' "$ROOT/bin/installer_config.sh"; then fail "installer still has external config preservation/parser"; fi
 grep -q 'config.local.sh' "$ROOT/bin/installer_config.sh" || fail "installer does not write module-local config.local.sh"
-pass "external config ignored"
 
 # Installer always-on VPN auto-config with fake settings command.
 . "$ROOT/bin/installer_config.sh"

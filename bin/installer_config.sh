@@ -4,7 +4,6 @@
 # reads old external runtime/installer config paths.
 
 _IC_MODULE_ID="AFWall-Boot-AntiLeak"
-_IC_LEGACY_DATA="/data/adb/${_IC_MODULE_ID}"
 _IC_KEY_TIMEOUT=10
 _IC_KEY_RETRIES=2
 
@@ -13,21 +12,6 @@ _ic_print() {
         runtime) echo "$1" ;;
         *) ui_print "$1" ;;
     esac
-}
-
-ic_cleanup_legacy_config_files() {
-    local legacy
-    for legacy in \
-        "${_IC_LEGACY_DATA}/config.sh" \
-        "${_IC_LEGACY_DATA}/installer.cfg"; do
-        [ -e "$legacy" ] || continue
-        if rm -f "$legacy" 2>/dev/null; then
-            _ic_print "  Removed ignored legacy config: $legacy"
-        else
-            _ic_print "  WARNING: Could not remove ignored legacy config: $legacy"
-        fi
-    done
-    return 0
 }
 
 ic_apply_defaults() {
@@ -385,10 +369,6 @@ ic_run_config_selection() {
     dest="${MODDIR:-${MODPATH:-/data/adb/modules/${_IC_MODULE_ID}}}/config.local.sh"
     ic_apply_defaults
     _ic_print ""
-    _ic_print "  v4.4.4 is a breaking config cleanup release."
-    _ic_print "  Old external config paths are never sourced and are removed after a successful write."
-    [ -f "${_IC_LEGACY_DATA}/config.sh" ] && _ic_print "  Legacy external config scheduled for cleanup: ${_IC_LEGACY_DATA}/config.sh"
-    [ -f "${_IC_LEGACY_DATA}/installer.cfg" ] && _ic_print "  WARNING: legacy external installer config ignored: ${_IC_LEGACY_DATA}/installer.cfg"
     ic_detect_keys
     _ic_select_profile
     case "$IC_ENUM_RESULT" in custom) _ic_select_custom ;; *) ic_apply_profile "$IC_ENUM_RESULT" ;; esac
@@ -396,7 +376,6 @@ ic_run_config_selection() {
     ic_render_summary
     _ic_print "  Writing module-local config: $dest"
     if ic_write_config "$dest"; then
-        ic_cleanup_legacy_config_files
         return 0
     fi
     return 1

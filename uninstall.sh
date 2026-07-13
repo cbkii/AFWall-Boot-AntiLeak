@@ -14,9 +14,6 @@ remove_block
 # Only restores Wi-Fi / mobile data / Bluetooth if the module disabled them.
 lowlevel_emergency_restore
 
-# Remove legacy artifacts from previous module versions.
-cleanup_legacy "uninstall"
-
 log "uninstall: removing module state and logs"
 # Remove state files first so the log entry above is preserved briefly.
 rm -rf "${STATE_DIR}" 2>/dev/null || true

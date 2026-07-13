@@ -17,9 +17,6 @@ rm -f "${STATE_DIR}/manual_override" \
       "${SERVICE_PID_FILE}" 2>/dev/null || true
 log "post-fs-data: cleared stale override/stop/PID markers"
 
-# Remove legacy artifacts from older module versions (v1.x).
-cleanup_legacy "post-fs-data"
-
 # Evaluate integration mode and install the kernel-level block if appropriate.
 if should_install_block; then
   log "post-fs-data: installing hard block"
