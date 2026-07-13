@@ -113,24 +113,7 @@ jobs:
         run: dash tests/test-reconciliation.sh
 
       - name: Run mock logic suite
-        id: mock
-        continue-on-error: true
-        shell: bash
-        run: |
-          set -o pipefail
-          sh tools/mock-logic-tests.sh 2>&1 | tee /tmp/mock-logic.log
-
-      - name: Upload mock logic diagnostics
-        if: steps.mock.outcome == 'failure'
-        uses: actions/upload-artifact@v4
-        with:
-          name: mock-logic-log
-          path: /tmp/mock-logic.log
-          retention-days: 1
-
-      - name: Stop after mock logic failure
-        if: steps.mock.outcome == 'failure'
-        run: exit 1
+        run: sh tools/mock-logic-tests.sh
 
       - name: Run timeline simulations
         run: sh tools/timeline-sim-tests.sh
@@ -145,10 +128,13 @@ jobs:
           tools/validate-zip.sh "dist/${MODULE_ID}.zip"
 
       - name: Commit verified reconciliation and remove staging
+        id: commit
+        continue-on-error: true
         shell: bash
         run: |
-          set -euo pipefail
-          rm -rf dist /tmp/reconcile.b64 /tmp/afwall-reconcile.tar.gz /tmp/payload-parts.sha256 /tmp/mock-logic.log
+          exec > >(tee /tmp/reconciliation-commit.log) 2>&1
+          set -euxo pipefail
+          rm -rf dist /tmp/reconcile.b64 /tmp/afwall-reconcile.tar.gz /tmp/payload-parts.sha256
           rm -rf .github/reconcile .github/workflows/apply-pr-reconciliation.yml
           git add -A
           git diff --cached --check
@@ -156,3 +142,15 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'reconcile: consolidate generation-aware AFWall handoff'
           git push origin HEAD:agent/generation-aware-afwall-handoff
+
+      - name: Upload reconciliation commit diagnostics
+        if: steps.commit.outcome == 'failure'
+        uses: actions/upload-artifact@v4
+        with:
+          name: reconciliation-commit-log
+          path: /tmp/reconciliation-commit.log
+          retention-days: 1
+
+      - name: Stop after reconciliation commit failure
+        if: steps.commit.outcome == 'failure'
+        run: exit 1
