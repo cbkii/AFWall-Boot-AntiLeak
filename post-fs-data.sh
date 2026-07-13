@@ -13,6 +13,7 @@ log "post-fs-data: start (module=$MODULE_ID $MODULE_VERSION)"
 # These are per-boot transient state; a fresh boot always starts clean.
 rm -f "${STATE_DIR}/manual_override" \
       "${STATE_DIR}/stop_requested" \
+      "${STATE_DIR}/ipv6_held" \
       "${SERVICE_PID_FILE}" 2>/dev/null || true
 log "post-fs-data: cleared stale override/stop/PID markers"
 

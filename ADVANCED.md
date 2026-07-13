@@ -74,7 +74,9 @@ Important properties of the implementation:
 - each family capture performs two complete locked `iptables -t filter -S` / `ip6tables -t filter -S` reads and exposes a snapshot only when they are byte-identical,
 - all readiness checks for that poll use the accepted barrier snapshot,
 - the module fingerprints the rooted AFWall graph with exact rule order and OUTPUT-hook ordinal preserved,
-- stability is tracked with timestamps, not blocking settle sleeps.
+- stability is tracked with timestamps, not blocking settle sleeps,
+- graph-drift repair is triggered only when the rooted fingerprint changes, avoiding extra steady-state integrity commands, and
+- filter FORWARD/INPUT layers are removed before raw OUTPUT so the independent raw OUTPUT barrier is removed last.
 
 Details are in [AFWall readiness and handoff](#afwall-readiness-and-handoff).
 
@@ -157,7 +159,7 @@ service: v4 conservative-path confirmed stable=6s fp=...
 
 ### Drift handling
 
-If the fingerprint changes, stability resets rather than sleeping through the change.
+If the fingerprint changes, stability resets rather than sleeping through the change. On that transition only, the service immediately checks and repairs the module-owned OUTPUT/FORWARD/INPUT protection for the affected family. No additional drift-specific integrity commands run while the fingerprint remains unchanged.
 
 Typical lines:
 
@@ -165,6 +167,18 @@ Typical lines:
 service: v4 graph drift old=... new=... reset
 service: v4 AFWall graph gone/trivial — resetting stability
 ```
+
+### IPv6 ownership and terminal hold
+
+The generation guard reads AFWall's `enableIPv6` and `controlIPv6` preferences together with the startup-delay settings. AFWall is accepted as the IPv6 owner only when the resolved state says IPv6 is enabled and controlled. If either setting is explicitly false, IPv6 enters a terminal `held` state:
+
+- the service no longer waits for a v6 AFWall graph, so there is no infinite family poll;
+- module-owned IPv6 OUTPUT/FORWARD/INPUT protection remains installed;
+- normal finalization preserves `blackout_active`, `block_installed`, and `ipv6_held`;
+- IPv4 and lower-layer restoration may still finish normally;
+- the Magisk Action path remains the intentional manual release mechanism.
+
+Unreadable or unresolved preference state is not treated as permission to release IPv6. The guard retries at `AFWALL_PREFS_RETRY_SECS` and stays fail-closed. For compatibility with AFWall builds that do not materialise `controlIPv6`, an absent key follows `enableIPv6`; an explicit `controlIPv6=false` always holds IPv6.
 
 ### Transport-aware restore logic
 
@@ -324,6 +338,7 @@ Useful files and markers:
 | `service.pid` | PID of the current service loop |
 | `ipv4_out_table`, `ipv6_out_table` | which table owns the family blackout |
 | `ipv4_fwd_active`, `ipv6_fwd_active` | `FORWARD` block state |
+| `ipv6_held` | terminal state: AFWall is not accepted as IPv6 owner and module IPv6 protection is intentionally retained |
 | `ipv4_in_active`, `ipv6_in_active` | optional `INPUT` block state |
 | `ll/` | lower-layer state written only for things the module changed |
 

@@ -17,6 +17,10 @@ ABA_GEN_GATE_OPEN_TS="${ABA_GEN_GATE_OPEN_TS:-0}"
 ABA_GEN_PACKAGE="${ABA_GEN_PACKAGE:-}"
 ABA_GEN_FIX_LEAK="${ABA_GEN_FIX_LEAK:-unknown}"
 ABA_GEN_INIT_PATH="${ABA_GEN_INIT_PATH:-unknown}"
+ABA_GEN_IPV6_ENABLED="${ABA_GEN_IPV6_ENABLED:-unknown}"
+ABA_GEN_IPV6_CONTROL="${ABA_GEN_IPV6_CONTROL:-unknown}"
+ABA_GEN_IPV6_CONTROLLED="${ABA_GEN_IPV6_CONTROLLED:-unknown}"
+ABA_GEN_IPV6_STATE="${ABA_GEN_IPV6_STATE:-unknown}"
 
 _aba_uint_or_default() {
   case "$1" in
@@ -152,7 +156,7 @@ _aba_find_global_prefs_file() {
   for dir in $(_aba_pref_dirs "$pkg"); do
     for file in "$dir"/*.xml; do
       [ -f "$file" ] || continue
-      if grep -qE "name=[\"'](fixLeak|initPath|activeRules)[\"']" "$file" 2>/dev/null; then
+      if grep -qE "name=[\"'](fixLeak|initPath|activeRules|enableIPv6|controlIPv6)[\"']" "$file" 2>/dev/null; then
         printf '%s' "$file"
         return 0
       fi
@@ -162,7 +166,7 @@ _aba_find_global_prefs_file() {
 }
 
 _aba_load_startup_prefs() {
-  local now retry pkg file raw delay fix init
+  local now retry pkg file raw delay fix init ipv6_enabled ipv6_control
 
   [ "$ABA_GEN_PREFS_READY" = "1" ] && return 0
   now="$(_aba_now)"
@@ -190,14 +194,47 @@ _aba_load_startup_prefs() {
 
   init="$(_aba_xml_attr_value "$file" initPath 2>/dev/null)" || init="unknown"
   ABA_GEN_INIT_PATH="$init"
+
+  # AFWall 4.0.3 exposes both enableIPv6 and, on some preference layouts,
+  # controlIPv6.  An explicit false in either means AFWall will not own IPv6.
+  # When controlIPv6 is absent, use enableIPv6 as the compatibility authority.
+  ipv6_enabled="$(_aba_xml_attr_value "$file" enableIPv6 2>/dev/null)" || ipv6_enabled="true"
+  ABA_GEN_IPV6_ENABLED="$(_aba_pref_bool "$ipv6_enabled" 2>/dev/null)" || ABA_GEN_IPV6_ENABLED="unknown"
+  [ "$ABA_GEN_IPV6_ENABLED" != "unknown" ] || return 1
+
+  ipv6_control="$(_aba_xml_attr_value "$file" controlIPv6 2>/dev/null)" || ipv6_control="$ipv6_enabled"
+  ABA_GEN_IPV6_CONTROL="$(_aba_pref_bool "$ipv6_control" 2>/dev/null)" || ABA_GEN_IPV6_CONTROL="unknown"
+  [ "$ABA_GEN_IPV6_CONTROL" != "unknown" ] || return 1
+
+  if [ "$ABA_GEN_IPV6_ENABLED" = "1" ] && [ "$ABA_GEN_IPV6_CONTROL" = "1" ]; then
+    ABA_GEN_IPV6_CONTROLLED="1"
+  else
+    ABA_GEN_IPV6_CONTROLLED="0"
+  fi
+
   ABA_GEN_PREFS_FILE="$file"
   ABA_GEN_PREFS_READY="1"
 
-  log "generation_guard: AFWall startup prefs loaded file=$file delayed=${ABA_GEN_DELAY_ENABLED} delay_secs=${ABA_GEN_DELAY_SECS} fixLeak=${ABA_GEN_FIX_LEAK} initPath=${ABA_GEN_INIT_PATH}"
+  log "generation_guard: AFWall startup prefs loaded file=$file delayed=${ABA_GEN_DELAY_ENABLED} delay_secs=${ABA_GEN_DELAY_SECS} fixLeak=${ABA_GEN_FIX_LEAK} initPath=${ABA_GEN_INIT_PATH} ipv6_enabled=${ABA_GEN_IPV6_ENABLED} ipv6_control=${ABA_GEN_IPV6_CONTROL} ipv6_controlled=${ABA_GEN_IPV6_CONTROLLED}"
   if [ "$ABA_GEN_FIX_LEAK" = "1" ]; then
     log "generation_guard: WARN: AFWall fixLeak is enabled; module blackout remains authoritative and AFWall-owned afwallstart is not accepted as handoff proof"
   fi
   return 0
+}
+
+# Return AFWall's IPv6 ownership state without adding another polling path.
+# Output: controlled | held | unknown.  Preferences are loaded once and then
+# cached; unavailable credential-encrypted storage remains fail-closed.
+afwall_ipv6_control_state() {
+  _aba_load_startup_prefs || {
+    ABA_GEN_IPV6_STATE="unknown"
+    return 1
+  }
+  case "$ABA_GEN_IPV6_CONTROLLED" in
+    1) ABA_GEN_IPV6_STATE="controlled"; return 0 ;;
+    0) ABA_GEN_IPV6_STATE="held"; return 2 ;;
+    *) ABA_GEN_IPV6_STATE="unknown"; return 1 ;;
+  esac
 }
 
 _aba_base_graph_present() {

@@ -20,7 +20,7 @@ This fork is a much stricter and more observable handoff system.
 |---|---|---|
 | Main proof of AFWall readiness | AFWall process exists | Live rooted `OUTPUT -> afwall` iptables graph is present, non-trivial, and stable |
 | Primary protection | Disable Wi-Fi/mobile data with `svc` | Kernel firewall blackout using module-owned iptables chains |
-| IPv4/IPv6 handling | Not family-aware | IPv4 and IPv6 are handled independently |
+| IPv4/IPv6 handling | Not family-aware | IPv4 and IPv6 are handled independently; IPv6 stays module-blocked when AFWall is not configured to control it |
 | OUTPUT protection | No dedicated temporary OUTPUT chain model | Temporary OUTPUT blackout, with raw preferred and filter fallback/shadow coverage |
 | Tethering/forwarded traffic | Not covered | Optional temporary FORWARD blackout |
 | Inbound traffic | Not covered | Optional temporary INPUT blackout |
@@ -89,11 +89,14 @@ A normal boot follows this model:
 5. The service loop records the first observed AFWall process time and reads AFWall's startup-delay preferences.
 6. If delayed startup is enabled, the blackout remains in place through the configured delay plus `AFWALL_DELAY_GRACE_SECS`.
 7. Each family snapshot is exposed only after two byte-identical filter-table reads, then the rooted `OUTPUT -> afwall` graph must be structurally closed, non-trivial, order-stable, and unchanged for `SLOW_STABLE_SECS`.
-8. IPv4 and IPv6 are released independently when each family is ready.
-9. Optional transport/radio/VPN restoration is handled after, and does not block family firewall release.
-10. Once handoff is complete, AFWall+ is the only active firewall layer.
+8. IPv4 and IPv6 are handled independently. A family is released only when AFWall proves ownership of it.
+9. If AFWall preferences show that IPv6 is disabled or not controlled, IPv6 enters a terminal held state: the service stops polling that family but preserves the module-owned IPv6 blackout.
+10. Optional transport/radio/VPN restoration is handled after, and does not block family firewall release.
+11. During a normal full handoff AFWall+ becomes the sole active firewall layer. In a held-IPv6 handoff, AFWall owns IPv4 while the module deliberately retains IPv6 protection.
 
 AFWall process visibility establishes a conservative generation epoch; it is not readiness proof. Unlock state, file timestamps, rule density, boot completion, VPN routes, and similar signals remain diagnostics only and cannot shorten the final graph-stability window.
+
+When a fingerprint actually changes, the service immediately verifies and repairs the module-owned blackout for that family. This is event-driven on graph drift, so it adds no extra steady-state polling. During release, optional filter-table FORWARD/INPUT layers are removed before the independent raw OUTPUT layer; raw OUTPUT is removed last.
 
 ## Configuration files
 
@@ -224,6 +227,8 @@ AFWall is starting too slowly or applying rules late. Prefer fixing AFWall start
 ### IPv6 tests fail
 
 That does not automatically mean a leak or module failure. It may mean your network, VPN, AFWall policy, or test target does not support IPv6/ICMPv6. Check the module log and AFWall IPv6 settings.
+
+If AFWall reports IPv6 disabled or not controlled, the module intentionally keeps its IPv6 blackout and records `state/ipv6_held`. This is a terminal safe state, not a polling failure. Use the Magisk Action button only when you deliberately want to remove that held protection.
 
 ### There are three config files
 
