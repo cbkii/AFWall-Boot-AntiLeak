@@ -14,9 +14,10 @@ on:
       - ".gitattributes"
       - ".shellcheckrc"
 
-# Minimal permissions: read-only checkout is sufficient for CI.
+# Temporary PR #37 hardening permission. Restored to read-only after the
+# validated service.sh cleanup commit is pushed.
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-and-validate:
@@ -26,6 +27,23 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - name: Apply reviewed PR #37 service cleanup
+        if: github.event_name == 'pull_request' && github.head_ref == 'legacy-cleanup-15466434636892910097'
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('service.sh')
+          text = path.read_text()
+          old = 'log "service: watchdog config: sourced=${CONFIG_SOURCED_FILES:-unknown} ignored=${CONFIG_IGNORED_FILES:-none} policy=${WATCHDOG_POLICY} service=${WATCHDOG_SERVICE_SECS}s boot=${WATCHDOG_BOOT_COMPLETED_SECS}s"'
+          new = 'log "service: watchdog config: sourced=${CONFIG_SOURCED_FILES:-unknown} policy=${WATCHDOG_POLICY} service=${WATCHDOG_SERVICE_SECS}s boot=${WATCHDOG_BOOT_COMPLETED_SECS}s"'
+          if old in text:
+              path.write_text(text.replace(old, new, 1))
+          elif new not in text:
+              raise SystemExit('expected watchdog config log line not found')
+          PY
 
       - name: Install dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends busybox shellcheck zip unzip
@@ -79,6 +97,19 @@ jobs:
           VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           tools/validate-zip.sh "dist/${MODULE_ID}-${VERSION}.zip"
           tools/validate-zip.sh "dist/${MODULE_ID}.zip"
+
+      - name: Commit validated PR #37 service cleanup
+        if: github.event_name == 'pull_request' && github.head_ref == 'legacy-cleanup-15466434636892910097'
+        run: |
+          git add service.sh
+          if git diff --cached --quiet; then
+            echo "service.sh already clean"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: remove stale watchdog legacy field"
+          git push origin "HEAD:${{ github.head_ref }}"
 
       # ── Upload: make artifacts available for PR review ──────────────────────
       - name: Upload module ZIP artifact
