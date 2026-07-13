@@ -125,6 +125,7 @@ assert_eq 'resolved package is retained for diagnostics' "$ABA_GEN_PACKAGE" "$AF
 CMDLINE_FILE="$TMP/cmdline"
 READ_NUL_PROBE="$TMP/read-nul-probe"
 printf '\0' > "$READ_NUL_PROBE"
+# shellcheck disable=SC3045 # This probe intentionally detects BusyBox ash read -d support.
 if (IFS= read -r -d '' _probe < "$READ_NUL_PROBE") 2>/dev/null; then
   printf '%s\0%s\0' "$AFW_PKG" '--worker' > "$CMDLINE_FILE"
   assert_true 'NUL cmdline fallback matches the base AFWall process' _aba_cmdline_matches_pkg "$CMDLINE_FILE" "$AFW_PKG"
