@@ -30,7 +30,10 @@ jobs:
         run: |
           set -euo pipefail
           cat > /tmp/payload-parts.sha256 <<'EOF'
-          e54152539dcb65ec4c00cc0670580c292ce5c7f9f11f1d85fccb925a3f13e547  .github/reconcile/payload.part.00
+          525cd2131044116107d9ed1a5e2d4bfb134b0715ba9764f9330e76ac0c02cd11  .github/reconcile/payload.part.00.00
+          3d4c52c83bec9e339ed720e70eeb5621361abaf8f74edc28ec99fd79647d3587  .github/reconcile/payload.part.00.01
+          04b9e5e50a27b3667e3bb5f99e85f017179454cc02edf8c4ec308867d4dc04d3  .github/reconcile/payload.part.00.02
+          dff8a9770fc475a70561ea1a5f1c78e59f2b5eb602027c4a7fab99f846add5fe  .github/reconcile/payload.part.00.03
           960a50e820142a496b55dd5bd105b84eb2586df5e3683dafdf34decdf9e60a71  .github/reconcile/payload.part.01
           c278e1e5c0cc570fcdda21cab767f49e9ecd42cade6cc4f4dd40d755d47d24a7  .github/reconcile/payload.part.02
           4fb33023dd28f82aa305e7a3594c2a05b82bc14b51bdaa58236362286bac8713  .github/reconcile/payload.part.03
@@ -49,7 +52,10 @@ jobs:
           EOF
           sha256sum -c /tmp/payload-parts.sha256
           cat \
-            .github/reconcile/payload.part.00 \
+            .github/reconcile/payload.part.00.00 \
+            .github/reconcile/payload.part.00.01 \
+            .github/reconcile/payload.part.00.02 \
+            .github/reconcile/payload.part.00.03 \
             .github/reconcile/payload.part.01 \
             .github/reconcile/payload.part.02 \
             .github/reconcile/payload.part.03 \
