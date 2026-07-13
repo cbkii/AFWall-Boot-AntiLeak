@@ -78,11 +78,17 @@ jobs:
           from pathlib import Path
           path = Path('tools/mock-logic-tests.sh')
           text = path.read_text()
-          old = "if rooted_afwall_graph_from_snapshot \"$multi_orphan_snap\" | grep -q 'comment orphan'; then fail \"rooted graph included rule with undefined later jump target\"; fi"
-          new = "if rooted_afwall_graph_from_snapshot \"$multi_orphan_snap\"; then fail \"rooted graph accepted rule with undefined later jump target\"; fi"
-          if text.count(old) != 1:
-              raise SystemExit('expected one rooted-graph mock assertion to replace')
-          path.write_text(text.replace(old, new))
+          replacements = {
+              "if rooted_afwall_graph_from_snapshot \"$multi_orphan_snap\" | grep -q 'comment orphan'; then fail \"rooted graph included rule with undefined later jump target\"; fi":
+                  "if rooted_afwall_graph_from_snapshot \"$multi_orphan_snap\"; then fail \"rooted graph accepted rule with undefined later jump target\"; fi",
+              "SLOW_STABLE_SECS WATCHDOG_SERVICE_SECS":
+                  "SLOW_STABLE_SECS AFWALL_DELAY_GRACE_SECS AFWALL_PREFS_RETRY_SECS WATCHDOG_SERVICE_SECS",
+          }
+          for old, new in replacements.items():
+              if text.count(old) != 1:
+                  raise SystemExit(f'expected one mock invariant to replace: {old}')
+              text = text.replace(old, new)
+          path.write_text(text)
           PY
 
       - name: Lint reconciled shell surface
