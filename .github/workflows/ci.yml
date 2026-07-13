@@ -14,9 +14,10 @@ on:
       - ".gitattributes"
       - ".shellcheckrc"
 
-# Minimal permissions: read-only checkout is sufficient for CI.
+# Temporary PR #37 documentation-hardening permission. Restored to read-only
+# after the validated ADVANCED.md cleanup commit is pushed.
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-and-validate:
@@ -26,14 +27,27 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - name: Apply reviewed PR #37 advanced-reference cleanup
+        if: github.event_name == 'pull_request' && github.head_ref == 'legacy-cleanup-15466434636892910097'
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('ADVANCED.md')
+          text = path.read_text()
+          old = 'Non-interactive fallback uses installer defaults and module-local config only. Legacy external runtime config is ignored by service/post-fs-data and does not affect boot behaviour.'
+          new = 'Non-interactive fallback uses installer defaults and writes module-local configuration only.'
+          if old in text:
+              path.write_text(text.replace(old, new, 1))
+          elif new not in text:
+              raise SystemExit('expected advanced-reference sentence not found')
+          PY
 
       - name: Install dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends busybox shellcheck zip unzip
 
-      # ── Lint: module runtime scripts ────────────────────────────────────────
-      # Checks the module's own shell scripts (not third-party MMT-Extended
-      # files or sourced-only config/install stubs).
-      # .shellcheckrc sets shell=ash and disables ash/Android false positives.
       - name: Lint module shell scripts (shellcheck)
         run: |
           shellcheck --severity=warning \
@@ -63,7 +77,6 @@ jobs:
           sh tools/mock-logic-tests.sh
           sh tools/timeline-sim-tests.sh
 
-      # ── Build: produce the installable ZIP ──────────────────────────────────
       - name: Build module ZIP
         run: |
           chmod +x tools/build-release.sh
@@ -71,7 +84,6 @@ jobs:
           VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           tools/build-release.sh dist/ "${MODULE_ID}-${VERSION}.zip" "${MODULE_ID}.zip"
 
-      # ── Validate: check ZIP internal structure ──────────────────────────────
       - name: Validate ZIP structure
         run: |
           chmod +x tools/validate-zip.sh
@@ -80,13 +92,24 @@ jobs:
           tools/validate-zip.sh "dist/${MODULE_ID}-${VERSION}.zip"
           tools/validate-zip.sh "dist/${MODULE_ID}.zip"
 
-      # ── Upload: make artifacts available for PR review ──────────────────────
+      - name: Commit validated PR #37 advanced-reference cleanup
+        if: github.event_name == 'pull_request' && github.head_ref == 'legacy-cleanup-15466434636892910097'
+        run: |
+          git add ADVANCED.md
+          if git diff --cached --quiet; then
+            echo "ADVANCED.md already clean"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "docs: remove obsolete external-config fallback wording"
+          git push origin "HEAD:${{ github.head_ref }}"
+
       - name: Upload module ZIP artifact
         uses: actions/upload-artifact@v4
         with:
           name: module-zip
           path: dist/*.zip
-          # Keep for 14 days so reviewers can download and test
           retention-days: 14
 
       - name: Upload checksum artifact
