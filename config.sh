@@ -1,94 +1,114 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v5.0.0 - User Configuration
-# Breaking-change note: v5.0.0 reads only this module-local file and optional
-# config.local.sh in the same directory. Old /data/adb/AFWall-Boot-AntiLeak
-# config files are ignored; clean uninstall, reboot, reinstall, and reconfigure
-# is recommended when upgrading from older releases.
+# AFWall Boot AntiLeak v5.0.0 - packaged configuration defaults.
+# This file is loaded first. Optional config.local.sh is loaded second and
+# overrides matching keys. Use reconfigure.sh instead of editing this file,
+# because a module update may replace it.
 
-# Recommended default for most users; balanced keeps the kernel firewall as the main protection while avoiding disruptive radio toggles. Accepted: balanced, strict, recovery_friendly.
+# What it does: Selects the main protection style used while AFWall+ starts.
+# Accepted values: balanced, strict, recovery_friendly. Default: balanced.
 LEAK_PROTECTION_MODE=balanced
 
-# Controls whether module blocking is enabled. auto, prefer_module, and prefer_afwall all keep the module blackout authoritative; off is the only mode that skips it. Accepted: auto, prefer_module, prefer_afwall, off.
+# What it does: Controls whether the module installs its own boot-time network block.
+# Accepted values: auto, prefer_module, prefer_afwall, off. Default: auto.
 INTEGRATION_MODE=auto
 
-# Seconds between AFWall rule-graph checks; lower values react faster but call iptables more often during the short boot handoff. Default: 2.
+# What it does: Sets how often the module checks the live AFWall+ rules during boot.
+# Accepted values: whole seconds from 1 upward. Examples: 1, 2, 5. Default: 2.
 POLL_INTERVAL_SECS=2
 
-# Compatibility fast-path threshold. The generation guard disables process/file/density acceleration, so this is kept equal to the conservative threshold. Default: 6.
+# What it does: Keeps compatibility with older timing logic; v5 does not use it as a faster release path.
+# Accepted values: whole seconds from 0 upward. Examples: 0, 2, 6. Default: 6.
 FAST_STABLE_SECS=6
 
-# Stable seconds required after AFWall's final eligible generation is visible. Fingerprint drift resets this window. Default: 6.
+# What it does: Sets how long the final AFWall+ rules must stay unchanged before traffic is released.
+# Accepted values: whole seconds from 0 upward. Examples: 3, 6, 10. Default: 6.
 SLOW_STABLE_SECS=6
 
-# Additional seconds after AFWall's configured delayed-start deadline before the final-generation observation window may open. This absorbs Handler scheduling and root-shell startup jitter. Default: 4.
+# What it does: Adds extra time after the AFWall+ startup delay before final rule checking begins.
+# Accepted values: whole seconds from 0 upward. Examples: 0, 4, 10. Default: 4.
 AFWALL_DELAY_GRACE_SECS=4
 
-# Seconds between attempts to discover and parse AFWall's startup preferences while credential-encrypted storage is unavailable. Default: 2.
+# What it does: Sets how often the module retries reading AFWall+ startup settings when they are unavailable.
+# Accepted values: whole seconds from 0 upward. Examples: 1, 2, 5. Default: 2.
 AFWALL_PREFS_RETRY_SECS=2
 
-# Maximum seconds from service start before watchdog action; block is safest, unblock is easier to recover. Default: 300.
+# What it does: Sets the maximum wait from module service start before the watchdog acts.
+# Accepted values: whole seconds from 0 upward. Examples: 120, 300, 600. Default: 300.
 WATCHDOG_SERVICE_SECS=300
 
-# Maximum seconds after Android reports boot complete before watchdog action; useful when the service started early but AFWall never appears. Default: 240.
+# What it does: Sets the maximum wait after Android reports boot complete before the watchdog acts.
+# Accepted values: whole seconds from 0 upward. Examples: 120, 240, 600. Default: 240.
 WATCHDOG_BOOT_COMPLETED_SECS=240
 
-# What to do when proof never arrives: block keeps unresolved protection and logs diagnostics; unblock is recovery-only and may expose traffic without proven AFWall readiness. Accepted: block, unblock. Default: block.
-# June 2026 devtraces repeatedly reached the old boot watchdog immediately before AFWall rules appeared, so do not change this default to unblock to mask slow AFWall startup.
+# What it does: Chooses what happens if the module cannot prove that AFWall+ is ready.
+# Accepted values: block, unblock. Default: block.
 WATCHDOG_POLICY=block
 
-# Protects tethered clients during boot by adding a temporary FORWARD-chain blackout; keep enabled unless you never tether and need maximum compatibility. Accepted: 1 or 0. Default: 1.
+# What it does: Temporarily blocks forwarded traffic from hotspot, USB tethering, or Bluetooth tethering.
+# Accepted values: 1 to enable, 0 to disable. Default: 1.
 BLOCK_FORWARD=1
 
-# Adds temporary inbound INPUT blocking; leave off unless you use AFWall inbound rules and accept possible boot-time service disruption. Accepted: 1 or 0. Default: 0.
+# What it does: Temporarily blocks incoming connections during boot while keeping loopback available.
+# Accepted values: 1 to enable, 0 to disable. Default: 0.
 BLOCK_INPUT=0
 
-# Optional radio/service suppression beneath the firewall: off is fastest and recommended for modern Pixel-style devices; safe is moderate; strict is strongest but may slow Wi-Fi/mobile/VPN recovery. Accepted: off, safe, strict. Default: off.
+# What it does: Optionally pauses lower-level network services in addition to the firewall block.
+# Accepted values: off, safe, strict. Default: off.
 RADIO_SUPPRESSION=off
 
-# AFWall package used to locate the boot process and startup preferences; auto checks free/donate packages, or set a package explicitly. Accepted: auto, dev.ukanth.ufirewall, dev.ukanth.ufirewall.donate, com.ukanth.ufirewall.
+# What it does: Tells the module which AFWall+ package to inspect for its process and settings.
+# Accepted values: auto, dev.ukanth.ufirewall, dev.ukanth.ufirewall.donate, com.ukanth.ufirewall. Default: auto.
 AFWALL_PACKAGE=auto
 
-# Android always-on VPN lockdown handling: off leaves it alone; preserve records/respects existing state; restore may enforce during protection then restore the pre-boot state. Accepted: off, preserve, restore. Default: off.
+# What it does: Controls how Android always-on VPN lockdown is handled during boot and recovery.
+# Accepted values: off, preserve, restore. Default: off.
 VPN_LOCKDOWN_MODE=off
 
-# VPN provider for explicit restore mode. auto means use the already-selected always-on provider; list one package to override.
-# Common examples: ch.protonvpn.android com.wireguard.android com.mullvad.mullvadvpn com.nordvpn.android
+# What it does: Selects the VPN app package used when VPN lockdown restore is enabled.
+# Accepted values: auto, or Android package names separated by spaces or commas. Examples: ch.protonvpn.android, com.wireguard.android. Default: auto.
 VPN_PROVIDER_PACKAGES=auto
 
-# Verbose boot log details for troubleshooting; leave off unless collecting diagnostics. Accepted: 1 or 0. Default: 0.
+# What it does: Enables more detailed boot logging for troubleshooting.
+# Accepted values: 1 to enable, 0 to disable. Default: 0.
 DEBUG=0
 
-# Advanced — normally leave unchanged: these tune rare timing edges after the safe AFWall handoff proof is already independent of unlock/radio/VPN state.
-# Stable seconds before accepting a missing transport subtree as absent for radio restore; does not affect family firewall release. Default: 3.
+# What it does: Sets how long a missing AFWall+ transport chain must stay missing before restore continues.
+# Accepted values: whole seconds from 0 upward. Examples: 1, 3, 5. Default: 3.
 TRANSPORT_ABSENCE_STABLE_SECS=3
 
-# Advanced: shorter post-boot absence window for transport restore once Android is fully up. Default: 2.
+# What it does: Uses a shorter missing-transport wait after Android has completed booting.
+# Accepted values: whole seconds from 0 upward. Examples: 1, 2, 5. Default: 2.
 TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT=2
 
-# Advanced: stable seconds before treating unreachable Wi-Fi/mobile AFWall chains as orphaned instead of blocking restore forever. Default: 3.
+# What it does: Sets how long an unreachable AFWall+ transport chain must remain unchanged before it is treated as unused.
+# Accepted values: whole seconds from 0 upward. Examples: 1, 3, 5. Default: 3.
 TRANSPORT_ORPHAN_STABLE_SECS=3
 
-# Advanced: maximum seconds to tolerate inconclusive transport restore state before forcing a verified restore attempt. Default: 20.
+# What it does: Sets how long an unclear transport state may continue before a verified restore attempt is made.
+# Accepted values: whole seconds from 0 upward. Examples: 10, 20, 30. Default: 20.
 TRANSPORT_INCONCLUSIVE_SECS=20
 
-# Advanced: shorter post-boot inconclusive window for transport restore retries. Default: 8.
+# What it does: Uses a shorter unclear-transport timeout after Android has completed booting.
+# Accepted values: whole seconds from 0 upward. Examples: 5, 8, 15. Default: 8.
 TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT=8
 
-# Advanced: seconds between firewall integrity repairs while a family blackout is still active. Default: 10.
+# What it does: Sets how often the module checks and repairs its firewall block while waiting for AFWall+.
+# Accepted values: whole seconds from 0 upward. Examples: 5, 10, 20. Default: 10.
 BLACKOUT_REASSERT_INTERVAL=10
 
-# Advanced: seconds between lower-layer radio/service suppression reassertions while restore is pending. Default: 15.
+# What it does: Sets how often lower-level radio or service suppression is re-applied while restore is pending.
+# Accepted values: whole seconds from 0 upward. Examples: 5, 15, 30. Default: 15.
 RADIO_REASSERT_INTERVAL=15
 
-# Advanced: seconds between unlock-confidence diagnostic probes; unlock never gates family release. Default: 10.
+# What it does: Sets how often unlock status is checked for diagnostics; unlock does not release the firewall.
+# Accepted values: whole seconds from 0 upward. Examples: 5, 10, 30. Default: 10.
 UNLOCK_POLL_INTERVAL=10
 
-# Advanced: retained for compatibility with older service diagnostics. The generation guard does not use density to shorten readiness. Default: 3.
+# What it does: Keeps a diagnostic rule-count threshold for compatibility; v5 does not use it to release traffic early.
+# Accepted values: whole numbers from 0 upward. Examples: 0, 3, 5. Default: 3.
 AFWALL_RULE_DENSITY_MIN=3
 
-# Internal readiness overrides. This is sourced after common.sh has loaded, so it
-# can replace only the proof primitives while leaving the service state machine,
-# blackout ownership, watchdog, transport restoration and Action recovery intact.
+# Internal readiness overrides. This is not a user configuration key.
 if [ -n "${MODDIR:-}" ] && [ -f "$MODDIR/bin/generation_guard.sh" ]; then
   # shellcheck source=bin/generation_guard.sh
   . "$MODDIR/bin/generation_guard.sh"
