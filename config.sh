@@ -65,7 +65,7 @@ AFWALL_PACKAGE=auto
 VPN_LOCKDOWN_MODE=off
 
 # What it does: Identifies which VPN app may be targeted when restore mode needs to enforce or restore Android lockdown.
-# Accepted values: auto = use the currently configured always-on VPN provider when available; explicit package names = use only those apps, separated by spaces or commas; ch.protonvpn.android = Proton VPN example; com.wireguard.android = WireGuard example. Default: auto.
+# Accepted values: auto = use the currently configured always-on VPN provider when available; explicit package names = use only those apps, separated by spaces or commas; ch.protonvpn.android = Proton VPN example; com.wireguard.android = WireGuard example. Common examples: ch.protonvpn.android com.wireguard.android. Default: auto.
 VPN_PROVIDER_PACKAGES=auto
 
 # What it does: Adds detailed state transitions and diagnostic reasons to boot.log; it does not change firewall decisions.
