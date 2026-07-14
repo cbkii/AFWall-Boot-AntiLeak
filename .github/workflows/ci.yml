@@ -1,15 +1,13 @@
 name: CI
 
-# Run on every pull request and on pushes to the main branch.
-# Skips documentation-only changes that cannot affect installability.
+# Run on pull requests and main-branch pushes. README and ADVANCED changes are
+# included because config documentation is validated against runtime keys.
 on:
   pull_request:
     branches: [master, main]
   push:
     branches: [master, main]
     paths-ignore:
-      - "README.md"
-      - "ADVANCED.md"
       - ".gitignore"
       - ".gitattributes"
       - ".shellcheckrc"
@@ -48,6 +46,7 @@ jobs:
             uninstall.sh \
             tests/test-generation-guard.sh \
             tests/test-reconciliation.sh \
+            tools/config-doc-tests.sh \
             tools/mock-logic-tests.sh \
             tools/timeline-sim-tests.sh \
             tools/build-release.sh \
@@ -55,11 +54,12 @@ jobs:
 
       - name: Test generation-aware AFWall handoff
         run: |
-          chmod +x tests/test-generation-guard.sh tests/test-reconciliation.sh tools/mock-logic-tests.sh tools/timeline-sim-tests.sh
+          chmod +x tests/test-generation-guard.sh tests/test-reconciliation.sh tools/config-doc-tests.sh tools/mock-logic-tests.sh tools/timeline-sim-tests.sh
           busybox ash tests/test-generation-guard.sh
           dash tests/test-generation-guard.sh
           busybox ash tests/test-reconciliation.sh
           dash tests/test-reconciliation.sh
+          sh tools/config-doc-tests.sh
           sh tools/mock-logic-tests.sh
           sh tools/timeline-sim-tests.sh
 
