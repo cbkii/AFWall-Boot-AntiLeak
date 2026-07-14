@@ -93,8 +93,8 @@ Old external configuration files are not used by v5.
 |---|---|
 | **Standard** | Recommended for most users. Uses the kernel firewall block without extra radio toggles. |
 | **Minimal** | Uses the main firewall handoff with fewer optional protections. |
-| **Strict** | Adds stronger temporary protection. Network recovery may take longer. |
-| **Recovery-friendly** | Uses easier automatic recovery if AFWall+ never becomes ready. This is less strict. |
+| **Strict** | Adds inbound and tether protection, strict radio handling, and VPN restore behavior. Network recovery may take longer. |
+| **Recovery-friendly** | Removes module blocks when a timeout is reached without AFWall+ proof. This restores access more easily but is less fail-closed. |
 | **Custom** | Lets you choose individual options. |
 
 Use **Standard** unless you have a clear reason to choose another profile.
@@ -138,36 +138,36 @@ The new settings take effect on the next boot.
 
 ### Configuration keys
 
-| Key | What it does | Accepted values or examples | Default |
+| Key | What changes when you use it | Accepted values and effect | Default |
 |---|---|---|---:|
-| `LEAK_PROTECTION_MODE` | Selects the main protection style while AFWall+ starts. | `balanced`, `strict`, `recovery_friendly` | `balanced` |
-| `INTEGRATION_MODE` | Controls whether the module installs its own boot-time network block. | `auto`, `prefer_module`, `prefer_afwall`, `off` | `auto` |
-| `POLL_INTERVAL_SECS` | Sets how often the module checks the live AFWall+ rules during boot. | Whole seconds from `1` upward; examples: `1`, `2`, `5` | `2` |
-| `FAST_STABLE_SECS` | Keeps compatibility with older timing logic; v5 does not use it as a faster release path. | Whole seconds from `0` upward; examples: `0`, `2`, `6` | `6` |
-| `SLOW_STABLE_SECS` | Sets how long the final AFWall+ rules must stay unchanged before traffic is released. | Whole seconds from `0` upward; examples: `3`, `6`, `10` | `6` |
-| `AFWALL_DELAY_GRACE_SECS` | Adds extra time after the AFWall+ startup delay before final rule checking begins. | Whole seconds from `0` upward; examples: `0`, `4`, `10` | `4` |
-| `AFWALL_PREFS_RETRY_SECS` | Sets how often the module retries reading AFWall+ startup settings. | Whole seconds from `0` upward; examples: `1`, `2`, `5` | `2` |
-| `WATCHDOG_SERVICE_SECS` | Sets the maximum wait from module service start before the watchdog acts. | Whole seconds from `0` upward; examples: `120`, `300`, `600` | `300` |
-| `WATCHDOG_BOOT_COMPLETED_SECS` | Sets the maximum wait after Android reports boot complete before the watchdog acts. | Whole seconds from `0` upward; examples: `120`, `240`, `600` | `240` |
-| `WATCHDOG_POLICY` | Chooses what happens if the module cannot prove that AFWall+ is ready. | `block`, `unblock` | `block` |
-| `BLOCK_FORWARD` | Temporarily blocks forwarded traffic from hotspot, USB tethering, or Bluetooth tethering. | `1` to enable, `0` to disable | `1` |
-| `BLOCK_INPUT` | Temporarily blocks incoming connections during boot while keeping loopback available. | `1` to enable, `0` to disable | `0` |
-| `RADIO_SUPPRESSION` | Optionally pauses lower-level network services in addition to the firewall block. | `off`, `safe`, `strict` | `off` |
-| `AFWALL_PACKAGE` | Selects the AFWall+ package that the module inspects. | `auto`, `dev.ukanth.ufirewall`, `dev.ukanth.ufirewall.donate`, `com.ukanth.ufirewall` | `auto` |
-| `VPN_LOCKDOWN_MODE` | Controls how Android always-on VPN lockdown is handled during boot and recovery. | `off`, `preserve`, `restore` | `off` |
-| `VPN_PROVIDER_PACKAGES` | Selects the VPN app package used by VPN lockdown restore. | `auto`, or package names separated by spaces or commas; examples: `ch.protonvpn.android`, `com.wireguard.android` | `auto` |
-| `DEBUG` | Enables more detailed boot logging. | `1` to enable, `0` to disable | `0` |
-| `TRANSPORT_ABSENCE_STABLE_SECS` | Sets how long a missing AFWall+ transport chain must stay missing before restore continues. | Whole seconds from `0` upward; examples: `1`, `3`, `5` | `3` |
-| `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT` | Uses a shorter missing-transport wait after Android completes booting. | Whole seconds from `0` upward; examples: `1`, `2`, `5` | `2` |
-| `TRANSPORT_ORPHAN_STABLE_SECS` | Sets how long an unreachable transport chain must remain unchanged before it is treated as unused. | Whole seconds from `0` upward; examples: `1`, `3`, `5` | `3` |
-| `TRANSPORT_INCONCLUSIVE_SECS` | Sets how long an unclear transport state may continue before a verified restore attempt. | Whole seconds from `0` upward; examples: `10`, `20`, `30` | `20` |
-| `TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT` | Uses a shorter unclear-transport timeout after Android completes booting. | Whole seconds from `0` upward; examples: `5`, `8`, `15` | `8` |
-| `BLACKOUT_REASSERT_INTERVAL` | Sets how often the module checks and repairs its firewall block while waiting for AFWall+. | Whole seconds from `0` upward; examples: `5`, `10`, `20` | `10` |
-| `RADIO_REASSERT_INTERVAL` | Sets how often lower-level radio or service suppression is re-applied while restore is pending. | Whole seconds from `0` upward; examples: `5`, `15`, `30` | `15` |
-| `UNLOCK_POLL_INTERVAL` | Sets how often unlock status is checked for diagnostics. Unlock does not release the firewall. | Whole seconds from `0` upward; examples: `5`, `10`, `30` | `10` |
-| `AFWALL_RULE_DENSITY_MIN` | Keeps a diagnostic rule-count threshold for compatibility. v5 does not use it to release traffic early. | Whole numbers from `0` upward; examples: `0`, `3`, `5` | `3` |
+| `LEAK_PROTECTION_MODE` | Records the installer profile family in logs and support reports. Actual blocks, radio handling, VPN handling, and timeout behavior use separate keys. | `balanced` = Standard or Minimal profile label; `strict` = Strict profile label; `recovery_friendly` = Recovery-friendly profile label. Changing only this key does not change the other settings. | `balanced` |
+| `INTEGRATION_MODE` | Decides whether this module installs its early firewall block when an AFWall-owned startup script is present. | `auto` = install the module block and supplement any AFWall script; `prefer_module` = always install the module block; `prefer_afwall` = skip the module block only when an AFWall-owned `afwallstart` script is detected, otherwise install it; `off` = never install this module's boot block. | `auto` |
+| `POLL_INTERVAL_SECS` | Trades faster AFWall+ handoff detection against extra CPU use and iptables reads during boot. | Whole seconds from `1` upward; examples: `1`, `2`, `5`. Lower values react sooner but perform more checks. | `2` |
+| `FAST_STABLE_SECS` | Keeps the old fast timing field available for compatibility and post-boot calculations. The v5 generation guard does not use it to bypass full rule proof. | Whole seconds from `0` upward; examples: `0`, `2`, `6`. | `6` |
+| `SLOW_STABLE_SECS` | Requires the final ordered AFWall+ rule graph to stay unchanged before temporary OUTPUT protection is removed. | Whole seconds from `0` upward; examples: `3`, `6`, `10`. | `6` |
+| `AFWALL_DELAY_GRACE_SECS` | Adds scheduling margin after AFWall+'s own startup delay so the module does not release traffic during a delayed second rule pass. | Whole seconds from `0` upward; examples: `0`, `4`, `10`. | `4` |
+| `AFWALL_PREFS_RETRY_SECS` | Limits repeated reads of encrypted AFWall+ preference files while they are unavailable, reducing boot I/O. | Whole seconds from `0` upward; examples: `1`, `2`, `5`. | `2` |
+| `WATCHDOG_SERVICE_SECS` | Starts the first timeout decision after the module worker has run for this long, even if Android has not finished booting. | Whole seconds from `0` upward; examples: `120`, `300`, `600`. | `300` |
+| `WATCHDOG_BOOT_COMPLETED_SECS` | Starts a second timeout decision after Android reports boot complete, preventing an endless offline state after the framework is ready. | Whole seconds from `0` upward; examples: `120`, `240`, `600`. | `240` |
+| `WATCHDOG_POLICY` | Defines the safety result when a timeout is reached without complete AFWall+ readiness proof. | `block` = keep unresolved traffic blocked and continue low-rate diagnostics; `unblock` = remove module-owned blocks and restore connectivity even though AFWall+ readiness was not proven. | `block` |
+| `BLOCK_FORWARD` | Extends temporary protection to traffic routed through the phone, including hotspot, USB tethering, and Bluetooth tethering. | `1` = enable; `0` = disable. | `1` |
+| `BLOCK_INPUT` | Rejects new inbound network connections during handoff while keeping local loopback traffic available. | `1` = enable; `0` = disable. | `0` |
+| `RADIO_SUPPRESSION` | Chooses between firewall-only protection and additional Wi-Fi, mobile-data, interface, and tether-service changes. | `off` = firewall-only with no radio or service changes; `safe` = currently the same non-disruptive radio behavior as `off`, retained as a separate profile value; `strict` = disable Wi-Fi and mobile data, quiesce interfaces, and stop tethering until restore. | `off` |
+| `AFWALL_PACKAGE` | Determines which app process and preference directory are used to read AFWall+ startup delay and IPv6 ownership. | `auto` = detect Donate, then Free, then legacy; `dev.ukanth.ufirewall` = AFWall+ Free; `dev.ukanth.ufirewall.donate` = AFWall+ Donate; `com.ukanth.ufirewall` = legacy AFWall package. | `auto` |
+| `VPN_LOCKDOWN_MODE` | Chooses whether Android always-on VPN and lockdown state is ignored, observed, or actively enforced and later restored. | `off` = do not manage lockdown state; `preserve` = record the existing state and avoid settings writes; `restore` = enforce the selected provider during protection and restore the recorded pre-boot state after handoff. | `off` |
+| `VPN_PROVIDER_PACKAGES` | Identifies which VPN app may be targeted when `restore` mode needs to enforce or restore Android lockdown. | `auto` = use the currently configured always-on VPN provider when available; explicit package names = use only those apps, separated by spaces or commas; `ch.protonvpn.android` = Proton VPN example; `com.wireguard.android` = WireGuard example. | `auto` |
+| `DEBUG` | Adds detailed state transitions and decision reasons to `boot.log`. It does not change firewall decisions. | `1` = enable; `0` = disable. | `0` |
+| `TRANSPORT_ABSENCE_STABLE_SECS` | Allows network-service restoration after an expected AFWall+ Wi-Fi or mobile subtree has remained missing, avoiding a permanent wait on devices that do not create it. | Whole seconds from `0` upward; examples: `1`, `3`, `5`. | `3` |
+| `TRANSPORT_ABSENCE_STABLE_SECS_POST_BOOT` | Shortens the missing-subtree wait after Android is fully booted so connectivity is not delayed unnecessarily. | Whole seconds from `0` upward; examples: `1`, `2`, `5`. | `2` |
+| `TRANSPORT_ORPHAN_STABLE_SECS` | Allows restoration when a transport subtree exists but is not reachable from the live AFWall+ graph, avoiding deadlock on stale chains. | Whole seconds from `0` upward; examples: `1`, `3`, `5`. | `3` |
+| `TRANSPORT_INCONCLUSIVE_SECS` | Forces a verified transport restore attempt after the transport state cannot be classified for this long. | Whole seconds from `0` upward; examples: `10`, `20`, `30`. | `20` |
+| `TRANSPORT_INCONCLUSIVE_SECS_POST_BOOT` | Uses a shorter unclassified-state limit after Android reports boot complete. | Whole seconds from `0` upward; examples: `5`, `8`, `15`. | `8` |
+| `BLACKOUT_REASSERT_INTERVAL` | Limits how often module-owned firewall chains are rechecked and repaired while handoff is pending. Lower values increase iptables I/O. | Whole seconds from `0` upward; examples: `5`, `10`, `20`. | `10` |
+| `RADIO_REASSERT_INTERVAL` | Limits how often strict lower-level network suppression is reapplied before restore. It has no practical effect when radio suppression is `off`. | Whole seconds from `0` upward; examples: `5`, `15`, `30`. | `15` |
+| `UNLOCK_POLL_INTERVAL` | Controls diagnostic checks for user-unlock and credential-storage availability. Unlock never proves AFWall+ readiness or releases traffic. | Whole seconds from `0` upward; examples: `5`, `10`, `30`. | `10` |
+| `AFWALL_RULE_DENSITY_MIN` | Preserves an old diagnostic rule-count threshold for log compatibility. v5 release decisions ignore it. | Whole numbers from `0` upward; examples: `0`, `3`, `5`. | `3` |
 
-Most users should change only the profile, watchdog policy, tethering protection, inbound protection, radio suppression, VPN handling, and debug logging.
+Most users should change only the profile, timeout action, tethering protection, inbound protection, radio handling, VPN handling, and detailed logging.
 
 ## Normal boot behaviour
 
@@ -252,11 +252,11 @@ Check these items:
 
 Use the Magisk Action button to restore access, then inspect the boot log.
 
-### Network access returns only after the watchdog
+### Network access returns only after timeout recovery
 
 AFWall+ probably started or applied rules too late.
 
-Check the AFWall+ startup delay and root access. Do not change the watchdog to `unblock` only to hide a startup problem. `unblock` can restore connectivity without proof that AFWall+ is ready.
+Check the AFWall+ startup delay and root access. Do not change `WATCHDOG_POLICY` to `unblock` only to hide a startup problem. `unblock` can restore connectivity without proof that AFWall+ is ready.
 
 ### IPv6 remains blocked
 
@@ -268,7 +268,7 @@ If AFWall+ does not control IPv6, the module keeps IPv6 blocked by design. Use t
 
 Use the **Standard** profile and keep radio suppression off unless your device needs it.
 
-Stricter profiles can delay network recovery because they also manage lower-level network services.
+The **Strict** profile can delay network recovery because it also changes lower-level network services.
 
 ## What this module does not do
 
@@ -284,6 +284,6 @@ See [ADVANCED.md](ADVANCED.md) for:
 
 - detailed boot stages;
 - firewall rule verification;
-- watchdog behaviour;
+- timeout and recovery behaviour;
 - VPN lockdown handling;
 - technical diagnostics and troubleshooting details.
