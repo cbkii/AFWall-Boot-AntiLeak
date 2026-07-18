@@ -18,11 +18,11 @@ jobs:
           ref: perf-improvements-2732395343243030959
           fetch-depth: 0
 
-      - name: Install dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends busybox shellcheck zip unzip
-
       - name: Apply reviewed hardening patch
         run: python3 tools/pr40-hardening.py .
+
+      - name: Install dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends busybox shellcheck zip unzip
 
       - name: Restore permanent read-only CI and add regression suites
         run: |
@@ -84,7 +84,7 @@ jobs:
 
       - name: Commit validated final branch
         run: |
-          rm -f tools/pr40-hardening.py
+          rm -f tools/pr40-hardening.py tools/pr40-trigger.txt
           git add -A
           git reset -- dist 2>/dev/null || true
           git config user.name 'github-actions[bot]'
