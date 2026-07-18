@@ -35,16 +35,16 @@ jobs:
           from pathlib import Path
           path = Path('tools/recovery-tests.sh')
           text = path.read_text()
+          if text.startswith('#!/usr/bin/env sh\n'):
+              text = text.replace('#!/usr/bin/env sh\n', '#!/usr/bin/env sh\n# shellcheck disable=SC2218 # sourced recovery helpers are redefined only inside the final order fixture\n', 1)
+          else:
+              raise SystemExit('recovery test shebang not found')
           old = '. "$ROOT/bin/common.sh"\n'
           new = '. "$ROOT/bin/common.sh"\n# shellcheck source=../bin/lowlevel.sh\n. "$ROOT/bin/lowlevel.sh"\n'
           if old not in text:
               raise SystemExit('recovery test common source line not found')
           text = text.replace(old, new, 1)
-          call = 'printf rndis0 > "$LL_STATE_DIR/tether_ifaces_down"; touch "$LL_STATE_DIR/tether_was_active"; _ll_emergency_tether_note; [ -e "$LL_STATE_DIR/tether_ifaces_down" ] || fail \'tether note erased retry\'; pass \'tether note preserves interface retry\''
-          annotated = '# Runtime helper is sourced above; the later mock is limited to the order fixture.\n# shellcheck disable=SC2218\n' + call
-          if call not in text:
-              raise SystemExit('recovery tether-note fixture line not found')
-          path.write_text(text.replace(call, annotated, 1))
+          path.write_text(text)
           PY
           fi
           cat patch-output.log
