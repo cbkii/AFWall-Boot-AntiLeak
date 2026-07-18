@@ -234,22 +234,22 @@ fi
 # Remove files outside of module directory
 ui_print "- Removing old files"
 
-if [ -f $INFO ]; then
-  while IFS= read -r LINE; do
+if [ -f "$INFO" ]; then
+  while IFS= read -r LINE || [ -n "$LINE" ]; do
     case "$LINE" in
       *~) continue ;;
     esac
     if [ -f "$LINE~" ]; then
-      mv -f $LINE~ $LINE
+      mv -f -- "$LINE~" "$LINE"
     else
-      rm -f $LINE
+      rm -f -- "$LINE"
       while true; do
-        LINE=$(dirname $LINE)
-        [ "$(ls -A $LINE 2>/dev/null)" ] && break 1 || rm -rf $LINE
+        LINE="$(dirname -- "$LINE")"
+        [ "$(ls -A "$LINE" 2>/dev/null)" ] && break 1 || rm -rf -- "$LINE"
       done
     fi
-  done < $INFO
-  rm -f $INFO
+  done < "$INFO"
+  rm -f -- "$INFO"
 fi
 
 ### Install

@@ -518,7 +518,7 @@ fi
         local _wifi_settle="$TRANSPORT_SETTLE_SECS_EFFECTIVE"
         [ "$_boot_complete_now" = "1" ] && _wifi_settle="$TRANSPORT_SETTLE_SECS_POST_BOOT_EFFECTIVE"
         if [ "$_wifi_stable" -ge "$_wifi_settle" ]; then
-          log_on_transition "wifi_restore" "stable" "service: wifi transport: subtree stable=${_wifi_stable}s fp=$wifi_last_fp — wifi ready; attempting restore"
+          log_on_transition "wifi_restore" "stable" "service: wifi transport: subtree stable=${_wifi_stable}s fp=$wifi_last_fp — Wi-Fi ready; attempting restore"
           if lowlevel_restore_wifi_if_allowed; then
             wifi_done=1
             wifi_pending_since=0
