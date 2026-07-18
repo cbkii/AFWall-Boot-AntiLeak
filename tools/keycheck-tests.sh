@@ -52,7 +52,7 @@ check_elf() {
     if readelf -l "$file" 2>/dev/null | grep -Eq 'INTERP|Requesting program interpreter'; then
         fail "$file has a program interpreter"
     fi
-    if readelf -d "$file" 2>&1 | grep -vq 'There is no dynamic section'; then
+    if readelf -d "$file" 2>&1 | grep -q '^Dynamic section'; then
         fail "$file has a dynamic section"
     fi
 }
