@@ -1,8 +1,8 @@
 name: PR 40 Hardening Gate
 
 on:
-  pull_request_target:
-    types: [reopened]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: write
@@ -10,9 +10,10 @@ permissions:
 jobs:
   harden:
     if: >-
-      github.event.pull_request.number == 40 &&
-      github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.head.ref == 'perf-improvements-2732395343243030959'
+      github.event.issue.number == 40 &&
+      github.event.issue.pull_request != null &&
+      github.event.comment.author_association == 'OWNER' &&
+      github.event.comment.body == '/run-pr40-hardening'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout exact PR branch
@@ -20,6 +21,15 @@ jobs:
         with:
           ref: perf-improvements-2732395343243030959
           fetch-depth: 0
+
+      - name: Verify exact same-repository PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          head_ref="$(gh api repos/${{ github.repository }}/pulls/40 --jq .head.ref)"
+          head_repo="$(gh api repos/${{ github.repository }}/pulls/40 --jq .head.repo.full_name)"
+          [ "$head_ref" = 'perf-improvements-2732395343243030959' ]
+          [ "$head_repo" = '${{ github.repository }}' ]
 
       - name: Install validation dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends busybox shellcheck zip unzip
@@ -36,11 +46,22 @@ jobs:
           p=Path('.github/workflows/ci.yml')
           t=p.read_text()
           t=t.replace(
-              '            tests/test-generation-guard.sh \\\n            tests/test-reconciliation.sh \\\n',
-              '            tests/test-common-helpers.sh \\\n            tests/test-generation-guard.sh \\\n            tests/test-reconciliation.sh \\\n', 1)
+              '            tests/test-generation-guard.sh \
+            tests/test-reconciliation.sh \
+',
+              '            tests/test-common-helpers.sh \
+            tests/test-generation-guard.sh \
+            tests/test-reconciliation.sh \
+', 1)
           t=t.replace(
-              '            tools/mock-logic-tests.sh \\\n            tools/timeline-sim-tests.sh \\\n',
-              '            tools/mock-logic-tests.sh \\\n            tools/recovery-tests.sh \\\n            tools/timeline-sim-tests.sh \\\n            tools/transport-readiness-tests.sh \\\n', 1)
+              '            tools/mock-logic-tests.sh \
+            tools/timeline-sim-tests.sh \
+',
+              '            tools/mock-logic-tests.sh \
+            tools/recovery-tests.sh \
+            tools/timeline-sim-tests.sh \
+            tools/transport-readiness-tests.sh \
+', 1)
           old='''          chmod +x tests/test-generation-guard.sh tests/test-reconciliation.sh tools/config-doc-tests.sh tools/mock-logic-tests.sh tools/timeline-sim-tests.sh
           busybox ash tests/test-generation-guard.sh
 '''
