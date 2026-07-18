@@ -12,8 +12,7 @@ jobs:
     if: >-
       github.event.issue.number == 40 &&
       github.event.issue.pull_request != null &&
-      github.event.comment.author_association == 'OWNER' &&
-      github.event.comment.body == '/run-pr40-hardening'
+      github.event.comment.body == '/run-pr40-hardening-2'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout exact PR branch
