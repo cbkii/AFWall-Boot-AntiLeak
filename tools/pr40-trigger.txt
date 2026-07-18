@@ -1,1 +1,1 @@
-Temporary trigger for PR #40 hardening workflow after recovery-test source fix. Remove before merge.
+Temporary trigger for PR #40 hardening workflow after final ShellCheck annotation. Remove before merge.
