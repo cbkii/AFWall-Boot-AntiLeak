@@ -41,7 +41,7 @@ jobs:
               raise SystemExit('recovery test common source line not found')
           text = text.replace(old, new, 1)
           call = 'printf rndis0 > "$LL_STATE_DIR/tether_ifaces_down"; touch "$LL_STATE_DIR/tether_was_active"; _ll_emergency_tether_note; [ -e "$LL_STATE_DIR/tether_ifaces_down" ] || fail \'tether note erased retry\'; pass \'tether note preserves interface retry\''
-          annotated = '# shellcheck disable=SC2218 # runtime helper is sourced above; later mock is limited to the order fixture\n' + call
+          annotated = '# Runtime helper is sourced above; the later mock is limited to the order fixture.\n# shellcheck disable=SC2218\n' + call
           if call not in text:
               raise SystemExit('recovery tether-note fixture line not found')
           path.write_text(text.replace(call, annotated, 1))
