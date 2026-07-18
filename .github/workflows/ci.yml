@@ -16,18 +16,36 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: perf-improvements-2732395343243030959
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Apply reviewed hardening patch
-        run: python3 tools/pr40-hardening.py .
+        run: |
+          status=0
+          python3 tools/pr40-hardening.py . > patch-output.log 2>&1 || status=$?
+          cat patch-output.log
+          printf '%s\n' "$status" > patch-status.txt
+
+      - name: Upload patch diagnostic
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr40-patch-diagnostic
+          path: |
+            patch-output.log
+            patch-status.txt
+          retention-days: 1
+
+      - name: Stop if patch application failed
+        run: |
+          status="$(cat patch-status.txt)"
+          [ "$status" = 0 ] || exit "$status"
 
       - name: Install dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends busybox shellcheck zip unzip
 
       - name: Restore permanent read-only CI and add regression suites
         run: |
-          git fetch origin main
-          git show origin/main:.github/workflows/ci.yml > .github/workflows/ci.yml
+          git fetch --depth=1 origin main
+          git show FETCH_HEAD:.github/workflows/ci.yml > .github/workflows/ci.yml
           python3 - <<'PY'
           from pathlib import Path
           p = Path('.github/workflows/ci.yml')
@@ -84,7 +102,7 @@ jobs:
 
       - name: Commit validated final branch
         run: |
-          rm -f tools/pr40-hardening.py tools/pr40-trigger.txt
+          rm -f tools/pr40-hardening.py tools/pr40-trigger.txt patch-output.log patch-status.txt
           git add -A
           git reset -- dist 2>/dev/null || true
           git config user.name 'github-actions[bot]'
