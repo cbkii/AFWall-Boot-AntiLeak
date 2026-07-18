@@ -30,6 +30,18 @@ jobs:
           PY
           status=0
           python3 tools/pr40-hardening.py . > patch-output.log 2>&1 || status=$?
+          if [ "$status" = 0 ]; then
+            python3 - <<'PY'
+          from pathlib import Path
+          path = Path('tools/recovery-tests.sh')
+          text = path.read_text()
+          old = '. "$ROOT/bin/common.sh"\n'
+          new = '. "$ROOT/bin/common.sh"\n# shellcheck source=../bin/lowlevel.sh\n. "$ROOT/bin/lowlevel.sh"\n'
+          if old not in text:
+              raise SystemExit('recovery test common source line not found')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          fi
           cat patch-output.log
           printf '%s\n' "$status" > patch-status.txt
 
