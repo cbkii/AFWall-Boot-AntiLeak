@@ -7,8 +7,9 @@
  *   42  = VOL- pressed
  *   1   = timeout / no key / error
  *
- * Compile for Android arm64 (static):
+ * Compile for Android arm64 and x86_64 (static):
  *   aarch64-linux-gnu-gcc -O2 -static -o keycheck-arm64 keycheck.c
+ *   x86_64-linux-gnu-gcc -O2 -static -o keycheck-x86_64 keycheck.c
  */
 
 #include <unistd.h>
@@ -31,15 +32,15 @@
 #define EXIT_VOLDOWN  42
 #define EXIT_TIMEOUT  1
 
-/* Input event struct layout for 64-bit Linux (arm64):
+/* Input event struct layout for 64-bit Linux (arm64 and x86_64):
  *   struct timeval { long tv_sec; long tv_usec; }  = 16 bytes
  *   __u16 type, __u16 code, __s32 value             =  8 bytes
  *   total = 24 bytes
  * We define our own to avoid header portability issues.
  */
 struct ie {
-    unsigned long tv_sec;   /* 8 bytes on arm64 */
-    unsigned long tv_usec;  /* 8 bytes on arm64 */
+    unsigned long tv_sec;   /* 8 bytes on 64-bit architectures */
+    unsigned long tv_usec;  /* 8 bytes on 64-bit architectures */
     unsigned short type;
     unsigned short code;
     int value;
