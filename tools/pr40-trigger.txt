@@ -1,1 +1,1 @@
-Temporary trigger for PR #40 hardening workflow after exact ShellCheck directive fix. Remove before merge.
+Temporary trigger for PR #40 hardening workflow after file-scope ShellCheck directive. Remove before merge.
