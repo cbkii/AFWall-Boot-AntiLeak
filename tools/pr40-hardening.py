@@ -1,5 +1,5 @@
 from pathlib import Path
-import re, sys, base64
+import re, sys
 root=Path(sys.argv[1] if len(sys.argv)>1 else '.')
 
 p=root/'bin/lowlevel.sh'; t=p.read_text()
@@ -177,9 +177,12 @@ echo 'All recovery tests passed.'
 
 p=root/'tools/timeline-sim-tests.sh'; text=p.read_text()
 start=text.find('\ntest_transport_readiness() {')
-end=text.find('\necho "All timeline simulation tests passed."', start)
-if start < 0 or end < 0: raise SystemExit('timeline dead-test block not found')
-p.write_text(text[:start] + text[end:])
+if start >= 0:
+    end=text.find('\necho "All timeline simulation tests passed."', start)
+    if end < 0: raise SystemExit('timeline test block has no final summary marker')
+    p.write_text(text[:start] + text[end:])
+elif 'test_transport_readiness()' in text:
+    raise SystemExit('unexpected residual transport test declaration')
 
 transport='''#!/usr/bin/env sh
 set -eu
