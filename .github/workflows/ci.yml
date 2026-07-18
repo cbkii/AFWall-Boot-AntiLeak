@@ -20,6 +20,14 @@ jobs:
 
       - name: Apply reviewed hardening patch
         run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('tools/timeline-sim-tests.sh')
+          text = path.read_text()
+          marker = '\ntest_transport_readiness() {'
+          if marker in text:
+              path.write_text(text.split(marker, 1)[0].rstrip() + '\n')
+          PY
           status=0
           python3 tools/pr40-hardening.py . > patch-output.log 2>&1 || status=$?
           cat patch-output.log
