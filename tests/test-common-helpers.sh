@@ -28,5 +28,10 @@ ps(){ echo 'u0 1 0 S dev.ukanth.ufirewall.donate:root'; }
 assert_true 'ps finds subprocess' afwall_process_present dev.ukanth.ufirewall.donate
 ps(){ echo 'u0 1 0 S com.example'; }
 assert_false 'usable ps miss is authoritative' afwall_process_present dev.ukanth.ufirewall.donate
+ps(){ return 1; }
+PROC_FALLBACK_CALLED=0
+_afwall_proc_matches_pkg(){ PROC_FALLBACK_CALLED=1; return 0; }
+assert_true 'failed ps forms fall back to proc' afwall_process_present dev.ukanth.ufirewall.donate
+[ "$PROC_FALLBACK_CALLED" = 1 ] && pass 'proc fallback was invoked after unusable ps' || fail 'proc fallback was not invoked after unusable ps'
 [ "$FAIL" = 0 ] || exit 1
 echo 'All common helper tests passed.'
