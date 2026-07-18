@@ -304,3 +304,38 @@ ic_apply_auto_vpn_defaults >/dev/null
 pass "installer always-on VPN auto-enable"
 
 echo "All mock logic tests passed."
+
+test_emergency_restore_fixtures() {
+  LL_STATE_DIR="$TMP/ll_state"
+  mkdir -p "$LL_STATE_DIR"
+  _ll_state_exists() { [ -f "${LL_STATE_DIR}/$1" ]; }
+  _ll_state_rm() { rm -f "${LL_STATE_DIR}/$1"; }
+
+  _find_cmd() { :; }
+  log_on_transition() { :; }
+  lowlevel_vpn_lockdown_release_if_needed() { :; }
+
+  REPO_ROOT_FOR_MOCK="$(cd "$(dirname "$0")/.." && pwd)"
+  sed -n '/^_ll_emergency_restore_wifi/,/^}/p' "$REPO_ROOT_FOR_MOCK/bin/lowlevel.sh" > "$TMP/ll_mock.sh"
+  . "$TMP/ll_mock.sh"
+
+  touch "${LL_STATE_DIR}/wifi_was_enabled"
+  has_cmd() { [ "$1" = "cmd" ] && return 0 || return 1; }
+  cmd() { return 0; }
+  _ll_emergency_restore_wifi
+  if [ -f "${LL_STATE_DIR}/wifi_was_enabled" ]; then
+    fail "emergency_restore success kept marker"
+  else
+    pass "emergency_restore success removed marker"
+  fi
+
+  touch "${LL_STATE_DIR}/wifi_was_enabled"
+  has_cmd() { return 1; }
+  _ll_emergency_restore_wifi
+  if [ -f "${LL_STATE_DIR}/wifi_was_enabled" ]; then
+    pass "emergency_restore fail kept marker"
+  else
+    fail "emergency_restore fail removed marker"
+  fi
+}
+test_emergency_restore_fixtures

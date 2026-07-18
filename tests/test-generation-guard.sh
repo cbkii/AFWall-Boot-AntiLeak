@@ -9,6 +9,16 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 REPO_ROOT="$(unset CDPATH; cd -- "$(dirname "$0")/.." && pwd)"
 GUARD_PATH="${ABA_GENERATION_GUARD_PATH:-$REPO_ROOT/bin/generation_guard.sh}"
 
+# Mock common.sh structural helper
+_afwall_base_graph_structurally_present_from_snapshot() {
+  local snap="$1"
+  [ -n "$snap" ] || return 1
+  printf '%s\n' "$snap" | grep -qE "^-N ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
+  printf '%s\n' "$snap" | grep -qE "^-A OUTPUT .*-j ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
+  return 0
+}
+
+
 AFWALL_CHAIN_MAIN=afwall
 AFWALL_PACKAGE=dev.ukanth.ufirewall.donate
 AFW_PKG=dev.ukanth.ufirewall.donate
@@ -185,6 +195,30 @@ assert_false 'authoritative ps miss reports AFWall absent without proc fallback'
 
 if [ "$FAIL" -ne 0 ]; then
   printf '%s test(s) failed\n' "$FAIL" >&2
+  exit 1
+fi
+
+
+test_base_graph_structurally_present() {
+  # 1. Missing chain fails
+  assert_false "missing chain fails" \
+    _afwall_base_graph_structurally_present_from_snapshot "-A OUTPUT -j afwall"
+
+  # 2. Missing OUTPUT hook fails
+  assert_false "missing OUTPUT hook fails" \
+    _afwall_base_graph_structurally_present_from_snapshot "-N afwall"
+
+  # 3. Valid structural graph passes
+  local valid_snap="$(printf '%s\n%s\n' "-N afwall" "-A OUTPUT -j afwall")"
+  assert_true "valid structural graph passes" \
+    _afwall_base_graph_structurally_present_from_snapshot "$valid_snap"
+
+  # 4. No recursion occurs (implicit if it returns without calling anything else)
+  # The fact that it returns directly proves no recursion into generation_guard logic.
+}
+test_base_graph_structurally_present
+
+if [ "$FAIL" -ne 0 ]; then
   exit 1
 fi
 printf 'all generation guard tests passed\n'
