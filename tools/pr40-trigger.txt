@@ -1,1 +1,1 @@
-Temporary trigger for PR #40 hardening workflow, final validation attempt. Remove before merge.
+Temporary trigger for PR #40 hardening workflow, lint capture. Remove before merge.
