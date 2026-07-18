@@ -1,0 +1,1 @@
+Temporary trigger for the validated PR #40 hardening workflow. Remove before merge.
