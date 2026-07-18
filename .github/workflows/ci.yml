@@ -1,137 +1,63 @@
 name: CI
 
+# Run on pull requests and main-branch pushes. README and ADVANCED changes are
+# included because config documentation is validated against runtime keys.
 on:
   pull_request:
-    branches: [main]
+    branches: [master, main]
+  push:
+    branches: [master, main]
+    paths-ignore:
+      - ".gitignore"
+      - ".gitattributes"
+      - ".shellcheckrc"
 
+# Minimal permissions: read-only checkout is sufficient for CI.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  harden-and-validate:
-    if: github.head_ref == 'perf-improvements-2732395343243030959'
+  build-and-validate:
+    name: Build and Validate Module ZIP
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout exact PR head
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          ref: perf-improvements-2732395343243030959
-          fetch-depth: 1
-
-      - name: Apply reviewed hardening patch
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          path = Path('tools/timeline-sim-tests.sh')
-          text = path.read_text()
-          marker = '\ntest_transport_readiness() {'
-          if marker in text:
-              path.write_text(text.split(marker, 1)[0].rstrip() + '\n')
-          PY
-          status=0
-          python3 tools/pr40-hardening.py . > patch-output.log 2>&1 || status=$?
-          if [ "$status" = 0 ]; then
-            python3 - <<'PY'
-          from pathlib import Path
-          path = Path('tools/recovery-tests.sh')
-          text = path.read_text()
-          if text.startswith('#!/usr/bin/env sh\n'):
-              text = text.replace('#!/usr/bin/env sh\n', '#!/usr/bin/env sh\n# shellcheck disable=SC2218 # sourced recovery helpers are redefined only inside the final order fixture\n', 1)
-          else:
-              raise SystemExit('recovery test shebang not found')
-          old = '. "$ROOT/bin/common.sh"\n'
-          new = '. "$ROOT/bin/common.sh"\n# shellcheck source=../bin/lowlevel.sh\n. "$ROOT/bin/lowlevel.sh"\n'
-          if old not in text:
-              raise SystemExit('recovery test common source line not found')
-          text = text.replace(old, new, 1)
-          path.write_text(text)
-          PY
-          fi
-          cat patch-output.log
-          printf '%s\n' "$status" > patch-status.txt
-
-      - name: Upload patch diagnostic
-        uses: actions/upload-artifact@v4
-        with:
-          name: pr40-patch-diagnostic
-          path: |
-            patch-output.log
-            patch-status.txt
-          retention-days: 1
-
-      - name: Stop if patch application failed
-        run: |
-          status="$(cat patch-status.txt)"
-          [ "$status" = 0 ] || exit "$status"
 
       - name: Install dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends busybox shellcheck zip unzip
 
-      - name: Restore permanent read-only CI and add regression suites
+      # ── Lint: module runtime scripts ────────────────────────────────────────
+      # Checks the module's own shell scripts (not third-party MMT-Extended
+      # files or sourced-only config/install stubs).
+      # .shellcheckrc sets shell=ash and disables ash/Android false positives.
+      - name: Lint module shell scripts (shellcheck)
         run: |
-          git fetch --depth=1 origin main
-          git show FETCH_HEAD:.github/workflows/ci.yml > .github/workflows/ci.yml
-          python3 - <<'PY'
-          from pathlib import Path
-          p = Path('.github/workflows/ci.yml')
-          text = p.read_text()
-          text = text.replace(
-              '            tests/test-generation-guard.sh \\\n            tests/test-reconciliation.sh \\\n',
-              '            tests/test-common-helpers.sh \\\n            tests/test-generation-guard.sh \\\n            tests/test-reconciliation.sh \\\n', 1)
-          text = text.replace(
-              '            tools/mock-logic-tests.sh \\\n            tools/timeline-sim-tests.sh \\\n',
-              '            tools/mock-logic-tests.sh \\\n            tools/recovery-tests.sh \\\n            tools/timeline-sim-tests.sh \\\n            tools/transport-readiness-tests.sh \\\n', 1)
-          old = '          chmod +x tests/test-generation-guard.sh tests/test-reconciliation.sh tools/config-doc-tests.sh tools/mock-logic-tests.sh tools/timeline-sim-tests.sh\n          busybox ash tests/test-generation-guard.sh\n'
-          new = '          chmod +x tests/test-common-helpers.sh tests/test-generation-guard.sh tests/test-reconciliation.sh tools/config-doc-tests.sh tools/mock-logic-tests.sh tools/recovery-tests.sh tools/timeline-sim-tests.sh tools/transport-readiness-tests.sh\n          busybox ash tests/test-common-helpers.sh\n          dash tests/test-common-helpers.sh\n          busybox ash tests/test-generation-guard.sh\n'
-          if old not in text:
-              raise SystemExit('permanent CI test block changed unexpectedly')
-          text = text.replace(old, new, 1)
-          text = text.replace(
-              '          sh tools/mock-logic-tests.sh\n          sh tools/timeline-sim-tests.sh\n',
-              '          sh tools/mock-logic-tests.sh\n          sh tools/recovery-tests.sh\n          sh tools/timeline-sim-tests.sh\n          sh tools/transport-readiness-tests.sh\n', 1)
-          p.write_text(text)
-          PY
-
-      - name: Lint changed shell surfaces
-        run: |
-          status=0
           shellcheck --severity=warning \
-            bin/common.sh bin/generation_guard.sh bin/installer_config.sh bin/lowlevel.sh \
-            action.sh post-fs-data.sh reconfigure.sh service.sh uninstall.sh \
-            tests/test-common-helpers.sh tests/test-generation-guard.sh tests/test-reconciliation.sh \
-            tools/config-doc-tests.sh tools/mock-logic-tests.sh tools/recovery-tests.sh \
-            tools/timeline-sim-tests.sh tools/transport-readiness-tests.sh \
-            tools/build-release.sh tools/validate-zip.sh > lint-output.log 2>&1 || status=$?
-          sh -n common/functions.sh >> lint-output.log 2>&1 || status=$?
-          cat lint-output.log
-          printf '%s\n' "$status" > lint-status.txt
+            bin/common.sh \
+            bin/generation_guard.sh \
+            bin/installer_config.sh \
+            bin/lowlevel.sh \
+            action.sh \
+            post-fs-data.sh \
+            reconfigure.sh \
+            service.sh \
+            uninstall.sh \
+            tests/test-common-helpers.sh \
+            tests/test-generation-guard.sh \
+            tests/test-reconciliation.sh \
+            tools/config-doc-tests.sh \
+            tools/mock-logic-tests.sh \
+            tools/recovery-tests.sh \
+            tools/timeline-sim-tests.sh \
+            tools/transport-readiness-tests.sh \
+            tools/build-release.sh \
+            tools/validate-zip.sh
 
-      - name: Upload patched source and lint diagnostic
-        uses: actions/upload-artifact@v4
-        with:
-          name: pr40-patched-source
-          path: |
-            .github/workflows/ci.yml
-            bin/lowlevel.sh
-            common/functions.sh
-            service.sh
-            tests/test-common-helpers.sh
-            tests/test-generation-guard.sh
-            tools/mock-logic-tests.sh
-            tools/recovery-tests.sh
-            tools/timeline-sim-tests.sh
-            tools/transport-readiness-tests.sh
-            lint-output.log
-            lint-status.txt
-          retention-days: 1
-
-      - name: Stop if lint failed
+      - name: Test generation-aware AFWall handoff
         run: |
-          status="$(cat lint-status.txt)"
-          [ "$status" = 0 ] || exit "$status"
-
-      - name: Run complete shell test matrix
-        run: |
+          chmod +x tests/test-common-helpers.sh tests/test-generation-guard.sh tests/test-reconciliation.sh tools/config-doc-tests.sh tools/mock-logic-tests.sh tools/recovery-tests.sh tools/timeline-sim-tests.sh tools/transport-readiness-tests.sh
           busybox ash tests/test-common-helpers.sh
           dash tests/test-common-helpers.sh
           busybox ash tests/test-generation-guard.sh
@@ -144,20 +70,42 @@ jobs:
           sh tools/timeline-sim-tests.sh
           sh tools/transport-readiness-tests.sh
 
-      - name: Build and validate both module ZIPs
+      # ── Build: produce the installable ZIP ──────────────────────────────────
+      - name: Build module ZIP
         run: |
+          chmod +x tools/build-release.sh
           MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           tools/build-release.sh dist/ "${MODULE_ID}-${VERSION}.zip" "${MODULE_ID}.zip"
+
+      # ── Validate: check ZIP internal structure ──────────────────────────────
+      - name: Validate ZIP structure
+        run: |
+          chmod +x tools/validate-zip.sh
+          MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
+          VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           tools/validate-zip.sh "dist/${MODULE_ID}-${VERSION}.zip"
           tools/validate-zip.sh "dist/${MODULE_ID}.zip"
 
-      - name: Commit validated runtime and test files
-        run: |
-          rm -f tools/pr40-hardening.py tools/pr40-trigger.txt patch-output.log patch-status.txt lint-output.log lint-status.txt
-          git add -A
-          git reset -- .github/workflows/ci.yml dist 2>/dev/null || true
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'fix: complete PR 40 hardening and recovery coverage'
-          git push origin HEAD:perf-improvements-2732395343243030959
+      # ── Upload: make artifacts available for PR review ──────────────────────
+      - name: Upload module ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: module-zip
+          path: dist/*.zip
+          # Keep for 14 days so reviewers can download and test
+          retention-days: 14
+
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha256sum
+          path: dist/sha256sum.txt
+          retention-days: 14
+
+      - name: Upload build info artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-info
+          path: dist/build-info.txt
+          retention-days: 14
