@@ -209,7 +209,8 @@ test_base_graph_structurally_present() {
     _afwall_base_graph_structurally_present_from_snapshot "-N afwall"
 
   # 3. Valid structural graph passes
-  local valid_snap="$(printf '%s\n%s\n' "-N afwall" "-A OUTPUT -j afwall")"
+  local valid_snap
+  valid_snap="$(printf '%s\n%s\n' "-N afwall" "-A OUTPUT -j afwall")"
   assert_true "valid structural graph passes" \
     _afwall_base_graph_structurally_present_from_snapshot "$valid_snap"
 
