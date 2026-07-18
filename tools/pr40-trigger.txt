@@ -1,1 +1,1 @@
-Temporary trigger for PR #40 hardening workflow after final ShellCheck annotation. Remove before merge.
+Temporary trigger for PR #40 hardening workflow after exact ShellCheck directive fix. Remove before merge.
