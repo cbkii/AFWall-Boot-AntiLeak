@@ -1,1 +1,1 @@
-Temporary trigger for PR #40 hardening workflow, diagnostic attempt 2. Remove before merge.
+Temporary trigger for PR #40 hardening workflow, diagnostic attempt 3. Remove before merge.
