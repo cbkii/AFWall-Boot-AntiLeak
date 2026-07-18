@@ -9,16 +9,6 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 REPO_ROOT="$(unset CDPATH; cd -- "$(dirname "$0")/.." && pwd)"
 GUARD_PATH="${ABA_GENERATION_GUARD_PATH:-$REPO_ROOT/bin/generation_guard.sh}"
 
-# Mock common.sh structural helper
-_afwall_base_graph_structurally_present_from_snapshot() {
-  local snap="$1"
-  [ -n "$snap" ] || return 1
-  printf '%s\n' "$snap" | grep -qE "^-N ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
-  printf '%s\n' "$snap" | grep -qE "^-A OUTPUT .*-j ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
-  return 0
-}
-
-
 AFWALL_CHAIN_MAIN=afwall
 AFWALL_PACKAGE=dev.ukanth.ufirewall.donate
 AFW_PKG=dev.ukanth.ufirewall.donate
@@ -56,6 +46,16 @@ _snapshot_jump_targets() {
 }
 
 # shellcheck source=../bin/generation_guard.sh
+
+# Mock common.sh structural helper
+_afwall_base_graph_structurally_present_from_snapshot() {
+  local snap="$1"
+  [ -n "$snap" ] || return 1
+  printf '%s\n' "$snap" | grep -qE "^-N ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
+  printf '%s\n' "$snap" | grep -qE "^-A OUTPUT .*-j ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
+  return 0
+}
+
 . "$GUARD_PATH"
 
 pass() { printf 'ok - %s\n' "$1"; }
@@ -193,11 +193,6 @@ assert_true 'ps fallback recognises an AFWall subprocess after pidof misses' _ab
 ps() { printf '%s\n' 'u0_a123 123 1 0 0 S com.example.other'; }
 assert_false 'authoritative ps miss reports AFWall absent without proc fallback' _aba_process_present_raw "$AFW_PKG"
 
-if [ "$FAIL" -ne 0 ]; then
-  printf '%s test(s) failed\n' "$FAIL" >&2
-  exit 1
-fi
-
 
 test_base_graph_structurally_present() {
   # 1. Missing chain fails
@@ -220,6 +215,7 @@ test_base_graph_structurally_present() {
 test_base_graph_structurally_present
 
 if [ "$FAIL" -ne 0 ]; then
+  printf '%s test(s) failed\n' "$FAIL" >&2
   exit 1
 fi
 printf 'all generation guard tests passed\n'
