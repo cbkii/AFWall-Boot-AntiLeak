@@ -1,0 +1,106 @@
+name: PR 40 Hardening Gate
+
+on:
+  pull_request_target:
+    types: [reopened]
+
+permissions:
+  contents: write
+
+jobs:
+  harden:
+    if: >-
+      github.event.pull_request.number == 40 &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'perf-improvements-2732395343243030959'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout exact PR branch
+        uses: actions/checkout@v4
+        with:
+          ref: perf-improvements-2732395343243030959
+          fetch-depth: 0
+
+      - name: Install validation dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends busybox shellcheck zip unzip
+
+      - name: Apply reviewed hardening patch
+        run: python3 tools/pr40-hardening.py .
+
+      - name: Restore and extend permanent read-only CI
+        run: |
+          git fetch origin main
+          git checkout origin/main -- .github/workflows/ci.yml
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('.github/workflows/ci.yml')
+          t=p.read_text()
+          t=t.replace(
+              '            tests/test-generation-guard.sh \\\n            tests/test-reconciliation.sh \\\n',
+              '            tests/test-common-helpers.sh \\\n            tests/test-generation-guard.sh \\\n            tests/test-reconciliation.sh \\\n', 1)
+          t=t.replace(
+              '            tools/mock-logic-tests.sh \\\n            tools/timeline-sim-tests.sh \\\n',
+              '            tools/mock-logic-tests.sh \\\n            tools/recovery-tests.sh \\\n            tools/timeline-sim-tests.sh \\\n            tools/transport-readiness-tests.sh \\\n', 1)
+          old='''          chmod +x tests/test-generation-guard.sh tests/test-reconciliation.sh tools/config-doc-tests.sh tools/mock-logic-tests.sh tools/timeline-sim-tests.sh
+          busybox ash tests/test-generation-guard.sh
+'''
+          new='''          chmod +x tests/test-common-helpers.sh tests/test-generation-guard.sh tests/test-reconciliation.sh tools/config-doc-tests.sh tools/mock-logic-tests.sh tools/recovery-tests.sh tools/timeline-sim-tests.sh tools/transport-readiness-tests.sh
+          busybox ash tests/test-common-helpers.sh
+          dash tests/test-common-helpers.sh
+          busybox ash tests/test-generation-guard.sh
+'''
+          if old not in t:
+              raise SystemExit('permanent CI test block changed unexpectedly')
+          t=t.replace(old,new,1)
+          t=t.replace(
+              '          sh tools/mock-logic-tests.sh\n          sh tools/timeline-sim-tests.sh\n',
+              '          sh tools/mock-logic-tests.sh\n          sh tools/recovery-tests.sh\n          sh tools/timeline-sim-tests.sh\n          sh tools/transport-readiness-tests.sh\n', 1)
+          p.write_text(t)
+          PY
+
+      - name: Lint all changed shell surfaces
+        run: |
+          shellcheck --severity=warning \
+            bin/common.sh bin/generation_guard.sh bin/installer_config.sh bin/lowlevel.sh \
+            action.sh post-fs-data.sh reconfigure.sh service.sh uninstall.sh \
+            tests/test-common-helpers.sh tests/test-generation-guard.sh tests/test-reconciliation.sh \
+            tools/config-doc-tests.sh tools/mock-logic-tests.sh tools/recovery-tests.sh \
+            tools/timeline-sim-tests.sh tools/transport-readiness-tests.sh \
+            tools/build-release.sh tools/validate-zip.sh
+          sh -n common/functions.sh
+
+      - name: Run full shell test matrix
+        run: |
+          busybox ash tests/test-common-helpers.sh
+          dash tests/test-common-helpers.sh
+          busybox ash tests/test-generation-guard.sh
+          dash tests/test-generation-guard.sh
+          busybox ash tests/test-reconciliation.sh
+          dash tests/test-reconciliation.sh
+          sh tools/config-doc-tests.sh
+          sh tools/mock-logic-tests.sh
+          sh tools/recovery-tests.sh
+          sh tools/timeline-sim-tests.sh
+          sh tools/transport-readiness-tests.sh
+
+      - name: Build and validate both module ZIPs
+        run: |
+          MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
+          VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
+          tools/build-release.sh dist/ "${MODULE_ID}-${VERSION}.zip" "${MODULE_ID}.zip"
+          tools/validate-zip.sh "dist/${MODULE_ID}-${VERSION}.zip"
+          tools/validate-zip.sh "dist/${MODULE_ID}.zip"
+
+      - name: Commit only validated final files
+        run: |
+          rm -f tools/pr40-hardening.py
+          git add \
+            .github/workflows/ci.yml \
+            bin/lowlevel.sh common/functions.sh service.sh \
+            tests/test-common-helpers.sh \
+            tools/recovery-tests.sh tools/timeline-sim-tests.sh tools/transport-readiness-tests.sh \
+            tools/pr40-hardening.py
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: complete PR 40 hardening and recovery coverage'
+          git push origin HEAD:perf-improvements-2732395343243030959
