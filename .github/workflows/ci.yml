@@ -77,14 +77,41 @@ jobs:
 
       - name: Lint changed shell surfaces
         run: |
+          status=0
           shellcheck --severity=warning \
             bin/common.sh bin/generation_guard.sh bin/installer_config.sh bin/lowlevel.sh \
             action.sh post-fs-data.sh reconfigure.sh service.sh uninstall.sh \
             tests/test-common-helpers.sh tests/test-generation-guard.sh tests/test-reconciliation.sh \
             tools/config-doc-tests.sh tools/mock-logic-tests.sh tools/recovery-tests.sh \
             tools/timeline-sim-tests.sh tools/transport-readiness-tests.sh \
-            tools/build-release.sh tools/validate-zip.sh
-          sh -n common/functions.sh
+            tools/build-release.sh tools/validate-zip.sh > lint-output.log 2>&1 || status=$?
+          sh -n common/functions.sh >> lint-output.log 2>&1 || status=$?
+          cat lint-output.log
+          printf '%s\n' "$status" > lint-status.txt
+
+      - name: Upload patched source and lint diagnostic
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr40-patched-source
+          path: |
+            .github/workflows/ci.yml
+            bin/lowlevel.sh
+            common/functions.sh
+            service.sh
+            tests/test-common-helpers.sh
+            tests/test-generation-guard.sh
+            tools/mock-logic-tests.sh
+            tools/recovery-tests.sh
+            tools/timeline-sim-tests.sh
+            tools/transport-readiness-tests.sh
+            lint-output.log
+            lint-status.txt
+          retention-days: 1
+
+      - name: Stop if lint failed
+        run: |
+          status="$(cat lint-status.txt)"
+          [ "$status" = 0 ] || exit "$status"
 
       - name: Run complete shell test matrix
         run: |
@@ -110,7 +137,7 @@ jobs:
 
       - name: Commit validated final branch
         run: |
-          rm -f tools/pr40-hardening.py tools/pr40-trigger.txt patch-output.log patch-status.txt
+          rm -f tools/pr40-hardening.py tools/pr40-trigger.txt patch-output.log patch-status.txt lint-output.log lint-status.txt
           git add -A
           git reset -- dist 2>/dev/null || true
           git config user.name 'github-actions[bot]'
