@@ -138,11 +138,11 @@ printf '\0' > "$READ_NUL_PROBE"
 # shellcheck disable=SC3045 # This probe intentionally detects BusyBox ash read -d support.
 if (IFS= read -r -d '' _probe < "$READ_NUL_PROBE") 2>/dev/null; then
   printf '%s\0%s\0' "$AFW_PKG" '--worker' > "$CMDLINE_FILE"
-  assert_true 'NUL cmdline fallback matches the base AFWall process' _aba_cmdline_matches_pkg "$CMDLINE_FILE" "$AFW_PKG"
+  assert_true 'NUL cmdline fallback matches the base AFWall process' _afwall_cmdline_matches_pkg "$CMDLINE_FILE" "$AFW_PKG"
   printf '%s\0%s\0' "${AFW_PKG}:root" '--worker' > "$CMDLINE_FILE"
-  assert_true 'NUL cmdline fallback matches an AFWall subprocess' _aba_cmdline_matches_pkg "$CMDLINE_FILE" "$AFW_PKG"
+  assert_true 'NUL cmdline fallback matches an AFWall subprocess' _afwall_cmdline_matches_pkg "$CMDLINE_FILE" "$AFW_PKG"
   printf '%s\0' 'com.example.other' > "$CMDLINE_FILE"
-  assert_false 'NUL cmdline fallback rejects another package' _aba_cmdline_matches_pkg "$CMDLINE_FILE" "$AFW_PKG"
+  assert_false 'NUL cmdline fallback rejects another package' _afwall_cmdline_matches_pkg "$CMDLINE_FILE" "$AFW_PKG"
 else
   pass 'NUL cmdline fallback is BusyBox-ash-specific and skipped by this shell'
 fi
