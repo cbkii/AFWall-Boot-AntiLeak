@@ -56,6 +56,19 @@ _afwall_base_graph_structurally_present_from_snapshot() {
   return 0
 }
 
+# Mock the common.sh cmdline helper consumed by generation_guard.sh. The actual
+# implementation is exercised separately by tests/test-common-helpers.sh.
+_afwall_cmdline_matches_pkg() {
+  local file="$1" pkg="$2" first=""
+  [ -f "$file" ] || return 1
+  # shellcheck disable=SC3045 # BusyBox ash supports NUL-delimited read -d.
+  IFS= read -r -d '' first < "$file" 2>/dev/null || [ -n "$first" ] || return 1
+  case "$first" in
+    "$pkg"|"${pkg}:"*) return 0 ;;
+  esac
+  return 1
+}
+
 . "$GUARD_PATH"
 
 pass() { printf 'ok - %s\n' "$1"; }
