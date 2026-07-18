@@ -152,11 +152,11 @@ jobs:
           tools/validate-zip.sh "dist/${MODULE_ID}-${VERSION}.zip"
           tools/validate-zip.sh "dist/${MODULE_ID}.zip"
 
-      - name: Commit validated final branch
+      - name: Commit validated runtime and test files
         run: |
           rm -f tools/pr40-hardening.py tools/pr40-trigger.txt patch-output.log patch-status.txt lint-output.log lint-status.txt
           git add -A
-          git reset -- dist 2>/dev/null || true
+          git reset -- .github/workflows/ci.yml dist 2>/dev/null || true
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'fix: complete PR 40 hardening and recovery coverage'
