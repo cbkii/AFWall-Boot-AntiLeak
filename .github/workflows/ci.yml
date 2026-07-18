@@ -1,39 +1,60 @@
 name: CI
 
+# Run on pull requests and main-branch pushes. README and ADVANCED changes are
+# included because config documentation is validated against runtime keys.
 on:
   pull_request:
-    branches: [main]
+    branches: [master, main]
+  push:
+    branches: [master, main]
+    paths-ignore:
+      - ".gitignore"
+      - ".gitattributes"
+      - ".shellcheckrc"
 
+# Minimal permissions: read-only checkout is sufficient for CI.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  final-ps-fallback:
-    if: github.head_ref == 'perf-improvements-2732395343243030959'
+  build-and-validate:
+    name: Build and Validate Module ZIP
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout exact PR head
-        uses: actions/checkout@v4
-        with:
-          ref: perf-improvements-2732395343243030959
-          fetch-depth: 1
 
-      - name: Apply focused fix
-        run: python3 tools/final-ps-patch.py
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Install dependencies
         run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends busybox shellcheck zip unzip
 
-      - name: Verify complete branch
+      - name: Lint and syntax-check module shell scripts
         run: |
           shellcheck --severity=warning \
-            bin/common.sh bin/generation_guard.sh bin/installer_config.sh bin/lowlevel.sh \
-            action.sh post-fs-data.sh reconfigure.sh service.sh uninstall.sh \
-            tests/test-common-helpers.sh tests/test-generation-guard.sh tests/test-reconciliation.sh \
-            tools/config-doc-tests.sh tools/mock-logic-tests.sh tools/recovery-tests.sh \
-            tools/timeline-sim-tests.sh tools/transport-readiness-tests.sh \
-            tools/build-release.sh tools/validate-zip.sh
+            bin/common.sh \
+            bin/generation_guard.sh \
+            bin/installer_config.sh \
+            bin/lowlevel.sh \
+            action.sh \
+            post-fs-data.sh \
+            reconfigure.sh \
+            service.sh \
+            uninstall.sh \
+            tests/test-common-helpers.sh \
+            tests/test-generation-guard.sh \
+            tests/test-reconciliation.sh \
+            tools/config-doc-tests.sh \
+            tools/mock-logic-tests.sh \
+            tools/recovery-tests.sh \
+            tools/timeline-sim-tests.sh \
+            tools/transport-readiness-tests.sh \
+            tools/build-release.sh \
+            tools/validate-zip.sh
           git ls-files -z '*.sh' | xargs -0 -r -n1 sh -n
+
+      - name: Test generation-aware AFWall handoff
+        run: |
+          chmod +x tests/test-common-helpers.sh tests/test-generation-guard.sh tests/test-reconciliation.sh tools/config-doc-tests.sh tools/mock-logic-tests.sh tools/recovery-tests.sh tools/timeline-sim-tests.sh tools/transport-readiness-tests.sh
           busybox ash tests/test-common-helpers.sh
           dash tests/test-common-helpers.sh
           busybox ash tests/test-generation-guard.sh
@@ -45,17 +66,39 @@ jobs:
           sh tools/recovery-tests.sh
           sh tools/timeline-sim-tests.sh
           sh tools/transport-readiness-tests.sh
+
+      - name: Build module ZIP
+        run: |
+          chmod +x tools/build-release.sh
           MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           tools/build-release.sh dist/ "${MODULE_ID}-${VERSION}.zip" "${MODULE_ID}.zip"
+
+      - name: Validate ZIP structure
+        run: |
+          chmod +x tools/validate-zip.sh
+          MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
+          VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           tools/validate-zip.sh "dist/${MODULE_ID}-${VERSION}.zip"
           tools/validate-zip.sh "dist/${MODULE_ID}.zip"
 
-      - name: Commit validated fix
-        run: |
-          rm -f tools/final-ps-patch.py tools/pr40-final-trigger.txt
-          git add bin/common.sh tests/test-common-helpers.sh tools/final-ps-patch.py tools/pr40-final-trigger.txt
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git commit -m 'fix: fall back to proc when ps is unusable'
-          git push origin HEAD:perf-improvements-2732395343243030959
+      - name: Upload module ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: module-zip
+          path: dist/*.zip
+          retention-days: 14
+
+      - name: Upload checksum artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sha256sum
+          path: dist/sha256sum.txt
+          retention-days: 14
+
+      - name: Upload build info artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-info
+          path: dist/build-info.txt
+          retention-days: 14
