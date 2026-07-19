@@ -50,11 +50,12 @@ jobs:
             tools/mock-logic-tests.sh \
             tools/timeline-sim-tests.sh \
             tools/build-release.sh \
-            tools/validate-zip.sh
+            tools/validate-zip.sh \
+            tools/keycheck-tests.sh
 
       - name: Test generation-aware AFWall handoff
         run: |
-          chmod +x tests/test-generation-guard.sh tests/test-reconciliation.sh tools/config-doc-tests.sh tools/mock-logic-tests.sh tools/timeline-sim-tests.sh
+          chmod +x tests/test-generation-guard.sh tests/test-reconciliation.sh tools/config-doc-tests.sh tools/mock-logic-tests.sh tools/timeline-sim-tests.sh tools/keycheck-tests.sh
           busybox ash tests/test-generation-guard.sh
           dash tests/test-generation-guard.sh
           busybox ash tests/test-reconciliation.sh
@@ -62,6 +63,7 @@ jobs:
           sh tools/config-doc-tests.sh
           sh tools/mock-logic-tests.sh
           sh tools/timeline-sim-tests.sh
+          sh tools/keycheck-tests.sh
 
       # ── Build: produce the installable ZIP ──────────────────────────────────
       - name: Build module ZIP

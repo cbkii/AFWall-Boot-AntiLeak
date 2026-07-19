@@ -11,10 +11,9 @@ fallback for volume-key input detection. They are used when the primary
 | Architecture    | Filename           | Status    |
 |-----------------|--------------------|-----------|
 | arm64 / aarch64 | `keycheck-arm64`   | Included  |
-| x86_64          | `keycheck-x86_64`  | TODO (placeholder only) |
+| x86_64          | `keycheck-x86_64`  | Included  |
 
-The module currently ships an ARM64 keycheck binary plus an x86_64 placeholder
-file (`keycheck-x86_64.placeholder`) with build instructions/TODO notes.
+The module ships static executables for arm64 and x86_64.
 
 The installer already detects alternate keycheck names/locations used by common
 MMT/module-installer layouts (`META-INF/com/google/android/<arch>/keycheck`).
@@ -24,7 +23,12 @@ This improves compatibility across:
 - x86_64 Android emulators/virtualized test targets
 - installer environments that expose MMT-style helper paths
 
-The ARM64 binary is statically linked and has no external dependencies.
+Both binaries are statically linked executables with no external dependencies.
+
+### Prebuilt Artifact Identification
+The included prebuilt artifacts can be verified using these SHA-256 hashes:
+- `keycheck-arm64`: `d6dfe4afa761e13a3ac75f47bb2942267a526ea0d614dc32bd2ebd83661de9f9`
+- `keycheck-x86_64`: `b1b4ada0cd8c3c95f316b8721587a799cdf0dd005b25ffd1f6fd382259fed2d7`
 
 ---
 
@@ -62,7 +66,6 @@ Compiled from a minimal C source using an Android-compatible input-event layout:
 # arm64
 aarch64-linux-gnu-gcc -O2 -static -o bin/keycheck/keycheck-arm64 tools/keycheck.c
 
-# TODO (future binary add):
 # x86_64
 x86_64-linux-gnu-gcc -O2 -static -o bin/keycheck/keycheck-x86_64 tools/keycheck.c
 chmod 755 bin/keycheck/keycheck-x86_64
