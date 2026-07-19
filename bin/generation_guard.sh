@@ -69,25 +69,35 @@ _aba_resolve_pkg() {
   printf '%s' "$pkg"
 }
 
+_aba_ps_listing_usable() {
+  local output="$1"
+  [ -n "$output" ] || return 1
+  printf '%s\n' "$output" | grep -qE '(^|[[:space:]])[0-9]+[[:space:]]'
+}
+
 _aba_process_present_raw() {
-  local pkg="$1" esc f
+  local pkg="$1" esc ps_output="" f
   [ -n "$pkg" ] || return 1
 
   if has_cmd pidof; then
     pidof "$pkg" >/dev/null 2>&1 && return 0
   fi
 
+  # Keep normal polls cheap: a structurally usable ps listing with no match is
+  # authoritative. Empty, header-only, failed, or variant output falls back to
+  # the built-in NUL cmdline reader instead of producing a false negative.
+  esc="$(printf '%s' "$pkg" | sed 's/\./\\./g')"
   if has_cmd ps; then
-    esc="$(printf '%s' "$pkg" | sed 's/\./\\./g')"
-    ps -A 2>/dev/null | grep -qE "[[:space:]]${esc}(:[[:alnum:]_]+)?$" && return 0
-    ps 2>/dev/null | grep -qE "[[:space:]]${esc}(:[[:alnum:]_]+)?$" && return 0
-    # A usable ps result is authoritative. Do not scan every /proc entry on each
-    # poll merely because the target process is absent.
-    return 1
+    if ps_output="$(ps -A 2>/dev/null)"; then
+      printf '%s\n' "$ps_output" | grep -qE "(^|[[:space:]])${esc}(:[^[:space:]]+)?$" && return 0
+      _aba_ps_listing_usable "$ps_output" && return 1
+    fi
+    if ps_output="$(ps 2>/dev/null)"; then
+      printf '%s\n' "$ps_output" | grep -qE "(^|[[:space:]])${esc}(:[^[:space:]]+)?$" && return 0
+      _aba_ps_listing_usable "$ps_output" && return 1
+    fi
   fi
 
-  # Last-resort fallback for restricted/minimal environments with neither pidof
-  # nor ps. No external process is spawned per PID.
   for f in /proc/[0-9]*/cmdline; do
     _afwall_cmdline_matches_pkg "$f" "$pkg" && return 0
   done

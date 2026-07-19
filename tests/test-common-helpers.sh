@@ -23,15 +23,38 @@ if (IFS= read -r -d '' x < "$TMP/probe") 2>/dev/null; then
 else
   pass 'NUL helper skipped outside BusyBox ash'
 fi
-has_cmd(){ case "$1" in pidof|ps) return 0;; *) return 1;; esac; }; pidof(){ return 1; }
-ps(){ echo 'u0 1 0 S dev.ukanth.ufirewall.donate:root'; }
-assert_true 'ps finds subprocess' afwall_process_present dev.ukanth.ufirewall.donate
-ps(){ echo 'u0 1 0 S com.example'; }
+has_cmd(){ case "$1" in pidof|ps) return 0;; *) return 1;; esac; }
+pidof(){ return 1; }
+PROC_FALLBACK_CALLED=0
+PROC_FALLBACK_RESULT=1
+_afwall_proc_matches_pkg(){ PROC_FALLBACK_CALLED=1; [ "$PROC_FALLBACK_RESULT" = 0 ]; }
+
+ps(){ printf '%s\n' 'u0 1 0 S dev.ukanth.ufirewall.donate:root'; }
+assert_true 'ps finds standard subprocess suffix' afwall_process_present dev.ukanth.ufirewall.donate
+ps(){ printf '%s\n' 'u0 1 0 S dev.ukanth.ufirewall.donate:isolated-process-1'; }
+assert_true 'ps accepts non-alphanumeric subprocess suffix' afwall_process_present dev.ukanth.ufirewall.donate
+
+ps(){ printf '%s\n' 'u0 1 0 S com.example'; }
+PROC_FALLBACK_CALLED=0
 assert_false 'usable ps miss is authoritative' afwall_process_present dev.ukanth.ufirewall.donate
+[ "$PROC_FALLBACK_CALLED" = 0 ] && pass 'usable ps miss avoids proc scan' || fail 'usable ps miss scanned proc'
+
 ps(){ return 1; }
 PROC_FALLBACK_CALLED=0
-_afwall_proc_matches_pkg(){ PROC_FALLBACK_CALLED=1; return 0; }
+PROC_FALLBACK_RESULT=0
 assert_true 'failed ps forms fall back to proc' afwall_process_present dev.ukanth.ufirewall.donate
-[ "$PROC_FALLBACK_CALLED" = 1 ] && pass 'proc fallback was invoked after unusable ps' || fail 'proc fallback was not invoked after unusable ps'
+[ "$PROC_FALLBACK_CALLED" = 1 ] && pass 'proc fallback invoked after failed ps' || fail 'proc fallback not invoked after failed ps'
+
+ps(){ return 0; }
+PROC_FALLBACK_CALLED=0
+PROC_FALLBACK_RESULT=0
+assert_true 'empty ps output falls back to proc' afwall_process_present dev.ukanth.ufirewall.donate
+[ "$PROC_FALLBACK_CALLED" = 1 ] && pass 'proc fallback invoked after empty ps' || fail 'empty ps did not invoke proc fallback'
+
+ps(){ printf '%s\n' 'USER PID PPID VSZ RSS WCHAN ADDR S NAME'; }
+PROC_FALLBACK_CALLED=0
+PROC_FALLBACK_RESULT=0
+assert_true 'header-only ps output falls back to proc' afwall_process_present dev.ukanth.ufirewall.donate
+[ "$PROC_FALLBACK_CALLED" = 1 ] && pass 'proc fallback invoked after header-only ps' || fail 'header-only ps did not invoke proc fallback'
 [ "$FAIL" = 0 ] || exit 1
 echo 'All common helper tests passed.'

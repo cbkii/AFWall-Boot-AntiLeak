@@ -1731,8 +1731,17 @@ _afwall_proc_matches_pkg() {
   return 1
 }
 
+_afwall_ps_listing_usable() {
+  local output="$1"
+  [ -n "$output" ] || return 1
+  # A real process row contains a numeric PID field. Empty or header-only output
+  # is not authoritative because restricted/variant ps implementations may exit
+  # successfully without exposing process data.
+  printf '%s\n' "$output" | grep -qE '(^|[[:space:]])[0-9]+[[:space:]]'
+}
+
 afwall_process_present() {
-  local pkg="$1" esc_pkg ps_output="" ps_usable=0
+  local pkg="$1" esc_pkg ps_output=""
   [ -n "$pkg" ] || return 1
 
   # Method 1: pidof
@@ -1740,20 +1749,19 @@ afwall_process_present() {
     return 0
   fi
 
-  # Method 2: ps. A successful listing with no match is authoritative. If both
-  # supported forms fail, continue to the /proc fallback instead of confusing
-  # command presence with usable output.
+  # Method 2: ps. A structurally usable listing with no match is authoritative
+  # and avoids a full /proc scan on every normal poll. Empty, header-only,
+  # failed, or otherwise unusable output falls through to the next method.
   esc_pkg="$(printf '%s' "$pkg" | sed 's/\./\\./g')"
   if has_cmd ps; then
     if ps_output="$(ps -A 2>/dev/null)"; then
-      ps_usable=1
-      printf '%s\n' "$ps_output" | grep -qE "[[:space:]]${esc_pkg}(:[[:alnum:]_]+)?$" && return 0
+      printf '%s\n' "$ps_output" | grep -qE "(^|[[:space:]])${esc_pkg}(:[^[:space:]]+)?$" && return 0
+      _afwall_ps_listing_usable "$ps_output" && return 1
     fi
     if ps_output="$(ps 2>/dev/null)"; then
-      ps_usable=1
-      printf '%s\n' "$ps_output" | grep -qE "[[:space:]]${esc_pkg}(:[[:alnum:]_]+)?$" && return 0
+      printf '%s\n' "$ps_output" | grep -qE "(^|[[:space:]])${esc_pkg}(:[^[:space:]]+)?$" && return 0
+      _afwall_ps_listing_usable "$ps_output" && return 1
     fi
-    [ "$ps_usable" = 1 ] && return 1
   fi
 
   # Method 3: /proc/*/cmdline — last resort when no usable ps listing exists.
