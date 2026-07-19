@@ -1,0 +1,102 @@
+name: Prune stale branches
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/prune-branches.yml"
+
+permissions:
+  contents: write
+  pull-requests: read
+
+concurrency:
+  group: prune-stale-branches
+  cancel-in-progress: false
+
+jobs:
+  prune:
+    name: Delete obsolete remote branches
+    if: github.repository == 'cbkii/AFWall-Boot-AntiLeak'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Delete branches not used by open pull requests
+        run: |
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git fetch --prune origin '+refs/heads/*:refs/remotes/origin/*'
+
+          open_heads="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --limit 1000 --json headRefName --jq '.[].headRefName')"
+          deleted_file="${RUNNER_TEMP}/deleted-branches.txt"
+          kept_file="${RUNNER_TEMP}/kept-branches.txt"
+          failed_file="${RUNNER_TEMP}/failed-branches.txt"
+          : > "$deleted_file"
+          : > "$kept_file"
+          : > "$failed_file"
+
+          git for-each-ref --format='%(refname:strip=3)' refs/remotes/origin/ |
+          while IFS= read -r branch; do
+            [ -n "$branch" ] || continue
+            case "$branch" in
+              HEAD|main)
+                printf '%s\n' "$branch" >> "$kept_file"
+                continue
+                ;;
+            esac
+            if printf '%s\n' "$open_heads" | grep -Fxq "$branch"; then
+              printf '%s\n' "$branch" >> "$kept_file"
+              continue
+            fi
+            if git push origin --delete "$branch"; then
+              printf '%s\n' "$branch" >> "$deleted_file"
+            else
+              printf '%s\n' "$branch" >> "$failed_file"
+            fi
+          done
+
+          {
+            echo '## Branch cleanup'
+            echo
+            echo '### Deleted'
+            if [ -s "$deleted_file" ]; then
+              sed 's/^/- `/' "$deleted_file" | sed 's/$/`/'
+            else
+              echo '- None'
+            fi
+            echo
+            echo '### Preserved'
+            if [ -s "$kept_file" ]; then
+              sed 's/^/- `/' "$kept_file" | sed 's/$/`/'
+            else
+              echo '- None'
+            fi
+            if [ -s "$failed_file" ]; then
+              echo
+              echo '### Failed'
+              sed 's/^/- `/' "$failed_file" | sed 's/$/`/'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ -s "$failed_file" ]; then
+            echo 'STOP: one or more obsolete branches could not be deleted.' >&2
+            cat "$failed_file" >&2
+            exit 1
+          fi
+
+      - name: Remove this one-shot workflow
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/prune-branches.yml
+          git commit -m 'ci: remove completed branch pruning workflow'
+          git push origin HEAD:main

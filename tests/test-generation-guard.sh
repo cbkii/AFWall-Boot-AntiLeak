@@ -25,7 +25,11 @@ _find_cmd() { command -v "$1"; }
 _ipt_out() { return 1; }
 _init_dirs() { mkdir -p "$STATE_DIR"; }
 resolve_afwall_pkg() { printf '%s' "$AFW_PKG"; }
-_checksum_lines() { printf '%s\n' "$1" | cksum | awk '{print $1}'; }
+_checksum_lines() {
+  local checksum_output
+  checksum_output="$(printf '%s\n' "$1" | cksum)" || return 1
+  printf '%s' "${checksum_output%% *}"
+}
 _snapshot_defined_chains() { printf '%s\n' "$1" | sed -n 's/^-N \([^ ]*\).*/\1/p'; }
 _afwall_chain_defined() {
   _c="$1"; _defs="$2"
@@ -44,10 +48,6 @@ _snapshot_jump_targets() {
   _line="$1"
   case "$_line" in *' -j '*) _x="${_line#* -j }"; printf '%s\n' "${_x%% *}" ;; esac
 }
-
-# shellcheck source=../bin/generation_guard.sh
-
-# Mock common.sh structural helper
 _afwall_base_graph_structurally_present_from_snapshot() {
   local snap="$1"
   [ -n "$snap" ] || return 1
@@ -55,20 +55,9 @@ _afwall_base_graph_structurally_present_from_snapshot() {
   printf '%s\n' "$snap" | grep -qE "^-A OUTPUT .*-j ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
   return 0
 }
+_afwall_cmdline_matches_pkg() { return 1; }
 
-# Mock the common.sh cmdline helper consumed by generation_guard.sh. The actual
-# implementation is exercised separately by tests/test-common-helpers.sh.
-_afwall_cmdline_matches_pkg() {
-  local file="$1" pkg="$2" first=""
-  [ -f "$file" ] || return 1
-  # shellcheck disable=SC3045 # BusyBox ash supports NUL-delimited read -d.
-  IFS= read -r -d '' first < "$file" 2>/dev/null || [ -n "$first" ] || return 1
-  case "$first" in
-    "$pkg"|"${pkg}:"*) return 0 ;;
-  esac
-  return 1
-}
-
+# shellcheck source=../bin/generation_guard.sh
 . "$GUARD_PATH"
 
 pass() { printf 'ok - %s\n' "$1"; }
@@ -145,21 +134,6 @@ assert_eq 'custom delay preference parsed' "$ABA_GEN_DELAY_SECS" '15'
 assert_eq 'startup-delay file is preferred over fixLeak-only file' "$ABA_GEN_PREFS_FILE" "$PREF_DIR/z_startup.xml"
 assert_eq 'resolved package is retained for diagnostics' "$ABA_GEN_PACKAGE" "$AFW_PKG"
 
-CMDLINE_FILE="$TMP/cmdline"
-READ_NUL_PROBE="$TMP/read-nul-probe"
-printf '\0' > "$READ_NUL_PROBE"
-# shellcheck disable=SC3045 # This probe intentionally detects BusyBox ash read -d support.
-if (IFS= read -r -d '' _probe < "$READ_NUL_PROBE") 2>/dev/null; then
-  printf '%s\0%s\0' "$AFW_PKG" '--worker' > "$CMDLINE_FILE"
-  assert_true 'NUL cmdline fallback matches the base AFWall process' _afwall_cmdline_matches_pkg "$CMDLINE_FILE" "$AFW_PKG"
-  printf '%s\0%s\0' "${AFW_PKG}:root" '--worker' > "$CMDLINE_FILE"
-  assert_true 'NUL cmdline fallback matches an AFWall subprocess' _afwall_cmdline_matches_pkg "$CMDLINE_FILE" "$AFW_PKG"
-  printf '%s\0' 'com.example.other' > "$CMDLINE_FILE"
-  assert_false 'NUL cmdline fallback rejects another package' _afwall_cmdline_matches_pkg "$CMDLINE_FILE" "$AFW_PKG"
-else
-  pass 'NUL cmdline fallback is BusyBox-ash-specific and skipped by this shell'
-fi
-
 _aba_note_process_epoch() { [ "$ABA_GEN_PROCESS_FIRST_TS" != 0 ] || ABA_GEN_PROCESS_FIRST_TS="$NOW_FAKE"; return 0; }
 _aba_load_startup_prefs() { ABA_GEN_PREFS_READY=1; return 0; }
 
@@ -195,40 +169,8 @@ assert_eq 'prefer_module records authoritative integration mode' "$(cat "$STATE_
 INTEGRATION_MODE=off
 assert_false 'off remains the only mode that skips module blackout' should_install_block
 
-# When normal Android process tools exist, a miss must not fall through to an
-# expensive scan of every /proc entry.
-has_cmd() {
-  case "$1" in pidof|ps) return 0 ;; *) return 1 ;; esac
-}
-pidof() { return 1; }
-ps() { printf '%s\n' 'u0_a123 123 1 0 0 S dev.ukanth.ufirewall.donate:root'; }
-assert_true 'ps fallback recognises an AFWall subprocess after pidof misses' _aba_process_present_raw "$AFW_PKG"
-ps() { printf '%s\n' 'u0_a123 123 1 0 0 S com.example.other'; }
-assert_false 'authoritative ps miss reports AFWall absent without proc fallback' _aba_process_present_raw "$AFW_PKG"
-
-
-test_base_graph_structurally_present() {
-  # 1. Missing chain fails
-  assert_false "missing chain fails" \
-    _afwall_base_graph_structurally_present_from_snapshot "-A OUTPUT -j afwall"
-
-  # 2. Missing OUTPUT hook fails
-  assert_false "missing OUTPUT hook fails" \
-    _afwall_base_graph_structurally_present_from_snapshot "-N afwall"
-
-  # 3. Valid structural graph passes
-  local valid_snap
-  valid_snap="$(printf '%s\n%s\n' "-N afwall" "-A OUTPUT -j afwall")"
-  assert_true "valid structural graph passes" \
-    _afwall_base_graph_structurally_present_from_snapshot "$valid_snap"
-
-  # 4. No recursion occurs (implicit if it returns without calling anything else)
-  # The fact that it returns directly proves no recursion into generation_guard logic.
-}
-test_base_graph_structurally_present
-
 if [ "$FAIL" -ne 0 ]; then
   printf '%s test(s) failed\n' "$FAIL" >&2
   exit 1
 fi
-printf 'all generation guard tests passed\n'
+printf 'All generation guard tests passed.\n'

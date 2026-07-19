@@ -1,106 +1,69 @@
 name: CI
 
-# Run on pull requests and main-branch pushes. README and ADVANCED changes are
-# included because config documentation is validated against runtime keys.
 on:
   pull_request:
-    branches: [master, main]
+    branches: [main]
   push:
-    branches: [master, main]
+    branches: [main]
     paths-ignore:
       - ".gitignore"
       - ".gitattributes"
-      - ".shellcheckrc"
 
-# Minimal permissions: read-only checkout is sufficient for CI.
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  build-and-validate:
-    name: Build and Validate Module ZIP
+  validate:
+    name: Validate and build module
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          show-progress: false
 
-      - name: Install dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends busybox shellcheck zip unzip gcc binutils
+      - name: Install host-test dependencies
+        run: >-
+          sudo apt-get update -qq &&
+          sudo apt-get install -y --no-install-recommends
+          busybox dash shellcheck zip unzip gcc binutils python3
 
-      - name: Lint and syntax-check module shell scripts
+      - name: Run repository validation
         run: |
-          shellcheck --severity=warning \
-            bin/common.sh \
-            bin/generation_guard.sh \
-            bin/installer_config.sh \
-            bin/lowlevel.sh \
-            action.sh \
-            post-fs-data.sh \
-            reconfigure.sh \
-            service.sh \
-            uninstall.sh \
-            tests/test-common-helpers.sh \
-            tests/test-generation-guard.sh \
-            tests/test-reconciliation.sh \
-            tools/config-doc-tests.sh \
-            tools/keycheck-tests.sh \
-            tools/mock-logic-tests.sh \
-            tools/recovery-tests.sh \
-            tools/timeline-sim-tests.sh \
-            tools/transport-readiness-tests.sh \
-            tools/build-release.sh \
-            tools/validate-zip.sh
-          git ls-files -z '*.sh' | xargs -0 -r -n1 sh -n
+          if sh tests/run.sh > validation.log 2>&1; then
+            cat validation.log
+          else
+            status=$?
+            cat validation.log
+            exit "$status"
+          fi
 
-      - name: Test generation-aware AFWall handoff
-        run: |
-          chmod +x tests/test-common-helpers.sh tests/test-generation-guard.sh tests/test-reconciliation.sh tools/config-doc-tests.sh tools/keycheck-tests.sh tools/mock-logic-tests.sh tools/recovery-tests.sh tools/timeline-sim-tests.sh tools/transport-readiness-tests.sh
-          busybox ash tests/test-common-helpers.sh
-          dash tests/test-common-helpers.sh
-          busybox ash tests/test-generation-guard.sh
-          dash tests/test-generation-guard.sh
-          busybox ash tests/test-reconciliation.sh
-          dash tests/test-reconciliation.sh
-          sh tools/config-doc-tests.sh
-          sh tools/keycheck-tests.sh
-          sh tools/mock-logic-tests.sh
-          sh tools/recovery-tests.sh
-          sh tools/timeline-sim-tests.sh
-          sh tools/transport-readiness-tests.sh
+      - name: Upload validation failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-failure-${{ github.run_id }}
+          path: validation.log
+          retention-days: 3
 
-      - name: Build module ZIP
+      - name: Build and validate release ZIPs
         run: |
-          chmod +x tools/build-release.sh
           MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           tools/build-release.sh dist/ "${MODULE_ID}-${VERSION}.zip" "${MODULE_ID}.zip"
-
-      - name: Validate ZIP structure
-        run: |
-          chmod +x tools/validate-zip.sh
-          MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
-          VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           tools/validate-zip.sh "dist/${MODULE_ID}-${VERSION}.zip"
           tools/validate-zip.sh "dist/${MODULE_ID}.zip"
 
-      - name: Upload module ZIP artifact
+      - name: Upload validated build
         uses: actions/upload-artifact@v4
         with:
-          name: module-zip
-          path: dist/*.zip
-          retention-days: 14
-
-      - name: Upload checksum artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: sha256sum
-          path: dist/sha256sum.txt
-          retention-days: 14
-
-      - name: Upload build info artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-info
-          path: dist/build-info.txt
+          name: module-build
+          path: dist/
           retention-days: 14
