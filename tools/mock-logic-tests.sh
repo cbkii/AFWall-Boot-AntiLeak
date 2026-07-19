@@ -6,6 +6,16 @@ ROOT="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 pass() { printf 'ok - %s\n' "$*"; }
 
+SYNC_TMP=''
+DERIVE_TMP=''
+cleanup() {
+  [ -z "$SYNC_TMP" ] || rm -rf "$SYNC_TMP"
+  [ -z "$DERIVE_TMP" ] || rm -rf "$DERIVE_TMP"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 python3 "$ROOT/tools/sync-version-metadata.py" --check >/dev/null
 pass "active release metadata consistency"
 
@@ -13,7 +23,6 @@ pass "active release metadata consistency"
 SYNC_TMP="${TMPDIR:-/tmp}/aba-sync-test-$$"
 rm -rf "$SYNC_TMP"
 mkdir -p "$SYNC_TMP"
-trap 'rm -rf "$SYNC_TMP"' EXIT INT TERM
 (
   cd "$ROOT"
   tar --exclude='.git' --exclude='dist' --exclude='tools/__pycache__' -cf - .
