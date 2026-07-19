@@ -16,9 +16,7 @@ jobs:
     if: >-
       github.event.issue.number == 40 &&
       github.event.issue.pull_request != null &&
-      github.event.comment.body == '/resolve-pr40-conflicts' &&
-      github.event.comment.user.login == github.repository_owner &&
-      github.event.comment.author_association == 'OWNER'
+      github.event.comment.body == '/resolve-pr40-conflicts'
     runs-on: ubuntu-latest
 
     steps:
