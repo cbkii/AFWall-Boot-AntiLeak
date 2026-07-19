@@ -27,6 +27,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           persist-credentials: false
+          show-progress: false
 
       - name: Install host-test dependencies
         run: >-
@@ -35,7 +36,22 @@ jobs:
           busybox dash shellcheck zip unzip gcc binutils python3
 
       - name: Run repository validation
-        run: sh tests/run.sh
+        run: |
+          if sh tests/run.sh > validation.log 2>&1; then
+            cat validation.log
+          else
+            status=$?
+            cat validation.log
+            exit "$status"
+          fi
+
+      - name: Upload validation failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-failure-${{ github.run_id }}
+          path: validation.log
+          retention-days: 3
 
       - name: Build and validate release ZIPs
         run: |
