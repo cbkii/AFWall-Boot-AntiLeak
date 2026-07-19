@@ -1212,12 +1212,16 @@ capture_filter_snapshot_v6() {
 # Returns 0 when the AFWall main chain is present in the filter table AND the
 # OUTPUT hook is established.  This is the minimum viable "AFWall is active"
 # proof from a snapshot.
-afwall_graph_present_from_snapshot() {
+_afwall_base_graph_structurally_present_from_snapshot() {
   local snap="$1"
   [ -n "$snap" ] || return 1
   printf '%s\n' "$snap" | grep -qE "^-N ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
   printf '%s\n' "$snap" | grep -qE "^-A OUTPUT .*-j ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
   return 0
+}
+
+afwall_graph_present_from_snapshot() {
+  _afwall_base_graph_structurally_present_from_snapshot "$1"
 }
 
 # Returns 0 when the AFWall main chain contains at least one real rule (i.e. is
@@ -1703,8 +1707,41 @@ afwall_has_startup_script() {
 # Method 3: /proc/*/cmdline scan — reliable when both pidof and ps fail;
 #   reads the NUL-separated argument list from procfs directly.  The first
 #   token in cmdline is the process/package name on Android.
+_afwall_cmdline_matches_pkg() {
+  local file="$1" pkg="$2" first=""
+
+  [ -f "$file" ] || return 1
+  # Magisk runs module scripts under BusyBox ash. Its read -d support lets the
+  # fallback consume the first NUL-delimited cmdline token without spawning
+  # tr/head for every PID.
+  # shellcheck disable=SC3045 # Magisk executes this under BusyBox ash, which supports read -d.
+  IFS= read -r -d '' first < "$file" 2>/dev/null || [ -n "$first" ] || return 1
+  case "$first" in
+    "$pkg"|"${pkg}:"*) return 0 ;;
+  esac
+  return 1
+}
+
+_afwall_proc_matches_pkg() {
+  local pkg="$1" proc_root="${2:-/proc}" f
+  for f in "$proc_root"/[0-9]*/cmdline; do
+    [ -f "$f" ] || continue
+    _afwall_cmdline_matches_pkg "$f" "$pkg" && return 0
+  done
+  return 1
+}
+
+_afwall_ps_listing_usable() {
+  local output="$1"
+  [ -n "$output" ] || return 1
+  # A real process row contains a numeric PID field. Empty or header-only output
+  # is not authoritative because restricted/variant ps implementations may exit
+  # successfully without exposing process data.
+  printf '%s\n' "$output" | grep -qE '(^|[[:space:]])[0-9]+[[:space:]]'
+}
+
 afwall_process_present() {
-  local pkg="$1" esc_pkg
+  local pkg="$1" esc_pkg ps_output=""
   [ -n "$pkg" ] || return 1
 
   # Method 1: pidof
@@ -1712,26 +1749,23 @@ afwall_process_present() {
     return 0
   fi
 
-  # Method 2: ps
+  # Method 2: ps. A structurally usable listing with no match is authoritative
+  # and avoids a full /proc scan on every normal poll. Empty, header-only,
+  # failed, or otherwise unusable output falls through to the next method.
   esc_pkg="$(printf '%s' "$pkg" | sed 's/\./\\./g')"
   if has_cmd ps; then
-    ps -A 2>/dev/null | grep -qE "[[:space:]]${esc_pkg}(:[[:alnum:]_]+)?$" && return 0
-    ps    2>/dev/null | grep -qE "[[:space:]]${esc_pkg}(:[[:alnum:]_]+)?$" && return 0
+    if ps_output="$(ps -A 2>/dev/null)"; then
+      printf '%s\n' "$ps_output" | grep -qE "(^|[[:space:]])${esc_pkg}(:[^[:space:]]+)?$" && return 0
+      _afwall_ps_listing_usable "$ps_output" && return 1
+    fi
+    if ps_output="$(ps 2>/dev/null)"; then
+      printf '%s\n' "$ps_output" | grep -qE "(^|[[:space:]])${esc_pkg}(:[^[:space:]]+)?$" && return 0
+      _afwall_ps_listing_usable "$ps_output" && return 1
+    fi
   fi
 
-  # Method 3: /proc/*/cmdline — fallback for environments where pidof/ps are
-  # restricted or return unexpected output formats.
-  local f first_arg
-  for f in /proc/[0-9]*/cmdline; do
-    [ -f "$f" ] || continue
-    # The first NUL-delimited token is the process name / package name.
-    first_arg="$(tr '\0' '\n' < "$f" 2>/dev/null | head -1)"
-    case "$first_arg" in
-      "$pkg"|"${pkg}:"*) return 0 ;;
-    esac
-  done
-
-  return 1
+  # Method 3: /proc/*/cmdline — last resort when no usable ps listing exists.
+  _afwall_proc_matches_pkg "$pkg" /proc
 }
 
 # ── Integration mode ───────────────────────────────────────────────────────────

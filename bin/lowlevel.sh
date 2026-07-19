@@ -135,7 +135,8 @@ lowlevel_quiesce_interfaces() {
     _ll_iface_is_exempt "$iface" && continue
 
     # Read interface operstate; skip if already down.
-    operstate="$(cat "/sys/class/net/${iface}/operstate" 2>/dev/null)"
+    operstate=""
+    IFS= read -r operstate < "/sys/class/net/${iface}/operstate" 2>/dev/null || :
     case "$operstate" in
       down) continue ;;
     esac
@@ -153,33 +154,66 @@ lowlevel_quiesce_interfaces() {
   debug_log "lowlevel_quiesce_interfaces: done (${count} interfaces quiesced)"
 }
 
-lowlevel_restore_interfaces() {
-  _ll_state_exists "ifaces_down" || {
-    debug_log "lowlevel_restore_interfaces: no interfaces to restore"
-    return 0
+# Restore one module-owned interface marker atomically. Successful entries are
+# removed; failed entries remain so later recovery can retry them.
+_ll_restore_interface_marker() {
+  local ip_cmd="$1" marker="$2" group="$3" prefix="$4"
+  local file="${LL_STATE_DIR}/${marker}" retry="${LL_STATE_DIR}/.${marker}.retry.$$"
+  local iface failed=0
+  [ -f "$file" ] || return 0
+  : > "$retry" 2>/dev/null || {
+    log_on_transition "${group}_error" "retry_file:$marker" "$prefix: WARN: cannot create retry state for $marker; original marker preserved"
+    return 1
   }
-
-  local ip_cmd
-  ip_cmd="$(_find_cmd ip 2>/dev/null)" || {
-    log_on_transition "iface_restore_error" "no_ip" "lowlevel_restore_interfaces: WARN: ip command not found; cannot restore interfaces"
-    return 0
-  }
-
-  debug_log "lowlevel_restore_interfaces: start"
-  local iface count=0
-  while IFS= read -r iface; do
+  while IFS= read -r iface || [ -n "$iface" ]; do
     [ -n "$iface" ] || continue
     if "$ip_cmd" link set "$iface" up 2>/dev/null; then
-      debug_log "lowlevel: interface $iface brought UP (restored)"
-      count=$((count + 1))
+      log_on_transition "$group" "up:${marker}:${iface}" "$prefix: interface $iface brought UP (source=$marker)"
     else
-      log_on_transition "iface_restore_error" "fail:$iface" "lowlevel: WARN: could not restore interface $iface"
+      log_on_transition "$group" "fail:${marker}:${iface}" "$prefix: WARN: could not restore interface $iface (source=$marker); retained for retry"
+      printf '%s\n' "$iface" >> "$retry" 2>/dev/null || {
+        rm -f "$retry" 2>/dev/null || true
+        log_on_transition "${group}_error" "retry_write:$marker" "$prefix: WARN: cannot record failed interface $iface; original marker preserved"
+        return 1
+      }
+      failed=1
     fi
-  done < "${LL_STATE_DIR}/ifaces_down"
-
-  _ll_state_rm "ifaces_down"
-  debug_log "lowlevel_restore_interfaces: done (${count} interfaces restored)"
+  done < "$file"
+  if [ "$failed" = 1 ]; then
+    mv -f "$retry" "$file" 2>/dev/null || {
+      rm -f "$retry" 2>/dev/null || true
+      log_on_transition "${group}_error" "retry_replace:$marker" "$prefix: WARN: cannot replace retry state for $marker; original marker preserved"
+      return 1
+    }
+    return 1
+  fi
+  rm -f "$retry" "$file" 2>/dev/null || true
+  return 0
 }
+
+_ll_restore_recorded_interfaces() {
+  local context="${1:-normal}" marker found=0 pending=0
+  local ip_cmd group error_group prefix
+  for marker in ifaces_down ifaces_down_early tether_ifaces_down; do
+    _ll_state_exists "$marker" && found=1
+  done
+  [ "$found" = 1 ] || { debug_log "lowlevel_restore_interfaces: no interfaces to restore"; return 0; }
+  case "$context" in
+    emergency) group=emergency_iface; error_group=emergency_iface_error; prefix='lowlevel: emergency' ;;
+    *) group=iface_restore; error_group=iface_restore_error; prefix=lowlevel ;;
+  esac
+  ip_cmd="$(_find_cmd ip 2>/dev/null)" || ip_cmd=""
+  [ -n "$ip_cmd" ] || {
+    log_on_transition "$error_group" no_ip "$prefix: WARN: ip command not found; interface markers retained for retry"
+    return 1
+  }
+  for marker in ifaces_down ifaces_down_early tether_ifaces_down; do
+    _ll_restore_interface_marker "$ip_cmd" "$marker" "$group" "$prefix" || pending=1
+  done
+  [ "$pending" = 0 ]
+}
+
+lowlevel_restore_interfaces() { _ll_restore_recorded_interfaces normal || true; }
 
 # ── Wi-Fi control ──────────────────────────────────────────────────────────────
 # Returns one of: on | off | unknown
@@ -263,7 +297,8 @@ lowlevel_disable_wifi() {
     local wl_iface
     for wl_iface in wlan0 wlan1 swlan0 swlan1; do
       [ -f "/sys/class/net/${wl_iface}/operstate" ] || continue
-      wl_state="$(cat "/sys/class/net/${wl_iface}/operstate" 2>/dev/null)"
+      wl_state=""
+      IFS= read -r wl_state < "/sys/class/net/${wl_iface}/operstate" 2>/dev/null || :
       case "$wl_state" in
         down) verified=$((verified + 1)); break ;;
       esac
@@ -281,7 +316,8 @@ lowlevel_disable_wifi() {
     if [ -n "$ip_cmd" ]; then
       for wl_iface in wlan0 wlan1 swlan0 swlan1; do
         [ -d "/sys/class/net/${wl_iface}" ] || continue
-        wl_state="$(cat "/sys/class/net/${wl_iface}/operstate" 2>/dev/null)"
+        wl_state=""
+        IFS= read -r wl_state < "/sys/class/net/${wl_iface}/operstate" 2>/dev/null || :
         case "$wl_state" in
           up|unknown)
             "$ip_cmd" link set "$wl_iface" down 2>/dev/null && \
@@ -330,7 +366,8 @@ lowlevel_restore_wifi() {
   fi
   for wl_iface in wlan0 wlan1 swlan0 swlan1; do
     [ -f "/sys/class/net/${wl_iface}/operstate" ] || continue
-    wl_state="$(cat "/sys/class/net/${wl_iface}/operstate" 2>/dev/null)"
+    wl_state=""
+    IFS= read -r wl_state < "/sys/class/net/${wl_iface}/operstate" 2>/dev/null || :
     case "$wl_state" in
       up|unknown) verified_on=$((verified_on + 1)); break ;;
     esac
@@ -441,7 +478,8 @@ lowlevel_disable_mobile_data() {
       for cell_iface in /sys/class/net/rmnet* /sys/class/net/ccmni* /sys/class/net/wwan*; do
         [ -d "$cell_iface" ] || continue
         cell_iface="${cell_iface##*/}"
-        cell_state="$(cat "/sys/class/net/${cell_iface}/operstate" 2>/dev/null)"
+        cell_state=""
+        IFS= read -r cell_state < "/sys/class/net/${cell_iface}/operstate" 2>/dev/null || :
         case "$cell_state" in
           up|unknown)
             "$ip_cmd" link set "$cell_iface" down 2>/dev/null && \
@@ -800,7 +838,8 @@ lowlevel_stop_tethering() {
     for tether_iface in wlan1 rndis0 usb0 bt-pan ncm0; do
       [ -d "/sys/class/net/${tether_iface}" ] || continue
       local ts_state
-      ts_state="$(cat "/sys/class/net/${tether_iface}/operstate" 2>/dev/null)"
+      ts_state=""
+      IFS= read -r ts_state < "/sys/class/net/${tether_iface}/operstate" 2>/dev/null || :
       case "$ts_state" in
         up|unknown)
           if "$ip_cmd" link set "$tether_iface" down 2>/dev/null; then
@@ -826,7 +865,6 @@ lowlevel_restore_tethering_note() {
   _ll_state_exists "tether_was_active" || return 0
   log_on_transition "tether_stop_note" "stopped" "lowlevel: NOTE: tethering was stopped during boot; user must re-enable manually if needed"
   _ll_state_rm "tether_was_active"
-  _ll_state_rm "tether_ifaces_down"
 }
 
 # ── Top-level orchestration ────────────────────────────────────────────────────
@@ -872,7 +910,8 @@ lowlevel_prepare_environment_early() {
       iface="${iface%/}"; iface="${iface##*/}"
       [ -n "$iface" ] || continue
       _ll_iface_is_exempt "$iface" && continue
-      operstate="$(cat "/sys/class/net/${iface}/operstate" 2>/dev/null)"
+      operstate=""
+      IFS= read -r operstate < "/sys/class/net/${iface}/operstate" 2>/dev/null || :
       case "$operstate" in
         up|unknown)
           if "$ip_cmd" link set "$iface" down 2>/dev/null; then
@@ -978,7 +1017,8 @@ lowlevel_reassert_radios_off() {
     if [ -n "$ip_cmd" ]; then
       for wl_iface in wlan0 wlan1 swlan0 swlan1; do
         [ -d "/sys/class/net/${wl_iface}" ] || continue
-        wl_state="$(cat "/sys/class/net/${wl_iface}/operstate" 2>/dev/null)"
+        wl_state=""
+        IFS= read -r wl_state < "/sys/class/net/${wl_iface}/operstate" 2>/dev/null || :
         case "$wl_state" in
           up|unknown)
             "$ip_cmd" link set "$wl_iface" down 2>/dev/null || true
@@ -1141,7 +1181,6 @@ lowlevel_prepare_environment() {
   _ll_state_rm "data_initial_state"
   _ll_state_rm "bt_was_enabled"
   _ll_state_rm "tether_was_active"
-  _ll_state_rm "tether_ifaces_down"
   _ll_state_rm "ifaces_down"
   _ll_state_rm "vpn_lockdown_enabled_pkgs"
   _ll_state_rm "vpn_lockdown_released"
@@ -1181,33 +1220,11 @@ lowlevel_restore_changed_state() {
 # For each service, both `cmd` and `svc` fallbacks are tried in order; the
 # marker is only removed on success.  If all fallbacks fail the marker is
 # intentionally kept so a subsequent action-button press can retry.
-lowlevel_emergency_restore() {
-  log_on_transition "emergency_restore" "start" "lowlevel_emergency_restore: start"
+_ll_emergency_restore_interfaces() {
+  _ll_restore_recorded_interfaces emergency || true
+}
 
-  # ── Restore interfaces the module brought down ──────────────────────────────
-  if _ll_state_exists "ifaces_down"; then
-    local ip_cmd
-    ip_cmd="$(_find_cmd ip 2>/dev/null)" || ip_cmd=""
-    if [ -n "$ip_cmd" ]; then
-      local iface iface_ok=0
-      while IFS= read -r iface; do
-        [ -n "$iface" ] || continue
-        if "$ip_cmd" link set "$iface" up 2>/dev/null; then
-          log_on_transition "emergency_iface" "up:$iface" "lowlevel: emergency: interface $iface brought UP"
-          iface_ok=$((iface_ok + 1))
-        else
-          log_on_transition "emergency_iface" "fail:$iface" "lowlevel: emergency: WARN: could not restore interface $iface"
-        fi
-      done < "${LL_STATE_DIR}/ifaces_down"
-    else
-      log_on_transition "emergency_iface_error" "no_ip" "lowlevel: emergency: WARN: ip command not found; cannot restore interfaces"
-    fi
-    _ll_state_rm "ifaces_down"
-  fi
-
-  lowlevel_vpn_lockdown_release_if_needed
-
-  # ── Re-enable Wi-Fi ─────────────────────────────────────────────────────────
+_ll_emergency_restore_wifi() {
   if _ll_state_exists "wifi_was_enabled"; then
     local restored=0
     if has_cmd cmd && cmd wifi set-wifi-enabled enabled >/dev/null 2>&1; then
@@ -1227,8 +1244,9 @@ lowlevel_emergency_restore() {
       log_on_transition "emergency_wifi" "fail" "lowlevel: emergency: WARN: could not re-enable Wi-Fi; marker kept for retry"
     fi
   fi
+}
 
-  # ── Re-enable mobile data ───────────────────────────────────────────────────
+_ll_emergency_restore_mobile() {
   if _ll_state_exists "data_was_enabled"; then
     local restored=0
     if has_cmd cmd && cmd phone data enable >/dev/null 2>&1; then
@@ -1248,8 +1266,9 @@ lowlevel_emergency_restore() {
       log_on_transition "emergency_mobile" "fail" "lowlevel: emergency: WARN: could not re-enable mobile data; marker kept for retry"
     fi
   fi
+}
 
-  # ── Re-enable Bluetooth ─────────────────────────────────────────────────────
+_ll_emergency_restore_bt() {
   if _ll_state_exists "bt_was_enabled"; then
     local restored=0
     if has_cmd cmd && cmd bluetooth_manager enable >/dev/null 2>&1; then
@@ -1268,14 +1287,24 @@ lowlevel_emergency_restore() {
       log_on_transition "emergency_bt" "fail" "lowlevel: emergency: WARN: could not re-enable Bluetooth; marker kept for retry"
     fi
   fi
+}
 
-  # ── Note tethering status ───────────────────────────────────────────────────
-  # Tethering is never auto-restarted; just note and clean up.
+_ll_emergency_tether_note() {
   if _ll_state_exists "tether_was_active"; then
     log_on_transition "emergency_tether_note" "stopped" "lowlevel: emergency: NOTE: tethering was stopped; user must re-enable manually"
     _ll_state_rm "tether_was_active"
-    _ll_state_rm "tether_ifaces_down"
   fi
+}
+
+lowlevel_emergency_restore() {
+  log_on_transition "emergency_restore" "start" "lowlevel_emergency_restore: start"
+
+  _ll_emergency_restore_interfaces
+  lowlevel_vpn_lockdown_release_if_needed
+  _ll_emergency_restore_wifi
+  _ll_emergency_restore_mobile
+  _ll_emergency_restore_bt
+  _ll_emergency_tether_note
 
   _ll_state_rm "wifi_initial_state"
   _ll_state_rm "data_initial_state"
