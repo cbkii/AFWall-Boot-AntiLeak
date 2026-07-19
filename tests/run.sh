@@ -34,7 +34,7 @@ shellcheck --severity=warning \
   tools/build-release.sh \
   tools/validate-zip.sh
 
-git ls-files -z '*.sh' | xargs -0 -r -n1 sh -n
+git ls-files -z '*.sh' | xargs -0 -n1 sh -n
 python3 -m py_compile tools/sync-version-metadata.py
 python3 tools/sync-version-metadata.py --check
 
