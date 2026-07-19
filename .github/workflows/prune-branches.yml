@@ -92,3 +92,11 @@ jobs:
             cat "$failed_file" >&2
             exit 1
           fi
+
+      - name: Remove this one-shot workflow
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/prune-branches.yml
+          git commit -m 'ci: remove completed branch pruning workflow'
+          git push origin HEAD:main
