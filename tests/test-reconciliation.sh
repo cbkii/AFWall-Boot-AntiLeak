@@ -26,7 +26,10 @@ _find_cmd() { command -v "$1"; }
 _ipt_out() { return 1; }
 _init_dirs() { mkdir -p "$STATE_DIR"; }
 resolve_afwall_pkg() { printf '%s' "$AFW_PKG"; }
-_checksum_lines() { printf '%s\n' "$1" | cksum | awk '{print $1}'; }
+_checksum_lines() {
+  set -- $(printf '%s\n' "$1" | cksum)
+  printf '%s' "$1"
+}
 _snapshot_defined_chains() { printf '%s\n' "$1" | sed -n 's/^-N \([^ ]*\).*/\1/p'; }
 _afwall_chain_defined() {
   _c="$1"; _defs="$2"
@@ -59,6 +62,18 @@ assert_eq() {
     pass "$_name"
   else
     printf '  expected=%s actual=%s\n' "$_expected" "$_actual"
+    fail "$_name"
+  fi
+}
+assert_order() {
+  _name="$1" _section="$2" _first="$3" _second="$4" _last="$5"
+  _first_line="$(printf '%s\n' "$_section" | grep -nF "$_first" | head -n 1 | cut -d: -f1)"
+  _second_line="$(printf '%s\n' "$_section" | grep -nF "$_second" | head -n 1 | cut -d: -f1)"
+  _last_line="$(printf '%s\n' "$_section" | grep -nF "$_last" | head -n 1 | cut -d: -f1)"
+  if [ -n "$_first_line" ] && [ -n "$_second_line" ] && [ -n "$_last_line" ] && \
+     [ "$_first_line" -lt "$_last_line" ] && [ "$_second_line" -lt "$_last_line" ]; then
+    pass "$_name"
+  else
     fail "$_name"
   fi
 }
@@ -117,20 +132,10 @@ assert_false 'unavailable preferences remain fail-closed' afwall_ipv6_control_st
 assert_eq 'unavailable preferences report unknown' "$ABA_GEN_IPV6_STATE" unknown
 
 release_section="$(sed -n '/Block release: remove blocks/,/All done?/p' "$SERVICE")"
-assert_true 'service removes IPv4 raw OUTPUT last' sh -c '
-  section=$1
-  f=$(printf "%s\n" "$section" | grep -nF "remove_forward_block_v4" | head -1 | cut -d: -f1)
-  i=$(printf "%s\n" "$section" | grep -nF "remove_input_block_v4" | head -1 | cut -d: -f1)
-  o=$(printf "%s\n" "$section" | grep -nF "remove_output_block_v4" | head -1 | cut -d: -f1)
-  [ -n "$f" ] && [ -n "$i" ] && [ -n "$o" ] && [ "$f" -lt "$o" ] && [ "$i" -lt "$o" ]
-' sh "$release_section"
-assert_true 'service removes IPv6 raw OUTPUT last' sh -c '
-  section=$1
-  f=$(printf "%s\n" "$section" | grep -nF "remove_forward_block_v6" | head -1 | cut -d: -f1)
-  i=$(printf "%s\n" "$section" | grep -nF "remove_input_block_v6" | head -1 | cut -d: -f1)
-  o=$(printf "%s\n" "$section" | grep -nF "remove_output_block_v6" | head -1 | cut -d: -f1)
-  [ -n "$f" ] && [ -n "$i" ] && [ -n "$o" ] && [ "$f" -lt "$o" ] && [ "$i" -lt "$o" ]
-' sh "$release_section"
+assert_order 'service removes IPv4 raw OUTPUT last' "$release_section" \
+  'remove_forward_block_v4' 'remove_input_block_v4' 'remove_output_block_v4'
+assert_order 'service removes IPv6 raw OUTPUT last' "$release_section" \
+  'remove_forward_block_v6' 'remove_input_block_v6' 'remove_output_block_v6'
 
 assert_true 'held IPv6 skips the normal v6 release block' grep -qF '[ "$v6_held" = "0" ]' "$SERVICE"
 assert_true 'held IPv6 is terminal for completion' grep -qF '[ "$v6_held" = "0" ] && _v6_complete=0' "$SERVICE"
@@ -138,16 +143,13 @@ assert_true 'held IPv6 persists an ownership marker' grep -qF 'printf '\''1'\'' 
 assert_true 'held IPv6 finalization preserves blackout state' grep -qF 'finalization preserving module-owned IPv6 block' "$SERVICE"
 assert_true 'graph drift invokes event-driven v4 repair' grep -qF '_repair_family_on_graph_drift v4' "$SERVICE"
 assert_true 'graph drift invokes event-driven v6 repair' grep -qF '_repair_family_on_graph_drift v6' "$SERVICE"
-assert_true 'generic cleanup removes IPv4 raw OUTPUT after filter directions' awk '
-  /^remove_block\(\)/ {inside=1}
-  inside && /remove_forward_block_v4/ {f=NR}
-  inside && /remove_input_block_v4/ {i=NR}
-  inside && /remove_output_block_v4/ {o=NR; exit}
-  END {exit !(f && i && o && f < o && i < o)}
-' "$COMMON"
+
+common_remove_section="$(sed -n '/^remove_block() {/,/^}/p' "$COMMON")"
+assert_order 'generic cleanup removes IPv4 raw OUTPUT after filter directions' "$common_remove_section" \
+  'remove_forward_block_v4' 'remove_input_block_v4' 'remove_output_block_v4'
 
 if [ "$FAIL" -ne 0 ]; then
   printf '%s reconciliation test(s) failed\n' "$FAIL" >&2
   exit 1
 fi
-printf 'all reconciliation tests passed\n'
+printf 'All reconciliation tests passed.\n'
