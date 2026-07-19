@@ -94,7 +94,7 @@ mkdir -p -- "$TMP_DIR" || fail "cannot create temporary directory"
 trap 'rm -rf -- "$TMP_DIR" 2>/dev/null || :' EXIT INT TERM
 
 GENERATED_TEMPLATE="$TMP_DIR/config.local.template.sh"
-sed -n '/^# AFWall Boot AntiLeak v5[.]0[.]0 local overrides/,/^EOF_CFG$/p' \
+sed -n '/^# AFWall Boot AntiLeak v[0-9][0-9.]* local overrides/,/^EOF_CFG$/p' \
     "$ROOT/bin/installer_config.sh" > "$GENERATED_TEMPLATE" || fail "cannot extract generated config.local.sh template"
 
 [ -s "$GENERATED_TEMPLATE" ] || fail "generated config.local.sh template was not found"
@@ -138,7 +138,7 @@ check_readme_value_descriptions AFWALL_PACKAGE "auto dev.ukanth.ufirewall dev.uk
 check_readme_value_descriptions VPN_LOCKDOWN_MODE "off preserve restore"
 check_readme_value_descriptions VPN_PROVIDER_PACKAGES "auto ch.protonvpn.android com.wireguard.android"
 
-if grep -q '^### User-facing v5[.]0[.]0 keys$' "$ROOT/ADVANCED.md"; then
+if grep -Eq '^### User-facing v[0-9][0-9.]* keys$' "$ROOT/ADVANCED.md"; then
     fail "ADVANCED.md still contains the moved user-facing config table"
 fi
 
