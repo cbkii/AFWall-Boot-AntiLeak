@@ -1,6 +1,6 @@
 ui_print ""
 ui_print "================================================"
-ui_print "     AFWall Boot AntiLeak  v5.0.0"
+ui_print "     AFWall Boot AntiLeak  v5.1.0"
 ui_print "================================================"
 ui_print "  Fast fail-closed netfilter handoff model:"
 ui_print "  post-fs-data hard block + service repair"

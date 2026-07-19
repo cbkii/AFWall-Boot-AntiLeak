@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v5.0.0 - packaged configuration defaults.
+# AFWall Boot AntiLeak v5.1.0 - packaged configuration defaults.
 # This file is loaded first. Optional config.local.sh is loaded second and
 # overrides matching keys. Use reconfigure.sh instead of editing this file,
 # because a module update may replace it.

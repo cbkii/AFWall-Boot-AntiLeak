@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v5.0.0 - Lower-layer suppression subsystem
+# AFWall Boot AntiLeak v5.1.0 - Lower-layer suppression subsystem
 # POSIX/ash compatible. No bashisms. Sourced by common.sh; do not execute directly.
 #
 # PURPOSE
@@ -620,7 +620,7 @@ lowlevel_restore_bluetooth() {
 #   - During transport restore (after AFWall takeover), disable lockdown again
 #     for the currently active provider and restore pre-boot always-on state.
 #
-# Internal behaviour is derived from v5.0.0 VPN_LOCKDOWN_MODE and
+# Internal behaviour is derived from v5.1.0 VPN_LOCKDOWN_MODE and
 # VPN_PROVIDER_PACKAGES in bin/common.sh; these are not user-facing knobs here.
 
 _ll_split_words() {

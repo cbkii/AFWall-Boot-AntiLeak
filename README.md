@@ -81,7 +81,7 @@ A clean upgrade is recommended for v5 because it uses only module-local configur
    ```
 
 4. Do not delete unrelated files or directories under `/data/adb`.
-5. Install v5.0.0 or newer.
+5. Install v5.1.0 or newer.
 6. Select a new profile or run the configuration tool.
 7. Reboot again.
 

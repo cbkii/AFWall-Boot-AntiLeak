@@ -41,7 +41,7 @@ fi
 
   load_config
 
-  # ── v5.0.0 config-derived internal defaults ────────────────────────────────
+  # ── v5.1.0 config-derived internal defaults ────────────────────────────────
   # load_config/derive_internal_config in bin/common.sh owns validation and
   # internal mapping.  Keep service local defaults only for timing values that
   # may be absent if config.sh is missing.
@@ -423,7 +423,7 @@ fi
 
   _update_readiness_gate() {
     # Diagnostic-only state for logs.  It never gates AFWall graph evaluation,
-    # family release, or watchdog clocks in v5.0.0.
+    # family release, or watchdog clocks in v5.1.0.
     [ "$readiness_gate_open" = "1" ] && return 0
     local _reason=""
     [ "$_boot_complete_now" != "1" ] && _reason="${_reason} boot_completed"

@@ -1,11 +1,11 @@
 #!/system/bin/sh
-# AFWall Boot AntiLeak v5.0.0 - Common library
+# AFWall Boot AntiLeak v5.1.0 - Common library
 # POSIX/ash compatible. No bashisms. Sourced by all module scripts; do not
 # execute directly.
 
 # ── Module identity ────────────────────────────────────────────────────────────
 MODULE_ID="AFWall-Boot-AntiLeak"
-MODULE_VERSION="v5.0.0"
+MODULE_VERSION="v5.1.0"
 MODULE_DATA="/data/adb/${MODULE_ID}"
 LOG_DIR="${MODULE_DATA}/logs"
 LOG_FILE="${LOG_DIR}/boot.log"
@@ -195,7 +195,7 @@ _ipt_out() {
 
 
 # ── Config loading ─────────────────────────────────────────────────────────────
-# v5.0.0 breaking-change config model: only module-local config is read.
+# v5.1.0 breaking-change config model: only module-local config is read.
 # Sources, in order:
 #   1. $MODDIR/config.sh        (packaged defaults)
 #   2. $MODDIR/config.local.sh  (optional user overrides)
@@ -267,7 +267,7 @@ derive_internal_config() {
   DEBUG="$(_config_bool "${DEBUG:-0}")"
 
   # Internal knobs consumed by the existing lower-layer/firewall implementation.
-  # They are derived only from v5.0.0 user-facing settings and are not user config.
+  # They are derived only from v5.1.0 user-facing settings and are not user config.
   ENABLE_FORWARD_BLOCK="$BLOCK_FORWARD_EFFECTIVE"
   ENABLE_INPUT_BLOCK="$BLOCK_INPUT_EFFECTIVE"
   TRANSPORT_RESTORE_GATING_EFFECTIVE=1
