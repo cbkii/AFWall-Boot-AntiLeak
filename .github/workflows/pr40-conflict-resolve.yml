@@ -1,8 +1,10 @@
 name: PR 40 Conflict Resolver
 
 on:
-  issue_comment:
-    types: [created]
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/pr40-conflict-resolve.yml"
 
 permissions:
   contents: write
@@ -13,10 +15,6 @@ concurrency:
 
 jobs:
   resolve:
-    if: >-
-      github.event.issue.number == 40 &&
-      github.event.issue.pull_request != null &&
-      github.event.comment.body == '/resolve-pr40-conflicts'
     runs-on: ubuntu-latest
 
     steps:
