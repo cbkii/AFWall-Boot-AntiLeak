@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate or synchronise release version metadata."""
+"""Validate, inspect, increment, or synchronise release version metadata."""
 
 import json
 import pathlib
@@ -8,16 +8,50 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 VERSION_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+BUMP_PARTS = {"patch", "minor", "major"}
 
 
-def version_code_from_version(version: str) -> int:
+def parse_version(version: str) -> tuple[int, int, int]:
     match = VERSION_RE.match(version)
     if not match:
         raise SystemExit(f"version must be vMAJOR.MINOR.PATCH, got: {version}")
-    major, minor, patch = (int(value) for value in match.groups())
+    return tuple(int(value) for value in match.groups())
+
+
+def version_code_from_version(version: str) -> int:
+    major, minor, patch = parse_version(version)
     if minor > 99 or patch > 99:
         raise SystemExit("minor and patch must be <= 99 for versionCode encoding")
     return major * 10000 + minor * 100 + patch
+
+
+def next_version(version: str, part: str) -> str:
+    if part not in BUMP_PARTS:
+        raise SystemExit(
+            f"increment must be one of: {', '.join(sorted(BUMP_PARTS))}; got: {part}"
+        )
+
+    major, minor, patch = parse_version(version)
+    if part == "major":
+        major += 1
+        minor = 0
+        patch = 0
+    elif part == "minor":
+        minor += 1
+        patch = 0
+    else:
+        patch += 1
+
+    # versionCode reserves two decimal digits each for minor and patch. Roll an
+    # overflowing component forward instead of producing an ambiguous code.
+    if patch > 99:
+        patch = 0
+        minor += 1
+    if minor > 99:
+        minor = 0
+        major += 1
+
+    return f"v{major}.{minor}.{patch}"
 
 
 def read_module_metadata() -> tuple[str, int, str]:
@@ -38,6 +72,13 @@ def read_module_metadata() -> tuple[str, int, str]:
     if not code_text.isdigit():
         raise SystemExit(f"module.prop versionCode must be numeric, got: {code_text}")
     return version, int(code_text), module_id
+
+
+def emit_metadata(version: str, code: int, module_id: str | None = None) -> None:
+    if module_id is not None:
+        print(f"id={module_id}")
+    print(f"version={version}")
+    print(f"versionCode={code}")
 
 
 def check_metadata() -> None:
@@ -96,7 +137,10 @@ def set_metadata(version: str, code_text: str) -> None:
 
     replace(
         "module.prop",
-        [(r"^version=.*$", f"version={version}"), (r"^versionCode=.*$", f"versionCode={code_text}")],
+        [
+            (r"^version=.*$", f"version={version}"),
+            (r"^versionCode=.*$", f"versionCode={code_text}"),
+        ],
     )
     update_json = ROOT / "update.json"
     data = json.loads(update_json.read_text(encoding="utf-8"))
@@ -109,15 +153,24 @@ def set_metadata(version: str, code_text: str) -> None:
         [
             (r"(# AFWall Boot AntiLeak )v\d+\.\d+\.\d+", rf"\g<1>{version}"),
             (r"^MODULE_VERSION=.*$", f'MODULE_VERSION="{version}"'),
-            (r"v\d+\.\d+\.\d+ breaking-change config model", f"{version} breaking-change config model"),
-            (r"derived only from v\d+\.\d+\.\d+ user-facing settings", f"derived only from {version} user-facing settings"),
+            (
+                r"v\d+\.\d+\.\d+ breaking-change config model",
+                f"{version} breaking-change config model",
+            ),
+            (
+                r"derived only from v\d+\.\d+\.\d+ user-facing settings",
+                f"derived only from {version} user-facing settings",
+            ),
         ],
     )
     replace(
         "bin/lowlevel.sh",
         [
             (r"(# AFWall Boot AntiLeak )v\d+\.\d+\.\d+", rf"\g<1>{version}"),
-            (r"derived from v\d+\.\d+\.\d+ VPN_LOCKDOWN_MODE", f"derived from {version} VPN_LOCKDOWN_MODE"),
+            (
+                r"derived from v\d+\.\d+\.\d+ VPN_LOCKDOWN_MODE",
+                f"derived from {version} VPN_LOCKDOWN_MODE",
+            ),
         ],
     )
     replace(
@@ -125,34 +178,63 @@ def set_metadata(version: str, code_text: str) -> None:
         [
             (r"(# AFWall Boot AntiLeak )v\d+\.\d+\.\d+", rf"\g<1>{version}"),
             (r"v\d+\.\d+\.\d+ profiles", f"{version} profiles"),
-            (r"AFWall Boot AntiLeak v\d+\.\d+\.\d+ local overrides", f"AFWall Boot AntiLeak {version} local overrides"),
-            (r"── v\d+\.\d+\.\d+ Configuration Summary", f"── {version} Configuration Summary"),
-            (r"v\d+\.\d+\.\d+ is a breaking config cleanup release", f"{version} is a breaking config cleanup release"),
+            (
+                r"AFWall Boot AntiLeak v\d+\.\d+\.\d+ local overrides",
+                f"AFWall Boot AntiLeak {version} local overrides",
+            ),
+            (
+                r"── v\d+\.\d+\.\d+ Configuration Summary",
+                f"── {version} Configuration Summary",
+            ),
+            (
+                r"v\d+\.\d+\.\d+ is a breaking config cleanup release",
+                f"{version} is a breaking config cleanup release",
+            ),
         ],
     )
     replace(
         "config.sh",
         [
             (r"(# AFWall Boot AntiLeak )v\d+\.\d+\.\d+", rf"\g<1>{version}"),
-            (r"Breaking-change note: v\d+\.\d+\.\d+", f"Breaking-change note: {version}"),
+            (
+                r"Breaking-change note: v\d+\.\d+\.\d+",
+                f"Breaking-change note: {version}",
+            ),
         ],
     )
     replace(
         "common/install.sh",
         [
-            (r"AFWall Boot AntiLeak\s+v\d+\.\d+\.\d+", f"AFWall Boot AntiLeak  {version}"),
-            (r"\[v\d+\.\d+\.\d+ BREAKING CONFIG CLEANUP\]", f"[{version} BREAKING CONFIG CLEANUP]"),
+            (
+                r"AFWall Boot AntiLeak\s+v\d+\.\d+\.\d+",
+                f"AFWall Boot AntiLeak  {version}",
+            ),
+            (
+                r"\[v\d+\.\d+\.\d+ BREAKING CONFIG CLEANUP\]",
+                f"[{version} BREAKING CONFIG CLEANUP]",
+            ),
         ],
     )
     replace(
         "reconfigure.sh",
-        [(r"v\d+\.\d+\.\d+ ignores old external config paths", f"{version} ignores old external config paths")],
+        [
+            (
+                r"v\d+\.\d+\.\d+ ignores old external config paths",
+                f"{version} ignores old external config paths",
+            )
+        ],
     )
     replace(
         "service.sh",
         [
-            (r"v\d+\.\d+\.\d+ config-derived internal defaults", f"{version} config-derived internal defaults"),
-            (r"watchdog clocks in v\d+\.\d+\.\d+", f"watchdog clocks in {version}"),
+            (
+                r"v\d+\.\d+\.\d+ config-derived internal defaults",
+                f"{version} config-derived internal defaults",
+            ),
+            (
+                r"watchdog clocks in v\d+\.\d+\.\d+",
+                f"watchdog clocks in {version}",
+            ),
         ],
     )
     for document in ("README.md", "ADVANCED.md"):
@@ -161,22 +243,43 @@ def set_metadata(version: str, code_text: str) -> None:
     check_metadata()
 
 
+def usage() -> None:
+    print(
+        "usage: sync-version-metadata.py --check | --current | "
+        "--next {patch,minor,major} | --bump {patch,minor,major} | "
+        "vMAJOR.MINOR.PATCH VERSION_CODE",
+        file=sys.stderr,
+    )
+
+
 def main() -> int:
     if sys.argv[1:] == ["--check"]:
         check_metadata()
         print("Release metadata is consistent.")
         return 0
 
-    if len(sys.argv) != 3:
-        print(
-            "usage: sync-version-metadata.py --check | "
-            "sync-version-metadata.py vMAJOR.MINOR.PATCH VERSION_CODE",
-            file=sys.stderr,
-        )
-        return 2
+    if sys.argv[1:] == ["--current"]:
+        check_metadata()
+        version, code, module_id = read_module_metadata()
+        emit_metadata(version, code, module_id)
+        return 0
 
-    set_metadata(sys.argv[1].strip(), sys.argv[2].strip())
-    return 0
+    if len(sys.argv) == 3 and sys.argv[1] in {"--next", "--bump"}:
+        part = sys.argv[2].strip()
+        current_version, _current_code, module_id = read_module_metadata()
+        planned_version = next_version(current_version, part)
+        planned_code = version_code_from_version(planned_version)
+        if sys.argv[1] == "--bump":
+            set_metadata(planned_version, str(planned_code))
+        emit_metadata(planned_version, planned_code, module_id)
+        return 0
+
+    if len(sys.argv) == 3:
+        set_metadata(sys.argv[1].strip(), sys.argv[2].strip())
+        return 0
+
+    usage()
+    return 2
 
 
 if __name__ == "__main__":
