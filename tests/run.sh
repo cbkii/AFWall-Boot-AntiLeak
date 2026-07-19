@@ -59,9 +59,18 @@ for (version, part), expected in cases.items():
     actual = module.next_version(version, part)
     if actual != expected:
         raise SystemExit(f"{version} {part}: expected {expected}, got {actual}")
+
+for invalid in ("v5.100.0", "v5.0.100"):
+    try:
+        module.next_version(invalid, "patch")
+    except SystemExit:
+        pass
+    else:
+        raise SystemExit(f"invalid current version was accepted: {invalid}")
 PY
 python3 tools/sync-version-metadata.py --check
 python3 tools/sync-version-metadata.py --current >/dev/null
+python3 tools/sync-version-metadata.py --next PATCH >/dev/null
 
 metadata_hash_before="$(sha256sum module.prop update.json bin/common.sh | sha256sum | cut -d' ' -f1)"
 for increment in patch minor major; do
