@@ -5,6 +5,7 @@ import json
 import pathlib
 import re
 import sys
+from typing import Optional
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 VERSION_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
@@ -32,6 +33,9 @@ def next_version(version: str, part: str) -> str:
         )
 
     major, minor, patch = parse_version(version)
+    if minor > 99 or patch > 99:
+        raise SystemExit(f"current minor and patch must be <= 99, got: {version}")
+
     if part == "major":
         major += 1
         minor = 0
@@ -74,7 +78,9 @@ def read_module_metadata() -> tuple[str, int, str]:
     return version, int(code_text), module_id
 
 
-def emit_metadata(version: str, code: int, module_id: str | None = None) -> None:
+def emit_metadata(
+    version: str, code: int, module_id: Optional[str] = None
+) -> None:
     if module_id is not None:
         print(f"id={module_id}")
     print(f"version={version}")
@@ -265,7 +271,7 @@ def main() -> int:
         return 0
 
     if len(sys.argv) == 3 and sys.argv[1] in {"--next", "--bump"}:
-        part = sys.argv[2].strip()
+        part = sys.argv[2].strip().lower()
         current_version, _current_code, module_id = read_module_metadata()
         planned_version = next_version(current_version, part)
         planned_code = version_code_from_version(planned_version)
