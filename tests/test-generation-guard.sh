@@ -26,8 +26,9 @@ _ipt_out() { return 1; }
 _init_dirs() { mkdir -p "$STATE_DIR"; }
 resolve_afwall_pkg() { printf '%s' "$AFW_PKG"; }
 _checksum_lines() {
-  set -- $(printf '%s\n' "$1" | cksum)
-  printf '%s' "$1"
+  local checksum_output
+  checksum_output="$(printf '%s\n' "$1" | cksum)" || return 1
+  printf '%s' "${checksum_output%% *}"
 }
 _snapshot_defined_chains() { printf '%s\n' "$1" | sed -n 's/^-N \([^ ]*\).*/\1/p'; }
 _afwall_chain_defined() {
