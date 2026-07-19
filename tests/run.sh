@@ -37,6 +37,17 @@ shellcheck --severity=warning \
 git ls-files -z '*.sh' | xargs -0 -n1 sh -n
 python3 -m py_compile tools/sync-version-metadata.py
 python3 tools/sync-version-metadata.py --check
+python3 tools/sync-version-metadata.py --current >/dev/null
+
+metadata_hash_before="$(sha256sum module.prop update.json bin/common.sh | sha256sum | cut -d' ' -f1)"
+for increment in patch minor major; do
+  python3 tools/sync-version-metadata.py --next "$increment" >/dev/null
+done
+metadata_hash_after="$(sha256sum module.prop update.json bin/common.sh | sha256sum | cut -d' ' -f1)"
+[ "$metadata_hash_before" = "$metadata_hash_after" ] || {
+  printf 'ERROR: version planning modified release metadata\n' >&2
+  exit 1
+}
 
 busybox ash tests/test-common-helpers.sh
 dash tests/test-common-helpers.sh
