@@ -23,11 +23,12 @@ def version_code_from_version(version: str) -> int:
 def read_module_metadata() -> tuple[str, int, str]:
     text = (ROOT / "module.prop").read_text(encoding="utf-8")
     values: dict[str, str] = {}
-    for line in text.splitlines():
-        if "=" not in line:
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
             continue
         key, value = line.split("=", 1)
-        values[key] = value.strip()
+        values[key.strip()] = value.strip()
 
     version = values.get("version", "")
     code_text = values.get("versionCode", "")
