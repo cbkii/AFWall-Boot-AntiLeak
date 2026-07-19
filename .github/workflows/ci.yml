@@ -26,13 +26,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends busybox shellcheck zip unzip
+        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends busybox shellcheck zip unzip gcc binutils
 
-      # ── Lint: module runtime scripts ────────────────────────────────────────
-      # Checks the module's own shell scripts (not third-party MMT-Extended
-      # files or sourced-only config/install stubs).
-      # .shellcheckrc sets shell=ash and disables ash/Android false positives.
-      - name: Lint module shell scripts (shellcheck)
+      - name: Lint and syntax-check module shell scripts
         run: |
           shellcheck --severity=warning \
             bin/common.sh \
@@ -44,28 +40,35 @@ jobs:
             reconfigure.sh \
             service.sh \
             uninstall.sh \
+            tests/test-common-helpers.sh \
             tests/test-generation-guard.sh \
             tests/test-reconciliation.sh \
             tools/config-doc-tests.sh \
+            tools/keycheck-tests.sh \
             tools/mock-logic-tests.sh \
+            tools/recovery-tests.sh \
             tools/timeline-sim-tests.sh \
+            tools/transport-readiness-tests.sh \
             tools/build-release.sh \
-            tools/validate-zip.sh \
-            tools/keycheck-tests.sh
+            tools/validate-zip.sh
+          git ls-files -z '*.sh' | xargs -0 -r -n1 sh -n
 
       - name: Test generation-aware AFWall handoff
         run: |
-          chmod +x tests/test-generation-guard.sh tests/test-reconciliation.sh tools/config-doc-tests.sh tools/mock-logic-tests.sh tools/timeline-sim-tests.sh tools/keycheck-tests.sh
+          chmod +x tests/test-common-helpers.sh tests/test-generation-guard.sh tests/test-reconciliation.sh tools/config-doc-tests.sh tools/keycheck-tests.sh tools/mock-logic-tests.sh tools/recovery-tests.sh tools/timeline-sim-tests.sh tools/transport-readiness-tests.sh
+          busybox ash tests/test-common-helpers.sh
+          dash tests/test-common-helpers.sh
           busybox ash tests/test-generation-guard.sh
           dash tests/test-generation-guard.sh
           busybox ash tests/test-reconciliation.sh
           dash tests/test-reconciliation.sh
           sh tools/config-doc-tests.sh
-          sh tools/mock-logic-tests.sh
-          sh tools/timeline-sim-tests.sh
           sh tools/keycheck-tests.sh
+          sh tools/mock-logic-tests.sh
+          sh tools/recovery-tests.sh
+          sh tools/timeline-sim-tests.sh
+          sh tools/transport-readiness-tests.sh
 
-      # ── Build: produce the installable ZIP ──────────────────────────────────
       - name: Build module ZIP
         run: |
           chmod +x tools/build-release.sh
@@ -73,7 +76,6 @@ jobs:
           VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           tools/build-release.sh dist/ "${MODULE_ID}-${VERSION}.zip" "${MODULE_ID}.zip"
 
-      # ── Validate: check ZIP internal structure ──────────────────────────────
       - name: Validate ZIP structure
         run: |
           chmod +x tools/validate-zip.sh
@@ -82,13 +84,11 @@ jobs:
           tools/validate-zip.sh "dist/${MODULE_ID}-${VERSION}.zip"
           tools/validate-zip.sh "dist/${MODULE_ID}.zip"
 
-      # ── Upload: make artifacts available for PR review ──────────────────────
       - name: Upload module ZIP artifact
         uses: actions/upload-artifact@v4
         with:
           name: module-zip
           path: dist/*.zip
-          # Keep for 14 days so reviewers can download and test
           retention-days: 14
 
       - name: Upload checksum artifact
