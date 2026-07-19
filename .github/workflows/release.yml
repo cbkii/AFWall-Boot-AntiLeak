@@ -3,11 +3,20 @@ name: Release
 on:
   workflow_dispatch:
     inputs:
-      ref:
-        description: "Trusted branch, tag, or commit to publish"
-        required: false
+      branch:
+        description: "Trusted branch to bump, tag, and publish"
+        required: true
         type: string
         default: "main"
+      increment:
+        description: "Semantic version component to increment"
+        required: true
+        type: choice
+        default: "patch"
+        options:
+          - patch
+          - minor
+          - major
       draft:
         description: "Create a draft release"
         required: false
@@ -23,20 +32,48 @@ concurrency:
 
 jobs:
   publish:
-    name: Validate and publish release
+    name: Auto-bump, validate, tag, and publish
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
 
     steps:
-      - name: Checkout immutable release source
+      - name: Checkout trusted release branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.ref || 'main' }}
+          ref: ${{ inputs.branch }}
           fetch-depth: 0
+          fetch-tags: true
           persist-credentials: false
+
+      - name: Verify release source
+        id: source
+        env:
+          SOURCE_BRANCH: ${{ inputs.branch }}
+        run: |
+          git check-ref-format --branch "$SOURCE_BRANCH" >/dev/null || {
+            echo "::error::Invalid branch name: $SOURCE_BRANCH"
+            exit 1
+          }
+
+          REMOTE_SHA="$(git ls-remote --heads origin "refs/heads/${SOURCE_BRANCH}" | sed -n '1s/[[:space:]].*//p')"
+          LOCAL_SHA="$(git rev-parse HEAD)"
+          if [ -z "$REMOTE_SHA" ]; then
+            echo "::error::Release source must be an existing branch, not a tag or detached commit: $SOURCE_BRANCH"
+            exit 1
+          fi
+          if [ "$LOCAL_SHA" != "$REMOTE_SHA" ]; then
+            echo "::error::Checked-out source $LOCAL_SHA does not match origin/$SOURCE_BRANCH at $REMOTE_SHA"
+            exit 1
+          fi
+
+          git fetch --force --tags origin
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          echo "branch=$SOURCE_BRANCH" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$LOCAL_SHA" >> "$GITHUB_OUTPUT"
 
       - name: Install validation dependencies
         run: >-
@@ -44,62 +81,207 @@ jobs:
           sudo apt-get install -y --no-install-recommends
           busybox dash shellcheck zip unzip gcc binutils python3
 
-      - name: Validate source tree
+      - name: Validate current source tree
         run: sh tests/run.sh
 
-      - name: Read release metadata
-        id: metadata
+      - name: Plan release transaction
+        id: plan
+        env:
+          INCREMENT: ${{ inputs.increment }}
         run: |
-          MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
-          VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
-          VERSION_CODE="$(grep '^versionCode=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
-          TARGET_SHA="$(git rev-parse HEAD)"
+          CURRENT_META="$(python3 tools/sync-version-metadata.py --current)"
+          MODULE_ID="$(printf '%s\n' "$CURRENT_META" | sed -n 's/^id=//p')"
+          CURRENT_VERSION="$(printf '%s\n' "$CURRENT_META" | sed -n 's/^version=//p')"
+          CURRENT_CODE="$(printf '%s\n' "$CURRENT_META" | sed -n 's/^versionCode=//p')"
+          CURRENT_SHA="$(git rev-parse HEAD)"
 
-          [ -n "$MODULE_ID" ] && [ -n "$VERSION" ] && [ -n "$VERSION_CODE" ] || {
-            echo "::error::module.prop must define id, version and versionCode"
+          [ -n "$MODULE_ID" ] && [ -n "$CURRENT_VERSION" ] && [ -n "$CURRENT_CODE" ] || {
+            echo "::error::Could not read current release metadata"
             exit 1
           }
-          python3 tools/sync-version-metadata.py --check
 
-          if git ls-remote --exit-code --tags origin "refs/tags/${VERSION_CODE}" >/dev/null 2>&1; then
-            echo "::error::Tag ${VERSION_CODE} already exists. Bump and review release metadata before publishing another release."
-            exit 1
-          fi
-          if gh release view "$VERSION_CODE" --repo "$GH_REPO" >/dev/null 2>&1; then
-            echo "::error::Release ${VERSION_CODE} already exists. Existing releases are immutable."
-            exit 1
+          CURRENT_TAG_SHA="$(git rev-parse -q --verify "refs/tags/${CURRENT_CODE}^{commit}" 2>/dev/null || true)"
+          CURRENT_RELEASE=0
+          if gh release view "$CURRENT_CODE" --repo "$GH_REPO" >/dev/null 2>&1; then
+            CURRENT_RELEASE=1
           fi
 
+          if [ -n "$CURRENT_TAG_SHA" ] && [ "$CURRENT_RELEASE" = 0 ]; then
+            if [ "$CURRENT_TAG_SHA" != "$CURRENT_SHA" ]; then
+              echo "::error::Unpublished tag $CURRENT_CODE points to $CURRENT_TAG_SHA, not current branch HEAD $CURRENT_SHA"
+              exit 1
+            fi
+            MODE=resume
+            VERSION="$CURRENT_VERSION"
+            VERSION_CODE="$CURRENT_CODE"
+            echo "Resuming publication of existing tag $VERSION_CODE at $CURRENT_SHA"
+          else
+            if [ -z "$CURRENT_TAG_SHA" ] && [ "$CURRENT_RELEASE" = 1 ]; then
+              echo "::error::Release $CURRENT_CODE exists without a corresponding local tag"
+              exit 1
+            fi
+
+            NEXT_META="$(python3 tools/sync-version-metadata.py --next "$INCREMENT")"
+            VERSION="$(printf '%s\n' "$NEXT_META" | sed -n 's/^version=//p')"
+            VERSION_CODE="$(printf '%s\n' "$NEXT_META" | sed -n 's/^versionCode=//p')"
+            [ -n "$VERSION" ] && [ -n "$VERSION_CODE" ] || {
+              echo "::error::Could not calculate the next release version"
+              exit 1
+            }
+
+            if git rev-parse -q --verify "refs/tags/${VERSION_CODE}^{commit}" >/dev/null 2>&1; then
+              echo "::error::Planned tag $VERSION_CODE already exists"
+              exit 1
+            fi
+            if gh release view "$VERSION_CODE" --repo "$GH_REPO" >/dev/null 2>&1; then
+              echo "::error::Planned release $VERSION_CODE already exists"
+              exit 1
+            fi
+            MODE=bump
+            echo "Planned $INCREMENT increment: $CURRENT_VERSION/$CURRENT_CODE -> $VERSION/$VERSION_CODE"
+          fi
+
+          echo "mode=$MODE" >> "$GITHUB_OUTPUT"
           echo "module_id=$MODULE_ID" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
-          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Apply and validate version increment
+        if: steps.plan.outputs.mode == 'bump'
+        run: |
+          VERSION="${{ steps.plan.outputs.version }}"
+          VERSION_CODE="${{ steps.plan.outputs.version_code }}"
+          python3 tools/sync-version-metadata.py "$VERSION" "$VERSION_CODE"
+          python3 tools/sync-version-metadata.py --check
+
+          CHANGED_FILES="$(git diff --name-only)"
+          [ -n "$CHANGED_FILES" ] || {
+            echo "::error::Version increment produced no source changes"
+            exit 1
+          }
+          while IFS= read -r path; do
+            case "$path" in
+              module.prop|update.json|bin/common.sh|bin/lowlevel.sh|bin/installer_config.sh|config.sh|common/install.sh|reconfigure.sh|service.sh|README.md|ADVANCED.md)
+                ;;
+              *)
+                echo "::error::Version synchronisation changed unexpected file: $path"
+                exit 1
+                ;;
+            esac
+          done <<EOF_CHANGED_FILES
+          $CHANGED_FILES
+          EOF_CHANGED_FILES
+
+          git diff --check
+          sh tests/run.sh
+
+      - name: Create local release commit
+        id: commit
+        env:
+          RELEASE_MODE: ${{ steps.plan.outputs.mode }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          VERSION_CODE: ${{ steps.plan.outputs.version_code }}
+        run: |
+          if [ "$RELEASE_MODE" = bump ]; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add \
+              module.prop update.json \
+              bin/common.sh bin/lowlevel.sh bin/installer_config.sh \
+              config.sh common/install.sh reconfigure.sh service.sh \
+              README.md ADVANCED.md
+            if git diff --cached --quiet; then
+              echo "::error::No version metadata changes were staged"
+              exit 1
+            fi
+            git commit -m "chore(release): bump module version to ${VERSION} (versionCode ${VERSION_CODE})"
+          fi
+
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "::error::Tracked source tree is dirty after release commit creation"
+            git status --short
+            exit 1
+          fi
+
+          echo "target_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Build and validate release ZIPs
         run: |
-          MODULE_ID="${{ steps.metadata.outputs.module_id }}"
-          VERSION="${{ steps.metadata.outputs.version }}"
+          MODULE_ID="${{ steps.plan.outputs.module_id }}"
+          VERSION="${{ steps.plan.outputs.version }}"
           tools/build-release.sh dist/ "${MODULE_ID}-${VERSION}.zip" "${MODULE_ID}.zip"
           tools/validate-zip.sh "dist/${MODULE_ID}-${VERSION}.zip"
           tools/validate-zip.sh "dist/${MODULE_ID}.zip"
 
-      - name: Publish immutable GitHub release
-        run: |
-          MODULE_ID="${{ steps.metadata.outputs.module_id }}"
-          VERSION="${{ steps.metadata.outputs.version }}"
-          VERSION_CODE="${{ steps.metadata.outputs.version_code }}"
-          TARGET_SHA="${{ steps.metadata.outputs.target_sha }}"
-          DRAFT_FLAG=""
-          [ "${{ inputs.draft }}" = "true" ] && DRAFT_FLAG="--draft"
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "::error::Packaging changed tracked files after the release commit was created"
+            git status --short
+            exit 1
+          fi
 
-          gh release create "$VERSION_CODE" \
-            --repo "$GH_REPO" \
-            --target "$TARGET_SHA" \
-            --title "$VERSION" \
-            --generate-notes \
-            $DRAFT_FLAG \
+      - name: Atomically push release commit and tag
+        if: steps.plan.outputs.mode == 'bump'
+        env:
+          SOURCE_BRANCH: ${{ steps.source.outputs.branch }}
+          BASE_SHA: ${{ steps.source.outputs.base_sha }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          VERSION_CODE: ${{ steps.plan.outputs.version_code }}
+          TARGET_SHA: ${{ steps.commit.outputs.target_sha }}
+        run: |
+          REMOTE_SHA="$(git ls-remote --heads origin "refs/heads/${SOURCE_BRANCH}" | sed -n '1s/[[:space:]].*//p')"
+          if [ "$REMOTE_SHA" != "$BASE_SHA" ]; then
+            echo "::error::origin/$SOURCE_BRANCH moved from $BASE_SHA to $REMOTE_SHA during release validation; refusing to overwrite it"
+            exit 1
+          fi
+
+          git tag -a "$VERSION_CODE" "$TARGET_SHA" -m "Release $VERSION ($VERSION_CODE)"
+          git push --atomic origin \
+            "HEAD:refs/heads/${SOURCE_BRANCH}" \
+            "refs/tags/${VERSION_CODE}"
+
+      - name: Publish GitHub release
+        env:
+          MODULE_ID: ${{ steps.plan.outputs.module_id }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          VERSION_CODE: ${{ steps.plan.outputs.version_code }}
+          TARGET_SHA: ${{ steps.commit.outputs.target_sha }}
+          DRAFT: ${{ inputs.draft }}
+        run: |
+          TAG_SHA="$(git rev-parse -q --verify "refs/tags/${VERSION_CODE}^{commit}" 2>/dev/null || true)"
+          if [ "$TAG_SHA" != "$TARGET_SHA" ]; then
+            echo "::error::Tag $VERSION_CODE resolves to ${TAG_SHA:-<missing>}, expected $TARGET_SHA"
+            exit 1
+          fi
+
+          args=(
+            release create "$VERSION_CODE"
+            --repo "$GH_REPO"
+            --verify-tag
+            --title "$VERSION"
+            --generate-notes
+          )
+          if [ "$DRAFT" = true ]; then
+            args+=(--draft)
+          fi
+          gh "${args[@]}" \
             "dist/${MODULE_ID}-${VERSION}.zip" \
             "dist/${MODULE_ID}.zip" \
             dist/sha256sum.txt \
             dist/build-info.txt \
             update.json
+
+      - name: Summarize release
+        env:
+          RELEASE_MODE: ${{ steps.plan.outputs.mode }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          VERSION_CODE: ${{ steps.plan.outputs.version_code }}
+          TARGET_SHA: ${{ steps.commit.outputs.target_sha }}
+        run: |
+          {
+            echo "## Release complete"
+            echo
+            echo "- Mode: \`$RELEASE_MODE\`"
+            echo "- Version: \`$VERSION\`"
+            echo "- Tag/versionCode: \`$VERSION_CODE\`"
+            echo "- Commit: \`$TARGET_SHA\`"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -36,7 +36,51 @@ shellcheck --severity=warning \
 
 git ls-files -z '*.sh' | xargs -0 -n1 sh -n
 python3 -m py_compile tools/sync-version-metadata.py
+python3 - <<'PY'
+import importlib.util
+import pathlib
+
+path = pathlib.Path("tools/sync-version-metadata.py")
+spec = importlib.util.spec_from_file_location("release_metadata", path)
+if spec is None or spec.loader is None:
+    raise SystemExit("could not import release metadata helper")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+cases = {
+    ("v5.1.0", "patch"): "v5.1.1",
+    ("v5.1.7", "minor"): "v5.2.0",
+    ("v5.9.7", "major"): "v6.0.0",
+    ("v5.1.99", "patch"): "v5.2.0",
+    ("v5.99.99", "patch"): "v6.0.0",
+    ("v5.99.7", "minor"): "v6.0.0",
+}
+for (version, part), expected in cases.items():
+    actual = module.next_version(version, part)
+    if actual != expected:
+        raise SystemExit(f"{version} {part}: expected {expected}, got {actual}")
+
+for invalid in ("v5.100.0", "v5.0.100"):
+    try:
+        module.next_version(invalid, "patch")
+    except SystemExit:
+        pass
+    else:
+        raise SystemExit(f"invalid current version was accepted: {invalid}")
+PY
 python3 tools/sync-version-metadata.py --check
+python3 tools/sync-version-metadata.py --current >/dev/null
+python3 tools/sync-version-metadata.py --next PATCH >/dev/null
+
+metadata_hash_before="$(sha256sum module.prop update.json bin/common.sh | sha256sum | cut -d' ' -f1)"
+for increment in patch minor major; do
+  python3 tools/sync-version-metadata.py --next "$increment" >/dev/null
+done
+metadata_hash_after="$(sha256sum module.prop update.json bin/common.sh | sha256sum | cut -d' ' -f1)"
+[ "$metadata_hash_before" = "$metadata_hash_after" ] || {
+  printf 'ERROR: version planning modified release metadata\n' >&2
+  exit 1
+}
 
 busybox ash tests/test-common-helpers.sh
 dash tests/test-common-helpers.sh
