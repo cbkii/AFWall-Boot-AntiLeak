@@ -1,422 +1,105 @@
 name: Release
 
-# Manual-only release flow:
-#   1) Run from Actions UI (workflow_dispatch), or
-#   2) Comment `/release` (optionally `/release <tag>`) on a PR.
 on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Branch, tag, or commit SHA to build from (e.g. main, v1.2.3, abc1234)."
+        description: "Trusted branch, tag, or commit to publish"
         required: false
         type: string
         default: "main"
-      tag:
-        description: "Release tag (numeric versionCode, or vMAJOR.MINOR.PATCH). Leave blank to use current module.prop versionCode."
-        required: false
-        type: string
-        default: ""
       draft:
-        description: "Publish as a draft release"
+        description: "Create a draft release"
         required: false
         type: boolean
         default: false
-      force_retag:
-        description: "Force-move the git tag to current HEAD if it already exists at a different commit. Use only when re-releasing the same version after post-release commits were pushed."
-        required: false
-        type: boolean
-        default: false
-
-  issue_comment:
-    types: [created]
 
 permissions:
   contents: write
-  issues: read
-  pull-requests: read
 
-# Prevent two release runs from executing simultaneously (e.g., rapid re-dispatches).
-# cancel-in-progress: false means new runs queue rather than cancel the active one.
 concurrency:
   group: release-${{ github.repository }}
   cancel-in-progress: false
 
 jobs:
-  release:
-    name: Build, Tag, and Publish Release
+  publish:
+    name: Validate and publish release
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
-      PYTHONDONTWRITEBYTECODE: "1"
-    if: >-
-      github.event_name == 'workflow_dispatch' ||
-      (
-        github.event_name == 'issue_comment' &&
-        github.event.issue.pull_request &&
-        (
-          github.event.comment.body == '/release' ||
-          startsWith(github.event.comment.body, '/release ')
-        )
-      )
 
     steps:
-      - name: Validate comment author can trigger releases
-        if: github.event_name == 'issue_comment'
-        run: |
-          case "${{ github.event.comment.author_association }}" in
-            OWNER|MEMBER|COLLABORATOR)
-              echo "Authorized trigger from ${{ github.event.comment.user.login }}"
-              ;;
-            *)
-              echo "::error::Unauthorized release trigger from ${{ github.event.comment.user.login }} (${{ github.event.comment.author_association }})."
-              exit 1
-              ;;
-          esac
-
-      - name: Resolve ref and optional tag input
-        id: resolve
-        env:
-          COMMENT_BODY: ${{ github.event.comment.body }}
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            REF_INPUT="${{ inputs.ref }}"
-            TAG_INPUT="${{ inputs.tag }}"
-            DRAFT_INPUT="${{ inputs.draft }}"
-            FORCE_RETAG_INPUT="${{ inputs.force_retag }}"
-            if [ -n "$REF_INPUT" ]; then
-              REF="$REF_INPUT"
-            else
-              REF="main"
-            fi
-          else
-            PR_NUMBER="${{ github.event.issue.number }}"
-            # Build the PR head for same-repository PRs. Building the base branch
-            # can publish stale assets under the requested release tag/version.
-            # Fork PRs are rejected for release comments because this workflow has
-            # contents:write and publishes GitHub Releases.
-            HEAD_REPO="$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.head.repo.full_name')"
-            HEAD_REF="$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.head.ref')"
-            HEAD_SHA="$(gh api repos/${{ github.repository }}/pulls/$PR_NUMBER --jq '.head.sha')"
-            if [ "$HEAD_REPO" != "${{ github.repository }}" ]; then
-              echo "::error::Refusing /release from fork PR head $HEAD_REPO. Merge or dispatch workflow manually on a trusted branch."
-              exit 1
-            fi
-            REF="$HEAD_REF"
-            # Extract optional tag from comment body via env var (avoids shell injection).
-            # Strip any characters outside the valid tag alphabet [a-zA-Z0-9._-] so
-            # the value is safe for downstream interpolation in shell steps.
-            TAG_INPUT="$(printf '%s' "$COMMENT_BODY" | sed -nE 's#^/release[[:space:]]+([^[:space:]]+).*$#\1#p' | head -1 | tr -cd 'a-zA-Z0-9._-' | head -c 100)"
-            DRAFT_INPUT="false"
-            FORCE_RETAG_INPUT="false"
-            echo "release PR head: repo=$HEAD_REPO ref=$HEAD_REF sha=$HEAD_SHA"
-          fi
-
-          echo "ref=$REF" >> "$GITHUB_OUTPUT"
-          echo "tag_input=$TAG_INPUT" >> "$GITHUB_OUTPUT"
-          echo "draft_input=$DRAFT_INPUT" >> "$GITHUB_OUTPUT"
-          echo "force_retag_input=$FORCE_RETAG_INPUT" >> "$GITHUB_OUTPUT"
-          echo "Resolved ref=$REF tag_input=${TAG_INPUT:-<none>} draft=$DRAFT_INPUT force_retag=$FORCE_RETAG_INPUT"
-
-      - name: Checkout repository
+      - name: Checkout immutable release source
         uses: actions/checkout@v4
         with:
-          token: ${{ github.token }}
-          persist-credentials: true
-          ref: ${{ steps.resolve.outputs.ref }}
+          ref: ${{ inputs.ref || 'main' }}
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Ensure authenticated origin for push/tag in public or private repos
+      - name: Install validation dependencies
+        run: >-
+          sudo apt-get update -qq &&
+          sudo apt-get install -y --no-install-recommends
+          busybox dash shellcheck zip unzip gcc binutils python3
+
+      - name: Validate source tree
+        run: sh tests/run.sh
+
+      - name: Read release metadata
+        id: metadata
         run: |
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-
-      - name: Configure git identity
-        run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
-      - name: Install dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends zip unzip python3
-
-      - name: Pre-release repository validation
-        run: |
-          python3 -m py_compile tools/sync-version-metadata.py .github/scripts/previous_release_tag.py
-          find . -path './.git' -prune -o -type f -name '*.sh' -print | sort | xargs -r sh -n
-          ./tools/mock-logic-tests.sh
-          git diff --check
-
-      - name: Read version metadata from module.prop
-        id: meta
-        run: |
-          VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
-          VERSION_CODE="$(grep '^versionCode=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
-          if [ -z "$VERSION" ] || [ -z "$VERSION_CODE" ] || [ -z "$MODULE_ID" ]; then
-            echo "::error::Could not parse id/version/versionCode from module.prop"
-            exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
-          echo "module_id=$MODULE_ID" >> "$GITHUB_OUTPUT"
-
-      - name: Determine and validate release tag
-        id: tag
-        env:
-          TAG_INPUT_RAW: ${{ steps.resolve.outputs.tag_input }}
-        run: |
-          TAG_INPUT="$TAG_INPUT_RAW"
-          CURRENT_VERSION="${{ steps.meta.outputs.version }}"
-          CURRENT_CODE="${{ steps.meta.outputs.version_code }}"
-
-          RELEASE_TAG=""
-          RELEASE_VERSION=""
-
-          if [ -z "$TAG_INPUT" ]; then
-            # Backwards compatible default: keep tag aligned to current versionCode.
-            RELEASE_TAG="$CURRENT_CODE"
-            RELEASE_VERSION="$CURRENT_VERSION"
-          elif echo "$TAG_INPUT" | grep -qE '^[0-9]+$'; then
-            # Backwards compatible manual override with numeric versionCode tag.
-            RELEASE_TAG="$TAG_INPUT"
-            V_MAJOR="$((RELEASE_TAG / 10000))"
-            V_MINOR="$(((RELEASE_TAG % 10000) / 100))"
-            V_PATCH="$((RELEASE_TAG % 100))"
-            RELEASE_VERSION="v${V_MAJOR}.${V_MINOR}.${V_PATCH}"
-          else
-            # Improved UX: also accept vMAJOR.MINOR.PATCH and derive numeric versionCode.
-            case "$TAG_INPUT" in
-              v*) SEMVER_TAG="$TAG_INPUT" ;;
-              *) SEMVER_TAG="v$TAG_INPUT" ;;
-            esac
-            if ! echo "$SEMVER_TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-              echo "::error::Tag must be numeric versionCode or vX.Y.Z. Got: $TAG_INPUT"
-              exit 1
-            fi
-
-            VERSION_BODY="${SEMVER_TAG#v}"
-            V_MAJOR="$(printf '%s' "$VERSION_BODY" | cut -d. -f1)"
-            V_MINOR="$(printf '%s' "$VERSION_BODY" | cut -d. -f2)"
-            V_PATCH="$(printf '%s' "$VERSION_BODY" | cut -d. -f3)"
-
-            if [ "$V_MINOR" -gt 99 ] || [ "$V_PATCH" -gt 99 ]; then
-              echo "::error::Minor/patch must be <=99 when deriving numeric versionCode from vX.Y.Z. Got: $SEMVER_TAG"
-              exit 1
-            fi
-
-            RELEASE_TAG="$(printf '%d%02d%02d' "$V_MAJOR" "$V_MINOR" "$V_PATCH")"
-            RELEASE_VERSION="$SEMVER_TAG"
-          fi
-
-          if ! echo "$RELEASE_TAG" | grep -qE '^[0-9]+$'; then
-            echo "::error::Final release tag must be numeric versionCode. Got: $RELEASE_TAG"
-            exit 1
-          fi
-
-          if [ "$CURRENT_VERSION" = "$RELEASE_VERSION" ] && [ "$CURRENT_CODE" = "$RELEASE_TAG" ]; then
-            NEEDS_BUMP=false
-          else
-            if [ "$RELEASE_TAG" -lt "$CURRENT_CODE" ]; then
-              echo "::error::Release tag/versionCode $RELEASE_TAG is less than current $CURRENT_CODE. Use a higher versionCode to publish a newer release."
-              exit 1
-            fi
-            NEEDS_BUMP=true
-          fi
-
-          echo "needs_bump=$NEEDS_BUMP" >> "$GITHUB_OUTPUT"
-          echo "release_tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
-          echo "release_version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
-          echo "Release tag: $RELEASE_TAG release_version=$RELEASE_VERSION needs_bump=$NEEDS_BUMP"
-
-      - name: Bump module metadata when releasing a new version
-        id: bump
-        if: steps.tag.outputs.needs_bump == 'true'
-        run: |
-          BRANCH="$(git symbolic-ref --short -q HEAD || true)"
-          if [ -z "$BRANCH" ]; then
-            echo "::error::Cannot auto-bump metadata when checkout is detached. Use a branch ref or update module.prop first."
-            exit 1
-          fi
-
-          RELEASE_TAG="${{ steps.tag.outputs.release_tag }}"
-          RELEASE_VERSION="${{ steps.tag.outputs.release_version }}"
-
-          python3 tools/sync-version-metadata.py "$RELEASE_VERSION" "$RELEASE_TAG"
-
-          git add module.prop update.json bin/common.sh bin/lowlevel.sh bin/installer_config.sh config.sh common/install.sh reconfigure.sh service.sh README.md ADVANCED.md
-          if git diff --cached --quiet; then
-            echo "No metadata changes detected after bump logic; skipping commit/push."
-          else
-            git commit -m "chore(release): bump module version to ${RELEASE_VERSION} (versionCode ${RELEASE_TAG})"
-            git push origin HEAD:"$BRANCH"
-          fi
-
-      - name: Sync update.json version metadata from module.prop
-        run: |
-          RELEASE_TAG="${{ steps.tag.outputs.release_tag }}"
-          BRANCH="$(git symbolic-ref --short -q HEAD || true)"
           VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
           VERSION_CODE="$(grep '^versionCode=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
-          python3 tools/sync-version-metadata.py "$VERSION" "$VERSION_CODE"
+          TARGET_SHA="$(git rev-parse HEAD)"
 
-          if git diff --quiet -- module.prop update.json bin/common.sh bin/lowlevel.sh bin/installer_config.sh config.sh common/install.sh reconfigure.sh service.sh README.md ADVANCED.md; then
-            echo "release metadata already in sync with module.prop."
-          else
-            # Guard: if this tag was already pushed to origin in a prior run, pushing a
-            # new sync commit would advance HEAD past the existing tag, causing a
-            # tag/commit mismatch that fails the "Create tag" step.  Emit a warning
-            # instead and let the "Create tag" step handle the re-publish scenario.
-            if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
-              echo "::warning::release metadata is out of sync with module.prop but tag ${RELEASE_TAG} already exists on origin. Skipping sync commit to avoid advancing HEAD past the existing tag. Fix metadata manually if needed."
-            else
-              if [ -z "$BRANCH" ]; then
-                echo "::error::release metadata changed but checkout is detached; cannot commit synced metadata."
-                exit 1
-              fi
-              git add module.prop update.json bin/common.sh bin/lowlevel.sh bin/installer_config.sh config.sh common/install.sh reconfigure.sh service.sh README.md ADVANCED.md
-              git commit -m "chore: sync release metadata"
-              git push origin HEAD:"$BRANCH"
-            fi
-          fi
-
-      - name: Validate release metadata synchronisation
-        run: |
-          python3 -m py_compile tools/sync-version-metadata.py .github/scripts/previous_release_tag.py
-          ./tools/mock-logic-tests.sh
-          git diff --check
-
-      - name: Read final version metadata
-        id: meta_final
-        run: |
-          VERSION="$(grep '^version=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
-          VERSION_CODE="$(grep '^versionCode=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
-          MODULE_ID="$(grep '^id=' module.prop | cut -d= -f2 | tr -d '[:space:]')"
-
-          [ -n "$VERSION" ] && [ -n "$VERSION_CODE" ] && [ -n "$MODULE_ID" ] || {
-            echo "::error::Could not parse id/version/versionCode from module.prop after release tag processing"
+          [ -n "$MODULE_ID" ] && [ -n "$VERSION" ] && [ -n "$VERSION_CODE" ] || {
+            echo "::error::module.prop must define id, version and versionCode"
             exit 1
           }
+          python3 tools/sync-version-metadata.py --check
 
-          if [ "$VERSION_CODE" != "${{ steps.tag.outputs.release_tag }}" ]; then
-            echo "::error::Final module.prop versionCode ($VERSION_CODE) does not match release tag (${{ steps.tag.outputs.release_tag }})."
+          if git ls-remote --exit-code --tags origin "refs/tags/${VERSION_CODE}" >/dev/null 2>&1; then
+            echo "::error::Tag ${VERSION_CODE} already exists. Bump and review release metadata before publishing another release."
             exit 1
           fi
-          if [ "$VERSION" != "${{ steps.tag.outputs.release_version }}" ]; then
-            echo "::error::Final module.prop version ($VERSION) does not match release version (${{ steps.tag.outputs.release_version }})."
-            exit 1
-          fi
-          UPDATE_VERSION="$(python3 -c 'import json; print(json.load(open("update.json"))["version"])')"
-          UPDATE_CODE="$(python3 -c 'import json; print(json.load(open("update.json"))["versionCode"])')"
-          if [ "$UPDATE_VERSION" != "$VERSION" ] || [ "$UPDATE_CODE" != "$VERSION_CODE" ]; then
-            echo "::error::update.json ($UPDATE_VERSION/$UPDATE_CODE) does not match module.prop ($VERSION/$VERSION_CODE)."
+          if gh release view "$VERSION_CODE" --repo "$GH_REPO" >/dev/null 2>&1; then
+            echo "::error::Release ${VERSION_CODE} already exists. Existing releases are immutable."
             exit 1
           fi
 
+          echo "module_id=$MODULE_ID" >> "$GITHUB_OUTPUT"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
-          echo "module_id=$MODULE_ID" >> "$GITHUB_OUTPUT"
+          echo "target_sha=$TARGET_SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Build release ZIPs
+      - name: Build and validate release ZIPs
         run: |
-          chmod +x tools/build-release.sh
-          ZIP_NAME="${{ steps.meta_final.outputs.module_id }}-${{ steps.meta_final.outputs.version }}.zip"
-          tools/build-release.sh dist/ "$ZIP_NAME" "${{ steps.meta_final.outputs.module_id }}.zip"
+          MODULE_ID="${{ steps.metadata.outputs.module_id }}"
+          VERSION="${{ steps.metadata.outputs.version }}"
+          tools/build-release.sh dist/ "${MODULE_ID}-${VERSION}.zip" "${MODULE_ID}.zip"
+          tools/validate-zip.sh "dist/${MODULE_ID}-${VERSION}.zip"
+          tools/validate-zip.sh "dist/${MODULE_ID}.zip"
 
-      - name: Validate ZIP structure and embedded version metadata
+      - name: Publish immutable GitHub release
         run: |
-          chmod +x tools/validate-zip.sh
-          for zip in \
-            "dist/${{ steps.meta_final.outputs.module_id }}-${{ steps.meta_final.outputs.version }}.zip" \
-            "dist/${{ steps.meta_final.outputs.module_id }}.zip"; do
-            tools/validate-zip.sh "$zip"
-            ZIP_VERSION="$(unzip -p "$zip" module.prop | grep '^version=' | cut -d= -f2 | tr -d '[:space:]')"
-            ZIP_CODE="$(unzip -p "$zip" module.prop | grep '^versionCode=' | cut -d= -f2 | tr -d '[:space:]')"
-            ZIP_UPDATE_VERSION="$(unzip -p "$zip" update.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
-            ZIP_UPDATE_CODE="$(unzip -p "$zip" update.json | python3 -c 'import json,sys; print(json.load(sys.stdin)["versionCode"])')"
-            if [ "$ZIP_VERSION" != "${{ steps.meta_final.outputs.version }}" ] || [ "$ZIP_CODE" != "${{ steps.meta_final.outputs.version_code }}" ]; then
-              echo "::error::$zip embeds module.prop version $ZIP_VERSION/$ZIP_CODE, expected ${{ steps.meta_final.outputs.version }}/${{ steps.meta_final.outputs.version_code }}."
-              exit 1
-            fi
-            if [ "$ZIP_UPDATE_VERSION" != "$ZIP_VERSION" ] || [ "$ZIP_UPDATE_CODE" != "$ZIP_CODE" ]; then
-              echo "::error::$zip embeds update.json $ZIP_UPDATE_VERSION/$ZIP_UPDATE_CODE but module.prop is $ZIP_VERSION/$ZIP_CODE."
-              exit 1
-            fi
-            echo "$zip embeds expected version $ZIP_VERSION ($ZIP_CODE)"
-          done
-
-      - name: Create tag if missing
-        run: |
-          RELEASE_TAG="${{ steps.tag.outputs.release_tag }}"
-          VERSION="${{ steps.meta_final.outputs.version }}"
-          FORCE_RETAG="${{ steps.resolve.outputs.force_retag_input }}"
-          # Resolve HEAD after all bump/sync commits so the tag targets the exact
-          # commit that contains the released code.
-          TARGET_COMMIT="$(git rev-parse HEAD)"
-          # Use the full refs/tags/ path so a branch that happens to share the
-          # numeric tag name cannot produce a false positive.
-          if git rev-parse --verify "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
-            TAG_COMMIT="$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")"
-            if [ "$TAG_COMMIT" = "$TARGET_COMMIT" ]; then
-              echo "Tag $RELEASE_TAG already exists and points to the correct commit ($TAG_COMMIT)."
-            elif [ "$FORCE_RETAG" = "true" ]; then
-              echo "::notice::force_retag=true: moving tag $RELEASE_TAG from $TAG_COMMIT to $TARGET_COMMIT."
-              git tag -fa "$RELEASE_TAG" "$TARGET_COMMIT" -m "Release $VERSION ($RELEASE_TAG)"
-              git push origin --force "$RELEASE_TAG"
-              echo "Force-moved tag $RELEASE_TAG -> $TARGET_COMMIT"
-            elif gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
-              # Tag exists at an older commit and a GitHub Release already exists.
-              # This typically happens when post-release commits were pushed without
-              # bumping the version.  Re-publish the release assets built from the
-              # current HEAD without moving the tag.
-              echo "::warning::Tag $RELEASE_TAG exists at $TAG_COMMIT but HEAD is $TARGET_COMMIT. A GitHub Release already exists; re-publishing assets from current HEAD without moving the tag. Use force_retag=true to move the tag, or bump the versionCode to create a new release."
-            else
-              # Tag exists at a different commit with no corresponding release —
-              # this is an unexpected state that requires manual investigation.
-              echo "::error::Tag $RELEASE_TAG already exists at $TAG_COMMIT, but HEAD is $TARGET_COMMIT and no GitHub Release was found for this tag. Bump the versionCode in module.prop to publish a new release, or use force_retag=true to retag the current HEAD."
-              exit 1
-            fi
-          else
-            git tag -a "$RELEASE_TAG" "$TARGET_COMMIT" -m "Release $VERSION ($RELEASE_TAG)"
-            git push origin "$RELEASE_TAG"
-            echo "Created and pushed tag $RELEASE_TAG -> $TARGET_COMMIT"
-          fi
-
-      - name: Publish GitHub Release
-        run: |
-          RELEASE_TAG="${{ steps.tag.outputs.release_tag }}"
-          VERSION="${{ steps.meta_final.outputs.version }}"
-          VERSION_CODE="${{ steps.meta_final.outputs.version_code }}"
-          MODULE_ID="${{ steps.meta_final.outputs.module_id }}"
-          ZIP_VERSIONED="dist/${MODULE_ID}-${VERSION}.zip"
-          ZIP_STABLE="dist/${MODULE_ID}.zip"
+          MODULE_ID="${{ steps.metadata.outputs.module_id }}"
+          VERSION="${{ steps.metadata.outputs.version }}"
+          VERSION_CODE="${{ steps.metadata.outputs.version_code }}"
+          TARGET_SHA="${{ steps.metadata.outputs.target_sha }}"
           DRAFT_FLAG=""
-          if [ "${{ steps.resolve.outputs.draft_input }}" = "true" ]; then
-            DRAFT_FLAG="--draft"
-          fi
+          [ "${{ inputs.draft }}" = "true" ] && DRAFT_FLAG="--draft"
 
-          PREV_TAG="$(
-            gh release list --repo "$GH_REPO" --limit 1000 --exclude-drafts --json tagName --jq '.[].tagName' 2>/dev/null |
-            python3 .github/scripts/previous_release_tag.py "$RELEASE_TAG"
-          )"
-
-          if [ -n "$PREV_TAG" ]; then
-            CHANGELOG_LINE="**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${RELEASE_TAG}"
-          else
-            FIRST_COMMIT="$(git rev-list --max-parents=0 HEAD)"
-            CHANGELOG_LINE="**Full Changelog**: https://github.com/${{ github.repository }}/compare/${FIRST_COMMIT}...${RELEASE_TAG}"
-          fi
-
-          NOTES="$(printf '%s\n\n%s\n%s' \
-            "See [README](https://github.com/${{ github.repository }}) 👀" \
-            "## What's Changed" \
-            "* Automated module build + packaging.")"
-          NOTES="${NOTES}$(printf '\n%s' "$CHANGELOG_LINE")"
-
-          if gh release view "$RELEASE_TAG" --repo "$GH_REPO" >/dev/null 2>&1; then
-            gh release edit "$RELEASE_TAG" --repo "$GH_REPO" --title "$VERSION" --notes "$NOTES" $DRAFT_FLAG
-            gh release upload "$RELEASE_TAG" --repo "$GH_REPO" "$ZIP_VERSIONED" "$ZIP_STABLE" dist/sha256sum.txt dist/build-info.txt update.json --clobber
-          else
-            gh release create "$RELEASE_TAG" --repo "$GH_REPO" --title "$VERSION" --notes "$NOTES" $DRAFT_FLAG \
-              "$ZIP_VERSIONED" "$ZIP_STABLE" dist/sha256sum.txt dist/build-info.txt update.json
-          fi
-
-          echo "Release published: https://github.com/${{ github.repository }}/releases/tag/${RELEASE_TAG}"
+          gh release create "$VERSION_CODE" \
+            --repo "$GH_REPO" \
+            --target "$TARGET_SHA" \
+            --title "$VERSION" \
+            --generate-notes \
+            $DRAFT_FLAG \
+            "dist/${MODULE_ID}-${VERSION}.zip" \
+            "dist/${MODULE_ID}.zip" \
+            dist/sha256sum.txt \
+            dist/build-info.txt \
+            update.json
