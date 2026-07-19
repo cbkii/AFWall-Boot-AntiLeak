@@ -213,6 +213,12 @@ jobs:
           tools/validate-zip.sh "dist/${MODULE_ID}-${VERSION}.zip"
           tools/validate-zip.sh "dist/${MODULE_ID}.zip"
 
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "::error::Packaging changed tracked files after the release commit was created"
+            git status --short
+            exit 1
+          fi
+
       - name: Atomically push release commit and tag
         if: steps.plan.outputs.mode == 'bump'
         env:
