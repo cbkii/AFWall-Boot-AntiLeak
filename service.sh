@@ -474,18 +474,12 @@ fi
   # Uses the per-poll coherent snapshots (v4_snap, v6_snap) for all checks.
   # Stability is tracked via timestamps, not blocking sleep.
   #
-  # IMPORTANT — orphan/stale transport chain handling:
-  #   An afwall-wifi* or afwall-3g* chain that exists in the snapshot but is
-  #   NOT reachable from the live AFWall graph (no -j reference from any
-  #   afwall-prefixed chain) is treated as "not usable" — equivalent to absent
-  #   for the purposes of the absence-stable fallback.  This prevents a stale
-  #   chain from deadlocking transport restore indefinitely.
-  #   The absence-stable timer (wifi_absent_since / mobile_absent_since) is only
-  #   reset to 0 when the transport subtree is both present AND reachable.
-  _check_transport_readiness() {
+  # Security invariant: present-but-unreachable transport chains are "not usable"
+  # (treated as absent). This fallback path ensures stale AFWall chains cannot
+  # deadlock restoration. The absence timer resets ONLY when the subtree is BOTH
+  # present AND reachable.
+  _check_wifi_transport_readiness() {
     local now_ts="$NOW"
-
-    # ── Wi-Fi transport ─────────────────────────────────────────────────────
     if [ "$wifi_done" = "0" ]; then
       [ "$wifi_pending_since" = "0" ] && [ "$now_ts" != "0" ] && wifi_pending_since="$now_ts"
       # Check both v4 and v6 snapshots for any afwall-wifi-prefixed subtree.
@@ -524,7 +518,7 @@ fi
         local _wifi_settle="$TRANSPORT_SETTLE_SECS_EFFECTIVE"
         [ "$_boot_complete_now" = "1" ] && _wifi_settle="$TRANSPORT_SETTLE_SECS_POST_BOOT_EFFECTIVE"
         if [ "$_wifi_stable" -ge "$_wifi_settle" ]; then
-          log_on_transition "wifi_restore" "stable" "service: wifi transport: subtree stable=${_wifi_stable}s fp=$wifi_last_fp — Wi-Fi ready; attempting restore"
+          log_on_transition "wifi_restore" "stable" "service: wifi transport: subtree stable=${_wifi_stable}s fp=$wifi_last_fp — wifi ready; attempting restore"
           if lowlevel_restore_wifi_if_allowed; then
             wifi_done=1
             wifi_pending_since=0
@@ -535,8 +529,6 @@ fi
 
       else
         # Transport either absent OR present-but-unreachable (orphan/stale chain).
-        # In both cases treat as "not usable" and apply absence-stable fallback to
-        # prevent permanent deadlock when AFWall no longer references the chain.
         wifi_last_fp=""; wifi_fp_stable_since=0
         if [ "$_wifi_in_snap" = "1" ]; then
           debug_log "service: wifi subtree exists but is unreachable from AFWall graph — treating as absent for fallback"
@@ -598,8 +590,10 @@ fi
         fi
       fi
     fi
+  }
 
-    # ── Mobile data transport ───────────────────────────────────────────────
+  _check_mobile_transport_readiness() {
+    local now_ts="$NOW"
     if [ "$mobile_done" = "0" ]; then
       [ "$mobile_pending_since" = "0" ] && [ "$now_ts" != "0" ] && mobile_pending_since="$now_ts"
       local _mobile_in_snap=0 _mobile_reachable=0
@@ -704,7 +698,11 @@ fi
         fi
       fi
     fi
+  }
 
+  _check_transport_readiness() {
+    _check_wifi_transport_readiness
+    _check_mobile_transport_readiness
   }
 
   # ── Main polling loop ───────────────────────────────────────────────────────

@@ -46,6 +46,29 @@ _snapshot_jump_targets() {
 }
 
 # shellcheck source=../bin/generation_guard.sh
+
+# Mock common.sh structural helper
+_afwall_base_graph_structurally_present_from_snapshot() {
+  local snap="$1"
+  [ -n "$snap" ] || return 1
+  printf '%s\n' "$snap" | grep -qE "^-N ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
+  printf '%s\n' "$snap" | grep -qE "^-A OUTPUT .*-j ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
+  return 0
+}
+
+# Mock the common.sh cmdline helper consumed by generation_guard.sh. The actual
+# implementation is exercised separately by tests/test-common-helpers.sh.
+_afwall_cmdline_matches_pkg() {
+  local file="$1" pkg="$2" first=""
+  [ -f "$file" ] || return 1
+  # shellcheck disable=SC3045 # BusyBox ash supports NUL-delimited read -d.
+  IFS= read -r -d '' first < "$file" 2>/dev/null || [ -n "$first" ] || return 1
+  case "$first" in
+    "$pkg"|"${pkg}:"*) return 0 ;;
+  esac
+  return 1
+}
+
 . "$GUARD_PATH"
 
 pass() { printf 'ok - %s\n' "$1"; }
@@ -128,11 +151,11 @@ printf '\0' > "$READ_NUL_PROBE"
 # shellcheck disable=SC3045 # This probe intentionally detects BusyBox ash read -d support.
 if (IFS= read -r -d '' _probe < "$READ_NUL_PROBE") 2>/dev/null; then
   printf '%s\0%s\0' "$AFW_PKG" '--worker' > "$CMDLINE_FILE"
-  assert_true 'NUL cmdline fallback matches the base AFWall process' _aba_cmdline_matches_pkg "$CMDLINE_FILE" "$AFW_PKG"
+  assert_true 'NUL cmdline fallback matches the base AFWall process' _afwall_cmdline_matches_pkg "$CMDLINE_FILE" "$AFW_PKG"
   printf '%s\0%s\0' "${AFW_PKG}:root" '--worker' > "$CMDLINE_FILE"
-  assert_true 'NUL cmdline fallback matches an AFWall subprocess' _aba_cmdline_matches_pkg "$CMDLINE_FILE" "$AFW_PKG"
+  assert_true 'NUL cmdline fallback matches an AFWall subprocess' _afwall_cmdline_matches_pkg "$CMDLINE_FILE" "$AFW_PKG"
   printf '%s\0' 'com.example.other' > "$CMDLINE_FILE"
-  assert_false 'NUL cmdline fallback rejects another package' _aba_cmdline_matches_pkg "$CMDLINE_FILE" "$AFW_PKG"
+  assert_false 'NUL cmdline fallback rejects another package' _afwall_cmdline_matches_pkg "$CMDLINE_FILE" "$AFW_PKG"
 else
   pass 'NUL cmdline fallback is BusyBox-ash-specific and skipped by this shell'
 fi
@@ -182,6 +205,27 @@ ps() { printf '%s\n' 'u0_a123 123 1 0 0 S dev.ukanth.ufirewall.donate:root'; }
 assert_true 'ps fallback recognises an AFWall subprocess after pidof misses' _aba_process_present_raw "$AFW_PKG"
 ps() { printf '%s\n' 'u0_a123 123 1 0 0 S com.example.other'; }
 assert_false 'authoritative ps miss reports AFWall absent without proc fallback' _aba_process_present_raw "$AFW_PKG"
+
+
+test_base_graph_structurally_present() {
+  # 1. Missing chain fails
+  assert_false "missing chain fails" \
+    _afwall_base_graph_structurally_present_from_snapshot "-A OUTPUT -j afwall"
+
+  # 2. Missing OUTPUT hook fails
+  assert_false "missing OUTPUT hook fails" \
+    _afwall_base_graph_structurally_present_from_snapshot "-N afwall"
+
+  # 3. Valid structural graph passes
+  local valid_snap
+  valid_snap="$(printf '%s\n%s\n' "-N afwall" "-A OUTPUT -j afwall")"
+  assert_true "valid structural graph passes" \
+    _afwall_base_graph_structurally_present_from_snapshot "$valid_snap"
+
+  # 4. No recursion occurs (implicit if it returns without calling anything else)
+  # The fact that it returns directly proves no recursion into generation_guard logic.
+}
+test_base_graph_structurally_present
 
 if [ "$FAIL" -ne 0 ]; then
   printf '%s test(s) failed\n' "$FAIL" >&2

@@ -235,10 +235,11 @@ fi
 ui_print "- Removing old files"
 
 if [ -f $INFO ]; then
-  while read LINE; do
-    if [ "$(echo -n $LINE | tail -c 1)" = "~" ]; then
-      continue
-    elif [ -f "$LINE~" ]; then
+  while IFS= read -r LINE; do
+    case "$LINE" in
+      *~) continue ;;
+    esac
+    if [ -f "$LINE~" ]; then
       mv -f $LINE~ $LINE
     else
       rm -f $LINE

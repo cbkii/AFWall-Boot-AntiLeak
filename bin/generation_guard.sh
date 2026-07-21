@@ -69,21 +69,6 @@ _aba_resolve_pkg() {
   printf '%s' "$pkg"
 }
 
-_aba_cmdline_matches_pkg() {
-  local file="$1" pkg="$2" first=""
-
-  [ -f "$file" ] || return 1
-  # Magisk runs module scripts under BusyBox ash. Its read -d support lets the
-  # fallback consume the first NUL-delimited cmdline token without spawning
-  # tr/head for every PID.
-  # shellcheck disable=SC3045 # Magisk executes this under BusyBox ash, which supports read -d.
-  IFS= read -r -d '' first < "$file" 2>/dev/null || [ -n "$first" ] || return 1
-  case "$first" in
-    "$pkg"|"${pkg}:"*) return 0 ;;
-  esac
-  return 1
-}
-
 _aba_process_present_raw() {
   local pkg="$1" esc f
   [ -n "$pkg" ] || return 1
@@ -104,7 +89,7 @@ _aba_process_present_raw() {
   # Last-resort fallback for restricted/minimal environments with neither pidof
   # nor ps. No external process is spawned per PID.
   for f in /proc/[0-9]*/cmdline; do
-    _aba_cmdline_matches_pkg "$f" "$pkg" && return 0
+    _afwall_cmdline_matches_pkg "$f" "$pkg" && return 0
   done
   return 1
 }
@@ -237,21 +222,13 @@ afwall_ipv6_control_state() {
   esac
 }
 
-_aba_base_graph_present() {
-  local snap="$1"
-  [ -n "$snap" ] || return 1
-  printf '%s\n' "$snap" | grep -qE "^-N ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
-  printf '%s\n' "$snap" | grep -qE "^-A OUTPUT .*-j ${AFWALL_CHAIN_MAIN}"'($| )' || return 1
-  return 0
-}
-
 _aba_generation_gate() {
   local snap="$1" now grace deadline
 
   # Probe the process on every poll, even before a graph exists, so the delay
   # epoch approximates AFWall's OnBootReceiver start rather than first graph time.
   _aba_note_process_epoch || true
-  _aba_base_graph_present "$snap" || return 1
+  _afwall_base_graph_structurally_present_from_snapshot "$snap" || return 1
   if [ "$ABA_GEN_PROCESS_FIRST_TS" = "0" ]; then
     debug_log "generation_guard: valid AFWall graph seen before AFWall process epoch; retaining blackout"
     return 1
@@ -311,7 +288,7 @@ rooted_afwall_graph_from_snapshot() {
   local undefined="" out="" idx ord c
 
   [ -n "$snap" ] || return 1
-  _aba_base_graph_present "$snap" || return 1
+  _afwall_base_graph_structurally_present_from_snapshot "$snap" || return 1
 
   defs="$(_snapshot_defined_chains "$snap")"
   _afwall_chain_defined "$AFWALL_CHAIN_MAIN" "$defs" || return 1
